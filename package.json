@@ -1,0 +1,32 @@
+{
+  "name": "specx",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "pnpm --dir apps/desktop dev",
+    "dev:web": "pnpm --dir apps/desktop dev --mode web",
+    "dev:desktop": "node scripts/desktop.mjs dev",
+    "dev:backend": "cargo run -p specx-web",
+    "build": "pnpm --dir apps/desktop build",
+    "build:checked": "pnpm --dir apps/desktop build && cargo check -p specx-web --locked && cargo check --manifest-path src-tauri/Cargo.toml --locked",
+    "build:desktop": "node scripts/desktop.mjs build",
+    "release:check": "node scripts/release.mjs check",
+    "release:prepare": "node scripts/release.mjs prepare",
+    "test:release": "node --test scripts/release.test.mjs",
+    "test": "pnpm --dir apps/desktop test",
+    "test:core": "cargo test --workspace --locked",
+    "test:specx": "pnpm test && pnpm test:core && cargo test --manifest-path src-tauri/Cargo.toml --locked",
+    "docker:build": "docker build -f deploy/Dockerfile -t specx:local .",
+    "docker:up": "docker compose -f deploy/docker-compose.yml up --build",
+    "docker:down": "docker compose -f deploy/docker-compose.yml down"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "packageManager": "pnpm@10.34.7",
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4"
+  }
+}

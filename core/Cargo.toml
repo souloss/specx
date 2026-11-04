@@ -1,0 +1,43 @@
+[package]
+name = "specx-core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Service-centered domain core for specX"
+
+[features]
+default = ["postgres"]
+postgres = [
+    "dep:deadpool-postgres",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:tokio",
+    "tokio/time",
+    "dep:tokio-postgres",
+    "dep:tokio-postgres-rustls",
+    "dep:webpki-roots",
+]
+
+[lib]
+name = "specx_core"
+path = "src/lib.rs"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+aes-gcm = "0.10"
+base64 = "0.22"
+rusqlite = { version = "0.32", features = ["backup", "bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
+specx-formats = { path = "../crates/specx-formats" }
+specx-types = { path = "../crates/specx-types" }
+deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"], optional = true }
+rustls = { version = "0.23", features = ["aws-lc-rs"], optional = true }
+rustls-pemfile = { version = "2.2", optional = true }
+tokio = { version = "1", features = ["macros", "rt", "sync"], optional = true }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"], optional = true }
+tokio-postgres-rustls = { version = "0.13", optional = true }
+webpki-roots = { version = "0.26", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

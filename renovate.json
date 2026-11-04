@@ -1,0 +1,15 @@
+{
+  "extends": ["config:recommended"],
+  "packageRules": [
+    {
+      "matchManagers": ["npm"],
+      "matchFileNames": ["apps/desktop/package.json"],
+      "groupName": "specx frontend dependencies"
+    },
+    {
+      "matchManagers": ["cargo"],
+      "matchFileNames": ["Cargo.toml", "core/Cargo.toml", "crates/*/Cargo.toml"],
+      "groupName": "specx rust dependencies"
+    }
+  ]
+}

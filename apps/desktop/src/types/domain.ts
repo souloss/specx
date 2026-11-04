@@ -1,0 +1,38 @@
+export type Group = { id: string; name: string; parentId: string | null; position?: number };
+export type Tag = { id: string; name: string; color: string };
+export type Specification = {
+  id: string;
+  serviceId: string;
+  title: string;
+  kind: "markdown";
+  content: string;
+  updatedAt: string;
+};
+export type Service = {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  groupId: string;
+  tagIds: string[];
+  updatedAt: string;
+  createdAt: string;
+  etag?: string;
+  archived?: boolean;
+};
+export type Workspace = { id: string; name: string; tenantName: string };
+export type Catalog = {
+  workspace: Workspace;
+  groups: Group[];
+  tags: Tag[];
+  services: Service[];
+  specifications: Specification[];
+};
+
+export type PanelTab = {
+  id: string;
+  kind: "overview" | "specification";
+  serviceId: string;
+  specificationId?: string;
+  title: string;
+};

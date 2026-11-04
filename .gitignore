@@ -1,0 +1,51 @@
+# Local reference repositories (each keeps its own Git history).
+/refs/
+
+# Local configuration and tool state.
+.env*
+!.env.example
+.local/
+.key
+*.key
+*.password
+.claude/
+.codex/
+.codegraph/
+.cortexkit/
+.workbuddy/
+.superpowers/
+.trellis/
+.worktrees/
+.zcode/
+.mcp.json
+
+# Dependencies and build output.
+**/target/
+core/Cargo.lock
+**/node_modules/
+**/dist/
+**/coverage/
+**/.vite/
+**/.vitest-cache/
+**/test-results/
+**/playwright-report/
+/src-tauri/gen/schemas/
+.pnpm-store/
+*.log
+__pycache__/
+*.pyc
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local application data and generated artifacts.
+/data/
+/backups/
+outputs/
+portable/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db

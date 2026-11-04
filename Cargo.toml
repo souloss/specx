@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "crates/specx-types",
+    "crates/specx-platform",
+    "crates/specx-formats",
+    "crates/specx-api",
+    "crates/specx-web",
+]
+
+[profile.dev.package."*"]
+# Dependencies are never breakpoint-inspected in dev; line tables keep
+# backtraces resolvable while shrinking dev/test build time and artifacts.
+debug = "line-tables-only"
+
+[profile.release]
+panic = "abort"
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"

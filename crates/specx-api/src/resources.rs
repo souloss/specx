@@ -1,0 +1,2442 @@
+use super::*;
+
+pub fn router<S>(state: ApiState) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .route("/openapi.json", get(openapi_json))
+        .route("/metrics", get(metrics))
+        .route("/access", get(get_access))
+        .route("/catalog", get(get_catalog))
+        .route("/workspaces", get(list_workspaces).post(create_workspace))
+        .route("/workspaces/{workspace_id}", put(update_workspace).delete(delete_workspace))
+        .route("/members", get(list_members))
+        .route("/members/{member_actor_id}", put(set_member_role).delete(revoke_member))
+        .route("/invitations", get(list_invitations).post(create_invitation))
+        .route("/invitations/{invitation_id}", delete(revoke_invitation))
+        .route("/invitations/accept", post(accept_invitation))
+        .route("/groups", get(list_groups).post(create_group))
+        .route("/groups/order", put(reorder_groups))
+        .route("/groups/{group_id}", put(update_group).delete(delete_group))
+        .route("/tags", get(list_tags).post(create_tag))
+        .route("/tags/{tag_id}", put(update_tag).delete(delete_tag))
+        .route("/services", get(list_services).post(create_service))
+        .route("/services/{service_id}", put(update_service).patch(set_service_archived).delete(delete_service))
+        .route("/specifications", get(list_specifications).post(create_specification))
+        .route("/specifications/{specification_id}/revisions", get(list_specification_revisions))
+        .route("/specifications/{specification_id}/revisions/{version}", get(get_specification_revision))
+        .route("/specifications/{specification_id}/revisions/{version}/restore", post(restore_specification_revision))
+        .route("/specifications/{specification_id}", put(update_specification).delete(delete_specification))
+        .route("/backups", get(list_backups).post(create_backup))
+        .route("/backups/{file_name}/restore", post(restore_backup))
+        .fallback(|| async { ErrorKind::NotFound })
+        .layer(middleware::from_fn_with_state(state.clone(), authorize_request))
+        .layer(middleware::from_fn(errors::normalize_error_response))
+        .with_state(state)
+}
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct HealthResponse {
+    status: &'static str,
+    checked_at: String,
+}
+
+#[utoipa::path(get, path = "/health", responses((status = 200, description = "API health", body = HealthResponse)), tag = "system")]
+async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse { status: "ok", checked_at: Utc::now().to_rfc3339() })
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceAccessResponse {
+    tenant_id: Id,
+    workspace_id: Id,
+    actor_id: Id,
+    role: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/access",
+    responses(
+        (status = 200, description = "Current actor access to the selected workspace", body = WorkspaceAccessResponse),
+        (status = 403, description = "Actor is not an active workspace member", body = ErrorResponse)
+    ),
+    tag = "members"
+)]
+async fn get_access(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<WorkspaceAccessResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let inner = state.inner.lock().await;
+    let role = inner.store.workspace_member_role(&context, &context.actor_id)?.ok_or(ApiError::Forbidden)?;
+    Ok(Json(WorkspaceAccessResponse {
+        tenant_id: context.tenant_id,
+        workspace_id: context.workspace_id,
+        actor_id: context.actor_id,
+        role,
+    }))
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateWorkspaceRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateWorkspaceRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceResponse {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub name: String,
+    pub slug: String,
+    pub role: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceListResponse {
+    pub items: Vec<WorkspaceResponse>,
+}
+
+impl From<WorkspaceMembership> for WorkspaceResponse {
+    fn from(membership: WorkspaceMembership) -> Self {
+        Self {
+            id: membership.workspace.id,
+            tenant_id: membership.workspace.tenant_id,
+            name: membership.workspace.name,
+            slug: membership.workspace.slug,
+            created_at: membership.workspace.created_at,
+            role: membership.role,
+        }
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/workspaces",
+    responses(
+        (status = 200, description = "Workspaces accessible to the authenticated actor", body = WorkspaceListResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "workspaces"
+)]
+async fn list_workspaces(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<WorkspaceListResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let inner = state.inner.lock().await;
+    let items =
+        inner.store.workspaces_for_actor(&context.tenant_id, &context.actor_id)?.into_iter().map(Into::into).collect();
+    Ok(Json(WorkspaceListResponse { items }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/workspaces",
+    request_body = CreateWorkspaceRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 200, description = "Workspace created with the actor as owner", body = WorkspaceResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Workspace creation requires owner or admin role", body = ErrorResponse),
+        (status = 422, description = "Invalid workspace name", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "workspaces"
+)]
+async fn create_workspace(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateWorkspaceRequest>,
+) -> Result<Json<WorkspaceResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let name = input.name.trim();
+    if name.is_empty() || name.len() > 80 || name.chars().any(char::is_control) {
+        return Err(ApiError::InvalidInput);
+    }
+    let inner = state.inner.lock().await;
+    let role = inner.store.workspace_member_role(&context, &context.actor_id)?.ok_or(ApiError::Forbidden)?;
+    if !can_manage_members(&role) {
+        return Err(ApiError::Forbidden);
+    }
+    let request_id = headers.get("x-request-id").and_then(|value| value.to_str().ok()).unwrap_or("request");
+    let digest =
+        format!("{:x}", Sha256::digest(format!("{}\0{}\0{}", context.tenant_id, context.actor_id, request_id)));
+    let id = format!("workspace-{digest}");
+    let slug = workspace_slug(name, &digest);
+    let created_at = Utc::now().to_rfc3339();
+    let workspace = Workspace {
+        id: id.clone(),
+        tenant_id: context.tenant_id.clone(),
+        name: name.to_owned(),
+        slug,
+        created_at: created_at.clone(),
+    };
+    let mut audit = audit_event(&context, &headers, "create", "workspace", &id);
+    audit.workspace_id = id.clone();
+    if !inner.store.create_workspace(&context, &workspace, &audit)? {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(Json(WorkspaceResponse {
+        id: workspace.id,
+        tenant_id: workspace.tenant_id,
+        name: workspace.name,
+        slug: workspace.slug,
+        role: "owner".into(),
+        created_at: workspace.created_at,
+    }))
+}
+
+#[utoipa::path(
+    put,
+    path = "/workspaces/{workspace_id}",
+    params(("workspace_id" = String, Path, description = "Workspace identifier")),
+    request_body = UpdateWorkspaceRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 200, description = "Workspace updated", body = WorkspaceResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 403, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 422, body = ErrorResponse)
+    ),
+    tag = "workspaces"
+)]
+async fn update_workspace(
+    State(state): State<ApiState>,
+    Path(workspace_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateWorkspaceRequest>,
+) -> Result<Json<WorkspaceResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let name = input.name.trim();
+    if name.is_empty() || name.len() > 80 || name.chars().any(char::is_control) {
+        return Err(ApiError::InvalidInput);
+    }
+    let inner = state.inner.lock().await;
+    let membership = inner
+        .store
+        .workspaces_for_actor(&context.tenant_id, &context.actor_id)?
+        .into_iter()
+        .find(|membership| membership.workspace.id == workspace_id)
+        .ok_or(ApiError::Forbidden)?;
+    let audit = audit_event(&context, &headers, "update", "workspace", &workspace_id);
+    if !inner.store.update_workspace(&context, &workspace_id, name, &audit)? {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(Json(WorkspaceResponse {
+        id: membership.workspace.id,
+        tenant_id: membership.workspace.tenant_id,
+        name: name.to_owned(),
+        slug: membership.workspace.slug,
+        role: membership.role,
+        created_at: membership.workspace.created_at,
+    }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/workspaces/{workspace_id}",
+    params(("workspace_id" = String, Path, description = "Workspace identifier")),
+    responses(
+        (status = 400, description = "Malformed path or request", body = ErrorResponse),
+        (status = 204, description = "Workspace and its scoped facts deleted"),
+        (status = 401, body = ErrorResponse),
+        (status = 403, body = ErrorResponse),
+        (status = 404, body = ErrorResponse)
+    ),
+    tag = "workspaces"
+)]
+async fn delete_workspace(
+    State(state): State<ApiState>,
+    Path(workspace_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let audit = audit_event(&context, &headers, "delete", "workspace", &workspace_id);
+    if !inner.store.delete_workspace(&context, &workspace_id, &audit)? {
+        return Err(ApiError::Forbidden);
+    }
+    inner.seed_core = None;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn workspace_slug(name: &str, digest: &str) -> String {
+    let mut base = String::new();
+    for character in name.to_ascii_lowercase().chars() {
+        if character.is_ascii_alphanumeric() {
+            base.push(character);
+        } else if !base.is_empty() && !base.ends_with('-') {
+            base.push('-');
+        }
+    }
+    let base = base.trim_matches('-');
+    let base = if base.is_empty() { "workspace" } else { base };
+    format!("{base}-{}", &digest[..8])
+}
+
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    responses((status = 200, description = "Prometheus metrics")),
+    tag = "system"
+)]
+async fn metrics(State(state): State<ApiState>) -> Response {
+    let ready = state.inner.lock().await.store.ready().is_ok_and(|is_ready| is_ready);
+    state.metrics.ready.store(u64::from(ready), Ordering::Relaxed);
+    let body = format!(
+        "# TYPE specx_api_requests_total counter\nspecx_api_requests_total {}\n# TYPE specx_backup_created_total counter\nspecx_backup_created_total {}\n# TYPE specx_backup_creation_failures_total counter\nspecx_backup_creation_failures_total {}\n# TYPE specx_backup_restored_total counter\nspecx_backup_restored_total {}\n# TYPE specx_backup_restore_failures_total counter\nspecx_backup_restore_failures_total {}\n# TYPE specx_invitations_expired_total counter\nspecx_invitations_expired_total {}\n# TYPE specx_invitation_cleanup_failures_total counter\nspecx_invitation_cleanup_failures_total {}\n# TYPE specx_api_ready gauge\nspecx_api_ready {}\n",
+        state.metrics.requests_total.load(Ordering::Relaxed),
+        state.metrics.backups_created_total.load(Ordering::Relaxed),
+        state.metrics.backup_creation_failures_total.load(Ordering::Relaxed),
+        state.metrics.backups_restored_total.load(Ordering::Relaxed),
+        state.metrics.backup_restore_failures_total.load(Ordering::Relaxed),
+        state.metrics.invitations_expired_total.load(Ordering::Relaxed),
+        state.metrics.invitation_cleanup_failures_total.load(Ordering::Relaxed),
+        state.metrics.ready.load(Ordering::Relaxed),
+    );
+    ([(CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ReadyResponse {
+    status: &'static str,
+    schema_version: i64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/ready",
+    responses(
+        (status = 200, description = "Storage migrations are ready", body = ReadyResponse),
+        (status = 503, description = "Storage is not ready", body = ErrorResponse)
+    ),
+    tag = "system"
+)]
+async fn ready(State(state): State<ApiState>) -> Result<Json<ReadyResponse>, ApiError> {
+    let inner = state.inner.lock().await;
+    if !inner.store.ready()? {
+        state.metrics.ready.store(0, Ordering::Relaxed);
+        return Err(ApiError::NotReady);
+    }
+    state.metrics.ready.store(1, Ordering::Relaxed);
+    Ok(Json(ReadyResponse { status: "ready", schema_version: inner.store.schema_version() }))
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct BackupResponse {
+    file_name: String,
+    bytes: u64,
+    sha256: Option<String>,
+}
+
+pub(super) fn backup_file_name(path: &FsPath) -> Option<String> {
+    path.file_name().and_then(|name| name.to_str()).map(ToOwned::to_owned)
+}
+
+pub(super) fn backup_prefix(context: &WorkspaceContext) -> String {
+    let digest = Sha256::digest(format!("{}\0{}", context.tenant_id, context.workspace_id).as_bytes());
+    let suffix = digest[..8].iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    format!("specx-{suffix}")
+}
+
+fn safe_backup_path(root: &FsPath, prefix: &str, file_name: &str, extension: &str) -> Result<PathBuf, ApiError> {
+    if !valid_backup_file_name(file_name, prefix, extension) {
+        return Err(ApiError::InvalidQuery);
+    }
+    Ok(root.join(file_name))
+}
+
+fn valid_backup_file_name(file_name: &str, prefix: &str, extension: &str) -> bool {
+    !file_name.is_empty()
+        && file_name.len() <= 160
+        && file_name.starts_with(prefix)
+        && file_name.ends_with(extension)
+        && file_name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+fn backup_extension(state: &ApiState) -> &'static str {
+    if state.uses_postgres() { ".dump" } else { ".sqlite" }
+}
+
+async fn require_backup_manager(state: &ApiState, headers: &HeaderMap) -> Result<WorkspaceContext, ApiError> {
+    let context = request_context(headers)?;
+    if state.uses_postgres() && (context.tenant_id != "specx-web" || context.workspace_id != "default") {
+        return Err(ApiError::Forbidden);
+    }
+    let inner = state.inner.lock().await;
+    let role = inner.store.workspace_member_role(&context, &context.actor_id)?.ok_or(ApiError::Forbidden)?;
+    if !can_manage_members(&role) {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(context)
+}
+
+#[utoipa::path(
+    get,
+    path = "/backups",
+    responses((status = 200, description = "Available specX storage snapshots", body = [BackupResponse]), (status = 403, body = ErrorResponse)),
+    tag = "backups"
+)]
+async fn list_backups(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<BackupResponse>>, ApiError> {
+    let context = require_backup_manager(&state, &headers).await?;
+    let prefix = backup_prefix(&context);
+    let extension = backup_extension(&state);
+    if state.backup_storage.is_some() {
+        let backups = state
+            .list_shared_backups(prefix, extension)
+            .await?
+            .into_iter()
+            .map(|backup| BackupResponse { file_name: backup.file_name, bytes: backup.bytes, sha256: None })
+            .collect();
+        return Ok(Json(backups));
+    }
+    let root = state.backup_root.as_ref();
+    let mut backups = Vec::new();
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Json(backups)),
+        Err(error) => return Err(ApiError::Persistence(PersistenceError::from(error))),
+    };
+    for entry in entries {
+        let path = entry.map_err(PersistenceError::from)?.path();
+        let Some(file_name) = backup_file_name(&path) else { continue };
+        if !file_name.starts_with(&prefix) || !file_name.ends_with(extension) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path).map_err(PersistenceError::from)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        backups.push(BackupResponse { file_name, bytes: metadata.len(), sha256: None });
+    }
+    backups.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+    Ok(Json(backups))
+}
+
+#[utoipa::path(
+    post,
+    path = "/backups",
+    responses((status = 200, description = "Snapshot created", body = BackupResponse), (status = 403, body = ErrorResponse), (status = 500, body = ErrorResponse)),
+    tag = "backups"
+)]
+async fn create_backup(State(state): State<ApiState>, headers: HeaderMap) -> Result<Json<BackupResponse>, ApiError> {
+    let context = require_backup_manager(&state, &headers).await?;
+    let artifact = state.create_workspace_backup_snapshot(&context, state.backup_retention).await?;
+    state.metrics.backups_created_total.fetch_add(1, Ordering::Relaxed);
+    Ok(Json(BackupResponse {
+        file_name: backup_file_name(&artifact.path).ok_or(ApiError::Persistence(PersistenceError::from(
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "backup file name is invalid"),
+        )))?,
+        bytes: artifact.bytes,
+        sha256: Some(artifact.sha256),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/backups/{file_name}/restore",
+    params(("file_name" = String, Path, description = "Server-generated SQLite snapshot name")),
+    responses(
+        (status = 400, description = "Malformed path or request", body = ErrorResponse),(status = 200, description = "Snapshot restored"), (status = 403, body = ErrorResponse), (status = 404, body = ErrorResponse)),
+    tag = "backups"
+)]
+async fn restore_backup(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(file_name): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let context = require_backup_manager(&state, &headers).await?;
+    let prefix = backup_prefix(&context);
+    let extension = backup_extension(&state);
+    let (source, remove_source) = if state.backup_storage.is_some() {
+        if !valid_backup_file_name(&file_name, &prefix, extension) {
+            return Err(ApiError::InvalidQuery);
+        }
+        std::fs::create_dir_all(state.backup_root.as_ref()).map_err(PersistenceError::from)?;
+        let source = state.backup_root.join(format!(".restore-{}{}", uuid::Uuid::new_v4(), extension));
+        if let Err(error) = state.restore_shared_backup(prefix.clone(), file_name.clone(), source.clone()).await {
+            state.metrics.backup_restore_failures_total.fetch_add(1, Ordering::Relaxed);
+            return Err(ApiError::Persistence(error));
+        }
+        (source, true)
+    } else {
+        let source = safe_backup_path(state.backup_root.as_ref(), &prefix, &file_name, extension)?;
+        let metadata = std::fs::symlink_metadata(&source).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ApiError::NotFound
+            } else {
+                ApiError::Persistence(PersistenceError::from(error))
+            }
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(ApiError::NotFound);
+        }
+        (source, false)
+    };
+    let mut inner = state.inner.lock().await;
+    let restore_result = inner.store.restore_workspace_from_path(&context, &source);
+    drop(inner);
+    if remove_source {
+        let _ = std::fs::remove_file(&source);
+    }
+    if let Err(error) = restore_result {
+        state.metrics.backup_restore_failures_total.fetch_add(1, Ordering::Relaxed);
+        return Err(ApiError::Persistence(error));
+    }
+    state.metrics.backups_restored_total.fetch_add(1, Ordering::Relaxed);
+    Ok(Json(serde_json::json!({"restored": true, "fileName": file_name})))
+}
+
+fn audit_event(
+    context: &WorkspaceContext,
+    headers: &HeaderMap,
+    action: &str,
+    resource_type: &str,
+    resource_id: &str,
+) -> AuditEvent {
+    let request_id = headers.get("x-request-id").and_then(|value| value.to_str().ok()).unwrap_or_default();
+    AuditEvent {
+        tenant_id: context.tenant_id.clone(),
+        workspace_id: context.workspace_id.clone(),
+        actor_id: context.actor_id.clone(),
+        request_id: request_id.to_owned(),
+        action: action.to_owned(),
+        resource_type: resource_type.to_owned(),
+        resource_id: resource_id.to_owned(),
+        created_at: Utc::now().to_rfc3339(),
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceGroupResponse {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    pub parent_id: Option<Id>,
+    pub name: String,
+    pub position: i64,
+}
+
+impl From<ServiceGroup> for ServiceGroupResponse {
+    fn from(group: ServiceGroup) -> Self {
+        Self {
+            id: group.id,
+            tenant_id: group.tenant_id,
+            workspace_id: group.workspace_id,
+            parent_id: group.parent_id,
+            name: group.name,
+            position: group.position,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TagResponse {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    pub name: String,
+    pub color: String,
+}
+
+impl From<Tag> for TagResponse {
+    fn from(tag: Tag) -> Self {
+        Self { id: tag.id, tenant_id: tag.tenant_id, workspace_id: tag.workspace_id, name: tag.name, color: tag.color }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceResponse {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    pub group_id: Option<Id>,
+    pub name: String,
+    pub slug: String,
+    pub description: String,
+    pub tag_ids: Vec<Id>,
+    pub updated_at: String,
+    pub archived: bool,
+    pub etag: String,
+}
+
+impl From<Service> for ServiceResponse {
+    fn from(service: Service) -> Self {
+        let mut response = Self {
+            id: service.id,
+            tenant_id: service.tenant_id,
+            workspace_id: service.workspace_id,
+            group_id: service.group_id,
+            name: service.name,
+            slug: service.slug,
+            description: service.description,
+            tag_ids: service.tag_ids,
+            updated_at: service.updated_at,
+            archived: service.archived,
+            etag: String::new(),
+        };
+        response.tag_ids.sort();
+        response.etag = service_etag(&response);
+        response
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecificationKindResponse {
+    Markdown,
+}
+
+impl From<SpecificationKind> for SpecificationKindResponse {
+    fn from(kind: SpecificationKind) -> Self {
+        match kind {
+            SpecificationKind::Markdown => Self::Markdown,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecificationResponse {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    pub service_id: Id,
+    pub title: String,
+    pub kind: SpecificationKindResponse,
+    pub content: String,
+    pub version: i64,
+    pub content_hash: String,
+    pub updated_at: String,
+    pub etag: String,
+}
+
+impl From<Specification> for SpecificationResponse {
+    fn from(specification: Specification) -> Self {
+        let mut response = Self {
+            id: specification.id,
+            tenant_id: specification.tenant_id,
+            workspace_id: specification.workspace_id,
+            service_id: specification.service_id,
+            title: specification.title,
+            kind: specification.kind.into(),
+            content: specification.content,
+            version: specification.version,
+            content_hash: specification.content_hash,
+            updated_at: specification.updated_at,
+            etag: String::new(),
+        };
+        response.etag = specification_etag(&response);
+        response
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogResponse {
+    pub groups: Vec<ServiceGroupResponse>,
+    pub tags: Vec<TagResponse>,
+    pub services: Vec<ServiceResponse>,
+    pub specifications: Vec<SpecificationResponse>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OffsetListQuery {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+fn page_bounds(query: &OffsetListQuery, total: usize) -> Result<(usize, usize, Option<usize>), ApiError> {
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=200).contains(&limit) {
+        return Err(ApiError::InvalidQuery);
+    }
+    let offset = query.offset.unwrap_or(0);
+    let end = offset.saturating_add(limit).min(total);
+    let next_offset = (end < total).then_some(end);
+    Ok((limit, offset, next_offset))
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupPageResponse {
+    pub items: Vec<ServiceGroupResponse>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TagPageResponse {
+    pub items: Vec<TagResponse>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecificationPageResponse {
+    pub items: Vec<SpecificationResponse>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecificationRevisionResponse {
+    pub specification_id: Id,
+    pub version: i64,
+    pub content: String,
+    pub content_hash: String,
+    pub created_by: Id,
+    pub created_at: String,
+}
+
+impl From<SpecificationRevision> for SpecificationRevisionResponse {
+    fn from(revision: SpecificationRevision) -> Self {
+        Self {
+            specification_id: revision.specification_id,
+            version: revision.version,
+            content: revision.content,
+            content_hash: revision.content_hash,
+            created_by: revision.created_by,
+            created_at: revision.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecificationRevisionPageResponse {
+    pub items: Vec<SpecificationRevisionResponse>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/groups",
+    params(OffsetListQuery),
+    responses(
+        (status = 200, description = "Stable paginated workspace groups", body = GroupPageResponse),
+        (status = 400, description = "Invalid pagination", body = ErrorResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Actor is not a workspace member", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn list_groups(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<OffsetListQuery>,
+) -> Result<Json<GroupPageResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut groups: Vec<_> = load_core(&mut inner, &context)?.list_groups(&context).into_iter().cloned().collect();
+    groups.sort_by(|left, right| {
+        left.parent_id
+            .cmp(&right.parent_id)
+            .then(left.position.cmp(&right.position))
+            .then(left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then(left.id.cmp(&right.id))
+    });
+    let total = groups.len();
+    let (limit, offset, next_offset) = page_bounds(&query, total)?;
+    let items = groups.into_iter().skip(offset).take(limit).map(Into::into).collect();
+    Ok(Json(GroupPageResponse { items, total, limit, offset, next_offset }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/tags",
+    params(OffsetListQuery),
+    responses(
+        (status = 200, description = "Stable paginated workspace tags", body = TagPageResponse),
+        (status = 400, description = "Invalid pagination", body = ErrorResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Actor is not a workspace member", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn list_tags(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<OffsetListQuery>,
+) -> Result<Json<TagPageResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut tags: Vec<_> = load_core(&mut inner, &context)?.list_tags(&context).into_iter().cloned().collect();
+    tags.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()).then(left.id.cmp(&right.id)));
+    let total = tags.len();
+    let (limit, offset, next_offset) = page_bounds(&query, total)?;
+    let items = tags.into_iter().skip(offset).take(limit).map(Into::into).collect();
+    Ok(Json(TagPageResponse { items, total, limit, offset, next_offset }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/specifications",
+    params(OffsetListQuery),
+    responses(
+        (status = 200, description = "Stable paginated workspace specifications", body = SpecificationPageResponse),
+        (status = 400, description = "Invalid pagination", body = ErrorResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Actor is not a workspace member", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn list_specifications(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<OffsetListQuery>,
+) -> Result<Json<SpecificationPageResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut specifications: Vec<_> =
+        load_core(&mut inner, &context)?.list_specifications(&context).into_iter().cloned().collect();
+    specifications.sort_by(|left, right| right.updated_at.cmp(&left.updated_at).then(left.id.cmp(&right.id)));
+    let total = specifications.len();
+    let (limit, offset, next_offset) = page_bounds(&query, total)?;
+    let items = specifications.into_iter().skip(offset).take(limit).map(Into::into).collect();
+    Ok(Json(SpecificationPageResponse { items, total, limit, offset, next_offset }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/specifications/{specification_id}/revisions",
+    params(
+        ("specification_id" = String, Path, description = "Stable specification identifier"),
+        OffsetListQuery
+    ),
+    responses(
+        (status = 200, description = "Immutable revisions, newest first", body = SpecificationRevisionPageResponse),
+        (status = 400, description = "Invalid pagination", body = ErrorResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Specification is outside the authorized scope", body = ErrorResponse),
+        (status = 404, description = "Specification does not exist", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn list_specification_revisions(
+    State(state): State<ApiState>,
+    Path(specification_id): Path<Id>,
+    headers: HeaderMap,
+    Query(query): Query<OffsetListQuery>,
+) -> Result<Json<SpecificationRevisionPageResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    if !load_core(&mut inner, &context)?
+        .list_specifications(&context)
+        .iter()
+        .any(|specification| specification.id == specification_id)
+    {
+        return Err(CoreError::NotFound("specification").into());
+    }
+    let total = inner.store.specification_revision_count(&context, &specification_id)? as usize;
+    let (limit, offset, next_offset) = page_bounds(&query, total)?;
+    let items = inner
+        .store
+        .specification_revisions(&context, &specification_id, limit, offset)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    Ok(Json(SpecificationRevisionPageResponse { items, total, limit, offset, next_offset }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/specifications/{specification_id}/revisions/{version}",
+    params(
+        ("specification_id" = String, Path, description = "Stable specification identifier"),
+        ("version" = i64, Path, description = "Immutable revision number")
+    ),
+    responses(
+        (status = 400, description = "Malformed path or request", body = ErrorResponse),
+        (status = 200, description = "Immutable specification revision", body = SpecificationRevisionResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Specification is outside the authorized scope", body = ErrorResponse),
+        (status = 404, description = "Revision does not exist", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn get_specification_revision(
+    State(state): State<ApiState>,
+    Path((specification_id, version)): Path<(Id, i64)>,
+    headers: HeaderMap,
+) -> Result<Json<SpecificationRevisionResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let inner = state.inner.lock().await;
+    inner
+        .store
+        .specification_revision(&context, &specification_id, version)?
+        .map(Into::into)
+        .map(Json)
+        .ok_or_else(|| CoreError::NotFound("revision").into())
+}
+
+#[utoipa::path(
+    post,
+    path = "/specifications/{specification_id}/revisions/{version}/restore",
+    params(
+        ("specification_id" = String, Path, description = "Stable specification identifier"),
+        ("version" = i64, Path, description = "Immutable revision number to restore"),
+        ("If-Match" = String, Header, description = "Strong ETag from the current specification representation")
+    ),
+    responses(
+        (status = 400, description = "Malformed path or request", body = ErrorResponse),
+        (status = 200, description = "Restored content as a newly appended revision", body = SpecificationResponse,
+            headers(("ETag" = String, description = "New strong validator for subsequent conditional updates"))),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Specification is outside the authorized scope", body = ErrorResponse),
+        (status = 404, description = "Specification or revision does not exist", body = ErrorResponse),
+        (status = 412, description = "If-Match does not match the current specification", body = ErrorResponse),
+        (status = 428, description = "If-Match is required", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn restore_specification_revision(
+    State(state): State<ApiState>,
+    Path((specification_id, version)): Path<(Id, i64)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let expected_etags: Vec<_> = headers.get_all(IF_MATCH).iter().filter_map(|value| value.to_str().ok()).collect();
+    if expected_etags.is_empty() {
+        return Err(ApiError::PreconditionRequired);
+    }
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let existing = core
+        .list_specifications(&context)
+        .into_iter()
+        .find(|specification| specification.id == specification_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("specification"))?;
+    let existing_response = SpecificationResponse::from(existing.clone());
+    let current_etag = specification_etag(&existing_response);
+    if !expected_etags.iter().any(|if_match| if_match_satisfies(if_match, &current_etag)) {
+        return Err(ApiError::PreconditionFailed);
+    }
+    let revision = inner
+        .store
+        .specification_revision(&context, &specification_id, version)?
+        .ok_or(CoreError::NotFound("revision"))?;
+    let updated =
+        core.update_markdown_specification(&context, &specification_id, existing.title.clone(), revision.content)?;
+    let audit = audit_event(&context, &headers, "restore", "specification", &specification_id);
+    if !inner.store.update_specification_if_current_with_audit(&context, &existing, &updated, Some(&audit))? {
+        return Err(ApiError::PreconditionFailed);
+    }
+    inner.seed_core = None;
+    let restored = inner
+        .store
+        .load_core(&context)?
+        .list_specifications(&context)
+        .into_iter()
+        .find(|specification| specification.id == specification_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("specification"))?;
+    let response = SpecificationResponse::from(restored);
+    let etag = specification_etag(&response);
+    Ok(response_with_etag(response, etag))
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicePageResponse {
+    pub items: Vec<ServiceResponse>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+    pub next_cursor: Option<String>,
+    pub query: String,
+    pub tag_ids: Vec<Id>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServiceListQuery {
+    pub q: Option<String>,
+    pub tag_id: Option<Id>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub cursor: Option<String>,
+    pub include_archived: Option<bool>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/catalog",
+    params(
+        ("x-specx-tenant-id" = String, Header, description = "Authenticated tenant context"),
+        ("x-specx-workspace-id" = String, Header, description = "Selected authorized workspace"),
+        ("x-specx-actor-id" = String, Header, description = "Authenticated actor context")
+    ),
+    responses(
+        (status = 200, description = "Workspace catalog", body = CatalogResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Actor is not a workspace member", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn get_catalog(State(state): State<ApiState>, headers: HeaderMap) -> Result<Json<CatalogResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    Ok(Json(CatalogResponse {
+        groups: core.list_groups(&context).into_iter().cloned().map(Into::into).collect(),
+        tags: core.list_tags(&context).into_iter().cloned().map(Into::into).collect(),
+        services: core.list_services(&context).into_iter().cloned().map(Into::into).collect(),
+        specifications: core.list_specifications(&context).into_iter().cloned().map(Into::into).collect(),
+    }))
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceRole {
+    Owner,
+    Admin,
+    Editor,
+    Viewer,
+}
+
+impl WorkspaceRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Admin => "admin",
+            Self::Editor => "editor",
+            Self::Viewer => "viewer",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetMemberRoleRequest {
+    pub role: WorkspaceRole,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMemberResponse {
+    pub actor_id: Id,
+    pub role: String,
+    pub revoked_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMemberPageResponse {
+    pub items: Vec<WorkspaceMemberResponse>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/members",
+    params(OffsetListQuery),
+    responses(
+        (status = 200, description = "Stable paginated workspace members", body = WorkspaceMemberPageResponse),
+        (status = 400, description = "Invalid pagination", body = ErrorResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Member administration requires owner or admin role", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse)
+    ),
+    tag = "members"
+)]
+async fn list_members(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<OffsetListQuery>,
+) -> Result<Json<WorkspaceMemberPageResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let inner = state.inner.lock().await;
+    let role = inner.store.workspace_member_role(&context, &context.actor_id)?.ok_or(ApiError::Forbidden)?;
+    if !can_manage_members(&role) {
+        return Err(ApiError::Forbidden);
+    }
+    let mut members: Vec<_> = inner
+        .store
+        .workspace_members(&context)?
+        .into_iter()
+        .map(|member| WorkspaceMemberResponse {
+            actor_id: member.actor_id,
+            role: member.role,
+            revoked_at: member.revoked_at,
+            created_at: member.created_at,
+        })
+        .collect();
+    members.sort_by(|left, right| left.actor_id.cmp(&right.actor_id));
+    let total = members.len();
+    let (limit, offset, next_offset) = page_bounds(&query, total)?;
+    let items = members.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(WorkspaceMemberPageResponse { items, total, limit, offset, next_offset }))
+}
+
+#[utoipa::path(
+    put,
+    path = "/members/{member_actor_id}",
+    params(("member_actor_id" = String, Path, description = "Authenticated actor identifier to grant access to")),
+    request_body = SetMemberRoleRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 200, description = "Workspace member role updated", body = WorkspaceMemberResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Insufficient role to manage this member", body = ErrorResponse),
+        (status = 409, description = "The last workspace owner cannot be demoted", body = ErrorResponse),
+        (status = 422, description = "Invalid role", body = ErrorResponse)
+    ),
+    tag = "members"
+)]
+async fn set_member_role(
+    State(state): State<ApiState>,
+    Path(member_actor_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<SetMemberRoleRequest>,
+) -> Result<Json<WorkspaceMemberResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let inner = state.inner.lock().await;
+    let actor_role = inner.store.workspace_member_role(&context, &context.actor_id)?.ok_or(ApiError::Forbidden)?;
+    if !can_manage_members(&actor_role) || (input.role == WorkspaceRole::Owner && actor_role != "owner") {
+        return Err(ApiError::Forbidden);
+    }
+    let audit = audit_event(&context, &headers, "grant", "workspace_member", &member_actor_id);
+    if !inner.store.set_workspace_member_role(&context, &member_actor_id, input.role.as_str(), &audit)? {
+        return Err(ApiError::LastOwnerRequired);
+    }
+    let member = inner
+        .store
+        .workspace_members(&context)?
+        .into_iter()
+        .find(|member| member.actor_id == member_actor_id)
+        .ok_or(CoreError::NotFound("workspace_member"))?;
+    Ok(Json(WorkspaceMemberResponse {
+        actor_id: member.actor_id,
+        role: member.role,
+        revoked_at: member.revoked_at,
+        created_at: member.created_at,
+    }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/members/{member_actor_id}",
+    params(("member_actor_id" = String, Path, description = "Workspace member actor identifier")),
+    responses(
+        (status = 400, description = "Malformed path or request", body = ErrorResponse),
+        (status = 204, description = "Workspace member revoked"),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Insufficient role to manage this member", body = ErrorResponse),
+        (status = 404, description = "Workspace member not found", body = ErrorResponse),
+        (status = 409, description = "The last workspace owner cannot be revoked", body = ErrorResponse)
+    ),
+    tag = "members"
+)]
+async fn revoke_member(
+    State(state): State<ApiState>,
+    Path(member_actor_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let inner = state.inner.lock().await;
+    let actor_role = inner.store.workspace_member_role(&context, &context.actor_id)?.ok_or(ApiError::Forbidden)?;
+    if !can_manage_members(&actor_role) {
+        return Err(ApiError::Forbidden);
+    }
+    let member_role = inner
+        .store
+        .workspace_member_role(&context, &member_actor_id)?
+        .ok_or(CoreError::NotFound("workspace_member"))?;
+    if actor_role != "owner" && member_role == "owner" {
+        return Err(ApiError::Forbidden);
+    }
+    let audit = audit_event(&context, &headers, "revoke", "workspace_member", &member_actor_id);
+    if !inner.store.revoke_workspace_member_with_audit(&context, &member_actor_id, &audit)? {
+        return Err(ApiError::LastOwnerRequired);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateInvitationRequest {
+    pub email: String,
+    pub role: WorkspaceRole,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AcceptInvitationRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationResponse {
+    pub id: Id,
+    pub email: String,
+    pub role: String,
+    pub expires_at: String,
+    pub accepted_at: Option<String>,
+    pub revoked_at: Option<String>,
+    pub created_by: Id,
+    pub created_at: String,
+}
+
+impl From<WorkspaceInvitation> for InvitationResponse {
+    fn from(invitation: WorkspaceInvitation) -> Self {
+        Self {
+            id: invitation.id,
+            email: invitation.email,
+            role: invitation.role,
+            expires_at: invitation.expires_at,
+            accepted_at: invitation.accepted_at,
+            revoked_at: invitation.revoked_at,
+            created_by: invitation.created_by,
+            created_at: invitation.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedInvitationResponse {
+    #[serde(flatten)]
+    pub invitation: InvitationResponse,
+    pub token: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptedInvitationResponse {
+    pub workspace_id: Id,
+    pub actor_id: Id,
+    pub role: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/invitations",
+    responses(
+        (status = 200, description = "Workspace invitations; bearer tokens are never listed", body = [InvitationResponse]),
+        (status = 403, description = "Invitation administration requires owner or admin role", body = ErrorResponse)
+    ),
+    tag = "members"
+)]
+async fn list_invitations(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<InvitationResponse>>, ApiError> {
+    let context = request_context(&headers)?;
+    let inner = state.inner.lock().await;
+    let role = inner.store.workspace_member_role(&context, &context.actor_id)?.ok_or(ApiError::Forbidden)?;
+    if !can_manage_members(&role) {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(Json(inner.store.workspace_invitations(&context)?.into_iter().map(Into::into).collect()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/invitations",
+    request_body = CreateInvitationRequest,
+    responses(
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 201, description = "Invitation created; token is returned once for delivery", body = CreatedInvitationResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 403, description = "Invitation administration requires owner or admin role", body = ErrorResponse),
+        (status = 422, body = ErrorResponse)
+    ),
+    tag = "members"
+)]
+async fn create_invitation(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateInvitationRequest>,
+) -> Result<(StatusCode, Json<CreatedInvitationResponse>), ApiError> {
+    let context = request_context(&headers)?;
+    let email = input.email.trim().to_ascii_lowercase();
+    if email.len() > 254
+        || email.chars().any(char::is_whitespace)
+        || email.matches('@').count() != 1
+        || email.split_once('@').is_none_or(|(local, domain)| local.is_empty() || !domain.contains('.'))
+    {
+        return Err(ApiError::InvalidInput);
+    }
+    let actor_role = {
+        let inner = state.inner.lock().await;
+        inner.store.workspace_member_role(&context, &context.actor_id)?.ok_or(ApiError::Forbidden)?
+    };
+    if !can_manage_members(&actor_role) || (input.role == WorkspaceRole::Owner && actor_role != "owner") {
+        return Err(ApiError::Forbidden);
+    }
+    let now = Utc::now();
+    let invitation = WorkspaceInvitation {
+        id: uuid::Uuid::new_v4().to_string(),
+        tenant_id: context.tenant_id.clone(),
+        workspace_id: context.workspace_id.clone(),
+        email,
+        role: input.role.as_str().to_owned(),
+        token_hash: String::new(),
+        expires_at: (now + chrono::Duration::days(7)).to_rfc3339(),
+        accepted_at: None,
+        created_by: context.actor_id.clone(),
+        created_at: now.to_rfc3339(),
+        revoked_at: None,
+    };
+    let token = format!("{}.{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+    let token_hash = format!("sha256:{:x}", Sha256::digest(token.as_bytes()));
+    let invitation = WorkspaceInvitation { token_hash, ..invitation };
+    let audit = audit_event(&context, &headers, "invite", "workspace_invitation", &invitation.id);
+    let inner = state.inner.lock().await;
+    if !inner.store.create_workspace_invitation(&context, &invitation, &audit)? {
+        return Err(ApiError::Forbidden);
+    }
+    let response = CreatedInvitationResponse { invitation: invitation.into(), token };
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/invitations/{invitation_id}",
+    params(("invitation_id" = String, Path, description = "Invitation identifier")),
+    responses(
+        (status = 400, description = "Malformed path or request", body = ErrorResponse),
+        (status = 204, description = "Invitation revoked"),
+        (status = 401, body = ErrorResponse),
+        (status = 403, description = "Invitation administration requires owner or admin role", body = ErrorResponse),
+        (status = 404, description = "Invitation is missing, already accepted, or already revoked", body = ErrorResponse)
+    ),
+    tag = "members"
+)]
+async fn revoke_invitation(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(invitation_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    if invitation_id.trim().is_empty() || invitation_id.len() > 128 {
+        return Err(ApiError::NotFound);
+    }
+    let now = Utc::now().to_rfc3339();
+    let audit = audit_event(&context, &headers, "revoke", "workspace_invitation", &invitation_id);
+    let inner = state.inner.lock().await;
+    let role = inner.store.workspace_member_role(&context, &context.actor_id)?.ok_or(ApiError::Forbidden)?;
+    if !can_manage_members(&role) {
+        return Err(ApiError::Forbidden);
+    }
+    if !inner.store.revoke_workspace_invitation(&context, &invitation_id, &now, &audit)? {
+        return Err(ApiError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    post,
+    path = "/invitations/accept",
+    request_body = AcceptInvitationRequest,
+    responses(
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 422, description = "Invalid request data", body = ErrorResponse),
+        (status = 200, description = "Invitation accepted and workspace membership created", body = AcceptedInvitationResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 404, description = "Invitation is invalid, expired, or already accepted", body = ErrorResponse)
+    ),
+    tag = "members"
+)]
+async fn accept_invitation(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<AcceptInvitationRequest>,
+) -> Result<Json<AcceptedInvitationResponse>, ApiError> {
+    if input.token.len() > 256 || input.token.is_empty() {
+        return Err(ApiError::InvalidInput);
+    }
+    let actor = invitation_actor_context(&headers)?;
+    let token_hash = format!("sha256:{:x}", Sha256::digest(input.token.as_bytes()));
+    let inner = state.inner.lock().await;
+    let invitation = inner.store.find_workspace_invitation(&actor.tenant_id, &token_hash)?.ok_or(ApiError::NotFound)?;
+    let context = WorkspaceContext {
+        tenant_id: actor.tenant_id,
+        workspace_id: invitation.workspace_id.clone(),
+        actor_id: actor.actor_id,
+    };
+    let now = Utc::now().to_rfc3339();
+    let audit = audit_event(&context, &headers, "accept_invitation", "workspace_invitation", &invitation.id);
+    let member =
+        inner.store.accept_workspace_invitation(&context, &token_hash, &now, &audit)?.ok_or(ApiError::NotFound)?;
+    Ok(Json(AcceptedInvitationResponse {
+        workspace_id: context.workspace_id,
+        actor_id: member.actor_id,
+        role: member.role,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/services",
+    params(ServiceListQuery),
+    responses(
+        (status = 200, description = "Filtered and paginated workspace services", body = ServicePageResponse),
+        (status = 400, description = "Invalid pagination or filter", body = ErrorResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Actor is not a workspace member", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn list_services(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<ServiceListQuery>,
+) -> Result<Json<ServicePageResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let search = query.q.unwrap_or_default().trim().to_lowercase();
+    let tag_ids: Vec<_> = query.tag_id.into_iter().collect();
+    let include_archived = query.include_archived.unwrap_or(false);
+    let limit = query.limit.unwrap_or(50);
+    if search.len() > 256
+        || tag_ids.iter().any(|tag_id| tag_id.len() > 128)
+        || !(1..=200).contains(&limit)
+        || (query.cursor.is_some() && query.offset.is_some())
+    {
+        return Err(ApiError::InvalidQuery);
+    }
+    let offset = match query.cursor.as_deref() {
+        Some(cursor) => {
+            decode_service_cursor(cursor, &search, &tag_ids, include_archived).ok_or(ApiError::InvalidQuery)?
+        }
+        None => query.offset.unwrap_or(0),
+    };
+
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    let mut services: Vec<_> = core
+        .list_services(&context)
+        .into_iter()
+        .filter(|service| {
+            (include_archived || !service.archived)
+                && (search.is_empty()
+                    || service.name.to_lowercase().contains(&search)
+                    || service.slug.to_lowercase().contains(&search)
+                    || service.description.to_lowercase().contains(&search))
+                && tag_ids.iter().all(|tag_id| service.tag_ids.contains(tag_id))
+        })
+        .cloned()
+        .collect();
+    services.sort_by(|left, right| left.slug.cmp(&right.slug).then_with(|| left.id.cmp(&right.id)));
+    let total = services.len();
+    let page_end = offset.saturating_add(limit).min(total);
+    let items = if offset >= total { Vec::new() } else { services[offset..page_end].to_vec() };
+    let next_offset = (page_end < total).then_some(page_end);
+    let next_cursor = next_offset.map(|next| encode_service_cursor(&search, &tag_ids, include_archived, next));
+
+    Ok(Json(ServicePageResponse {
+        items: items.into_iter().map(Into::into).collect(),
+        total,
+        limit,
+        offset,
+        next_offset,
+        next_cursor,
+        query: search,
+        tag_ids,
+    }))
+}
+
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateGroupRequest {
+    pub id: Id,
+    pub name: String,
+    #[serde(default)]
+    #[schema(required = false)]
+    pub parent_id: Option<Id>,
+    #[serde(default)]
+    #[schema(required = false)]
+    pub position: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateGroupRequest {
+    pub name: String,
+    #[serde(default)]
+    pub parent_id: Option<Id>,
+    #[serde(default)]
+    #[schema(required = false)]
+    pub position: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupOrderItem {
+    pub id: Id,
+    pub parent_id: Option<Id>,
+    pub position: i64,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReorderGroupsRequest {
+    pub items: Vec<GroupOrderItem>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/groups",
+    params(("Idempotency-Key" = Option<String>, Header, description = "Client supplied key for safe retries")),
+    request_body = CreateGroupRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 200, description = "Group created", body = ServiceGroupResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Parent group is outside the authorized scope", body = ErrorResponse),
+        (status = 409, description = "Idempotency key was already used with a different request", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 422, description = "Invalid group", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn create_group(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateGroupRequest>,
+) -> Result<Json<ServiceGroup>, ApiError> {
+    let context = request_context(&headers)?;
+    let descriptor = idempotency_descriptor(&headers, &context, "groups", &input)?;
+    let mut inner = state.inner.lock().await;
+    if let Some(record) = check_idempotency(&inner.store, descriptor.as_ref())? {
+        if record.resource_type != "service_group" {
+            return Err(ApiError::IdempotencyConflict);
+        }
+        let core = load_core(&mut inner, &context)?;
+        let group = core
+            .list_groups(&context)
+            .into_iter()
+            .find(|group| group.id == record.resource_id)
+            .cloned()
+            .ok_or(ApiError::IdempotencyConflict)?;
+        return Ok(Json(group));
+    }
+    let mut core = load_core(&mut inner, &context)?;
+    let group = match input.position {
+        Some(position) => core.create_group_with_position(&context, input.id, input.name, input.parent_id, position)?,
+        None => core.create_group(&context, input.id, input.name, input.parent_id)?,
+    };
+    let resource_id = group.id.clone();
+    let audit = audit_event(&context, &headers, "create", "service_group", &resource_id);
+    inner.store.persist_core_with_audit_and_idempotency(
+        &core,
+        &context,
+        Some(&audit),
+        durable_idempotency(descriptor.as_ref(), &context, "service_group", &resource_id),
+    )?;
+    inner.seed_core = None;
+    Ok(Json(group.into()))
+}
+
+#[utoipa::path(
+    put,
+    path = "/groups/{group_id}",
+    params(("group_id" = String, Path, description = "Stable group identifier")),
+    request_body = UpdateGroupRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 200, description = "Group updated or moved", body = ServiceGroupResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 403, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 409, body = ErrorResponse),
+        (status = 422, body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn update_group(
+    State(state): State<ApiState>,
+    Path(group_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateGroupRequest>,
+) -> Result<Json<ServiceGroupResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let group = match input.position {
+        Some(position) => {
+            core.update_group_with_position(&context, &group_id, input.name, input.parent_id, position)?
+        }
+        None => core.update_group(&context, &group_id, input.name, input.parent_id)?,
+    };
+    let audit = audit_event(&context, &headers, "update", "service_group", &group_id);
+    inner.store.persist_core_with_audit(&core, &context, Some(&audit))?;
+    inner.seed_core = None;
+    Ok(Json(group.into()))
+}
+
+#[utoipa::path(
+    put,
+    path = "/groups/order",
+    request_body = ReorderGroupsRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 200, description = "Group hierarchy and order saved", body = [ServiceGroupResponse]),
+        (status = 401, body = ErrorResponse),
+        (status = 403, body = ErrorResponse),
+        (status = 422, body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn reorder_groups(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<ReorderGroupsRequest>,
+) -> Result<Json<Vec<ServiceGroupResponse>>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let items = input
+        .items
+        .into_iter()
+        .map(|item| ServiceGroupOrder { id: item.id, parent_id: item.parent_id, position: item.position })
+        .collect::<Vec<_>>();
+    core.reorder_groups(&context, &items)?;
+    let audit = audit_event(&context, &headers, "reorder", "service_group", &context.workspace_id);
+    inner.store.persist_core_with_audit(&core, &context, Some(&audit))?;
+    inner.seed_core = None;
+    let mut groups: Vec<_> = core.list_groups(&context).into_iter().cloned().map(Into::into).collect();
+    groups.sort_by(|left: &ServiceGroupResponse, right| {
+        left.parent_id.cmp(&right.parent_id).then(left.position.cmp(&right.position)).then(left.name.cmp(&right.name))
+    });
+    Ok(Json(groups))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/groups/{group_id}",
+    params(("group_id" = String, Path, description = "Stable group identifier")),
+    responses(
+        (status = 400, description = "Malformed path or request", body = ErrorResponse),
+        (status = 204, description = "Group deleted"),
+        (status = 401, body = ErrorResponse),
+        (status = 403, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 409, body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn delete_group(
+    State(state): State<ApiState>,
+    Path(group_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    core.delete_group(&context, &group_id)?;
+    let audit = audit_event(&context, &headers, "delete", "service_group", &group_id);
+    inner.store.delete_group(&context, &group_id, &audit)?;
+    inner.seed_core = None;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateTagRequest {
+    pub id: Id,
+    pub name: String,
+    #[serde(default = "default_tag_color")]
+    #[schema(default = "#64748b", required = false)]
+    pub color: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateTagRequest {
+    pub name: String,
+    pub color: String,
+}
+
+fn default_tag_color() -> String {
+    "#64748b".into()
+}
+
+#[utoipa::path(
+    post,
+    path = "/tags",
+    params(("Idempotency-Key" = Option<String>, Header, description = "Client supplied key for safe retries")),
+    request_body = CreateTagRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 200, description = "Tag created", body = TagResponse),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Actor is not a workspace member", body = ErrorResponse),
+        (status = 409, description = "Idempotency key was already used with a different request", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 422, description = "Invalid tag", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn create_tag(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateTagRequest>,
+) -> Result<Json<Tag>, ApiError> {
+    let context = request_context(&headers)?;
+    let descriptor = idempotency_descriptor(&headers, &context, "tags", &input)?;
+    let mut inner = state.inner.lock().await;
+    if let Some(record) = check_idempotency(&inner.store, descriptor.as_ref())? {
+        if record.resource_type != "tag" {
+            return Err(ApiError::IdempotencyConflict);
+        }
+        let core = load_core(&mut inner, &context)?;
+        let tag = core
+            .list_tags(&context)
+            .into_iter()
+            .find(|tag| tag.id == record.resource_id)
+            .cloned()
+            .ok_or(ApiError::IdempotencyConflict)?;
+        return Ok(Json(tag));
+    }
+    let mut core = load_core(&mut inner, &context)?;
+    let tag = core.create_tag(&context, input.id, input.name, input.color)?;
+    let resource_id = tag.id.clone();
+    let audit = audit_event(&context, &headers, "create", "tag", &resource_id);
+    inner.store.persist_core_with_audit_and_idempotency(
+        &core,
+        &context,
+        Some(&audit),
+        durable_idempotency(descriptor.as_ref(), &context, "tag", &resource_id),
+    )?;
+    inner.seed_core = None;
+    Ok(Json(tag.into()))
+}
+
+#[utoipa::path(
+    put,
+    path = "/tags/{tag_id}",
+    params(("tag_id" = String, Path, description = "Stable tag identifier")),
+    request_body = UpdateTagRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 200, description = "Tag updated", body = TagResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 403, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 422, body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn update_tag(
+    State(state): State<ApiState>,
+    Path(tag_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateTagRequest>,
+) -> Result<Json<TagResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let tag = core.update_tag(&context, &tag_id, input.name, input.color)?;
+    let audit = audit_event(&context, &headers, "update", "tag", &tag_id);
+    inner.store.persist_core_with_audit(&core, &context, Some(&audit))?;
+    inner.seed_core = None;
+    Ok(Json(tag.into()))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/tags/{tag_id}",
+    params(("tag_id" = String, Path, description = "Stable tag identifier")),
+    responses(
+        (status = 400, description = "Malformed path or request", body = ErrorResponse),
+        (status = 204, description = "Tag deleted"),
+        (status = 401, body = ErrorResponse),
+        (status = 403, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 409, body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn delete_tag(
+    State(state): State<ApiState>,
+    Path(tag_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    core.delete_tag(&context, &tag_id)?;
+    let audit = audit_event(&context, &headers, "delete", "tag", &tag_id);
+    inner.store.delete_tag(&context, &tag_id, &audit)?;
+    inner.seed_core = None;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateServiceRequest {
+    pub id: Id,
+    #[schema(required = false)]
+    pub group_id: Option<Id>,
+    pub name: String,
+    pub slug: String,
+    #[serde(default)]
+    #[schema(required = false)]
+    pub description: String,
+    #[serde(default)]
+    #[schema(required = false)]
+    pub tag_ids: Vec<Id>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateServiceRequest {
+    #[schema(required = false)]
+    pub group_id: Option<Id>,
+    pub name: String,
+    pub slug: String,
+    #[serde(default)]
+    #[schema(required = false)]
+    pub description: String,
+    #[serde(default)]
+    #[schema(required = false)]
+    pub tag_ids: Vec<Id>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetServiceArchivedRequest {
+    pub archived: bool,
+}
+
+#[utoipa::path(
+    post,
+    path = "/services",
+    params(("Idempotency-Key" = Option<String>, Header, description = "Client supplied key for safe retries")),
+    request_body = CreateServiceRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 200, description = "Service created", body = ServiceResponse, headers(("ETag" = String, description = "Strong validator for subsequent updates"))),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Reference is outside the authorized scope", body = ErrorResponse),
+        (status = 409, description = "Idempotency key was already used with a different request", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 404, description = "Referenced resource does not exist", body = ErrorResponse),
+        (status = 409, description = "Conflicting service tags", body = ErrorResponse),
+        (status = 422, description = "Invalid service", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn create_service(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateServiceRequest>,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let descriptor = idempotency_descriptor(&headers, &context, "services", &input)?;
+    let mut inner = state.inner.lock().await;
+    if let Some(record) = check_idempotency(&inner.store, descriptor.as_ref())? {
+        if record.resource_type != "service" {
+            return Err(ApiError::IdempotencyConflict);
+        }
+        let core = load_core(&mut inner, &context)?;
+        let service = core
+            .list_services(&context)
+            .into_iter()
+            .find(|service| service.id == record.resource_id)
+            .cloned()
+            .ok_or(ApiError::IdempotencyConflict)?;
+        let response: ServiceResponse = service.into();
+        let etag = response.etag.clone();
+        return Ok(response_with_etag(response, etag));
+    }
+    let mut core = load_core(&mut inner, &context)?;
+    let service = core.create_service(
+        &context,
+        Service {
+            id: input.id,
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            group_id: input.group_id,
+            name: input.name,
+            slug: input.slug,
+            description: input.description,
+            tag_ids: input.tag_ids,
+            updated_at: Utc::now().to_rfc3339(),
+            archived: false,
+        },
+    )?;
+    let resource_id = service.id.clone();
+    let audit = audit_event(&context, &headers, "create", "service", &resource_id);
+    inner.store.persist_core_with_audit_and_idempotency(
+        &core,
+        &context,
+        Some(&audit),
+        durable_idempotency(descriptor.as_ref(), &context, "service", &resource_id),
+    )?;
+    inner.seed_core = None;
+    let response: ServiceResponse = service.into();
+    let etag = response.etag.clone();
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(
+    put,
+    path = "/services/{service_id}",
+    params(
+        ("service_id" = String, Path, description = "Stable service ID"),
+        ("If-Match" = String, Header, description = "Strong ETag from the current service representation")
+    ),
+    request_body = UpdateServiceRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 200, description = "Service updated or moved", body = ServiceResponse, headers(("ETag" = String, description = "New strong validator for subsequent updates"))),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Service or reference is outside the authorized scope", body = ErrorResponse),
+        (status = 404, description = "Service or referenced resource does not exist", body = ErrorResponse),
+        (status = 409, description = "Service slug is already in use", body = ErrorResponse),
+        (status = 412, description = "If-Match does not match the current service", body = ErrorResponse),
+        (status = 428, description = "If-Match is required", body = ErrorResponse),
+        (status = 422, description = "Invalid service", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn update_service(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateServiceRequest>,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let expected = core
+        .list_services(&context)
+        .into_iter()
+        .find(|service| service.id == service_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("service"))?;
+    let current_etag = ServiceResponse::from(expected.clone()).etag;
+    let expected_etags: Vec<_> = headers.get_all(IF_MATCH).iter().filter_map(|value| value.to_str().ok()).collect();
+    if expected_etags.is_empty() {
+        return Err(ApiError::PreconditionRequired);
+    }
+    if !expected_etags.iter().any(|if_match| if_match_satisfies(if_match, &current_etag)) {
+        return Err(ApiError::PreconditionFailed);
+    }
+    let service = core.update_service(
+        &context,
+        &service_id,
+        input.name,
+        input.slug,
+        input.description,
+        input.group_id,
+        input.tag_ids,
+    )?;
+    let audit = audit_event(&context, &headers, "update", "service", &service_id);
+    if !inner.store.update_service_if_current_with_audit(&context, &expected, &service, Some(&audit))? {
+        return Err(ApiError::PreconditionFailed);
+    }
+    inner.seed_core = None;
+    let response: ServiceResponse = service.into();
+    let etag = response.etag.clone();
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/services/{service_id}",
+    params(("service_id" = String, Path, description = "Stable service ID")),
+    request_body = SetServiceArchivedRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (status = 422, description = "Invalid request data", body = ErrorResponse),
+        (status = 200, description = "Service archived or restored", body = ServiceResponse, headers(("ETag" = String, description = "Current strong validator for the service"))),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Service is outside the authorized scope", body = ErrorResponse),
+        (status = 404, description = "Service does not exist", body = ErrorResponse),
+        (status = 412, description = "Service changed during the archive update", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn set_service_archived(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<SetServiceArchivedRequest>,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let expected = core
+        .list_services(&context)
+        .into_iter()
+        .find(|service| service.id == service_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("service"))?;
+    let service = core.set_service_archived(&context, &service_id, input.archived)?;
+    let action = if input.archived { "archive" } else { "restore" };
+    let audit = audit_event(&context, &headers, action, "service", &service_id);
+    if !inner.store.update_service_if_current_with_audit(&context, &expected, &service, Some(&audit))? {
+        return Err(ApiError::PreconditionFailed);
+    }
+    inner.seed_core = None;
+    let response: ServiceResponse = service.into();
+    let etag = response.etag.clone();
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/services/{service_id}",
+    params(
+        ("service_id" = String, Path, description = "Stable service ID"),
+        ("If-Match" = String, Header, description = "Strong ETag from the current service representation")
+    ),
+    responses(
+        (status = 400, description = "Malformed path or request", body = ErrorResponse),
+        (status = 204, description = "Service and its specifications deleted"),
+        (status = 401, body = ErrorResponse),
+        (status = 403, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 412, body = ErrorResponse),
+        (status = 428, body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn delete_service(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    let service = core
+        .list_services(&context)
+        .into_iter()
+        .find(|service| service.id == service_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("service"))?;
+    let current_etag = ServiceResponse::from(service).etag;
+    let expected_etags: Vec<_> = headers.get_all(IF_MATCH).iter().filter_map(|value| value.to_str().ok()).collect();
+    if expected_etags.is_empty() {
+        return Err(ApiError::PreconditionRequired);
+    }
+    if !expected_etags.iter().any(|if_match| if_match_satisfies(if_match, &current_etag)) {
+        return Err(ApiError::PreconditionFailed);
+    }
+    let audit = audit_event(&context, &headers, "delete", "service", &service_id);
+    inner.store.delete_service(&context, &service_id, &audit)?;
+    inner.seed_core = None;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateSpecificationRequest {
+    pub id: Id,
+    pub service_id: Id,
+    pub title: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateSpecificationRequest {
+    pub title: String,
+    pub content: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/specifications",
+    params(("Idempotency-Key" = Option<String>, Header, description = "Client supplied key for safe retries")),
+    request_body = CreateSpecificationRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (
+            status = 200,
+            description = "Specification created; returns the current ETag",
+            body = SpecificationResponse,
+            headers(("ETag" = String, description = "Strong validator for subsequent conditional updates"))
+        ),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Service is outside the authorized scope", body = ErrorResponse),
+        (status = 409, description = "Idempotency key was already used with a different request", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 404, description = "Service does not exist", body = ErrorResponse),
+        (status = 422, description = "Invalid specification", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn create_specification(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateSpecificationRequest>,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let descriptor = idempotency_descriptor(&headers, &context, "specifications", &input)?;
+    let mut inner = state.inner.lock().await;
+    if let Some(record) = check_idempotency(&inner.store, descriptor.as_ref())? {
+        if record.resource_type != "specification" {
+            return Err(ApiError::IdempotencyConflict);
+        }
+        let core = load_core(&mut inner, &context)?;
+        let specification = core
+            .list_specifications(&context)
+            .into_iter()
+            .find(|specification| specification.id == record.resource_id)
+            .cloned()
+            .ok_or(ApiError::IdempotencyConflict)?;
+        let response = SpecificationResponse::from(specification);
+        let etag = specification_etag(&response);
+        return Ok(response_with_etag(response, etag));
+    }
+    let mut core = load_core(&mut inner, &context)?;
+    let specification = core.create_markdown_specification(
+        &context,
+        Specification {
+            id: input.id,
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            service_id: input.service_id,
+            title: input.title,
+            kind: SpecificationKind::Markdown,
+            content: input.content,
+            version: 1,
+            content_hash: String::new(),
+            updated_at: Utc::now().to_rfc3339(),
+        },
+    )?;
+    let specification_id = specification.id.clone();
+    let audit = audit_event(&context, &headers, "create", "specification", &specification_id);
+    inner.store.persist_core_with_audit_and_idempotency(
+        &core,
+        &context,
+        Some(&audit),
+        durable_idempotency(descriptor.as_ref(), &context, "specification", &specification_id),
+    )?;
+    inner.seed_core = None;
+    let persisted_core = inner.store.load_core(&context)?;
+    let specification = persisted_core
+        .list_specifications(&context)
+        .into_iter()
+        .find(|value| value.id == specification_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("specification"))?;
+    let response = SpecificationResponse::from(specification);
+    let etag = specification_etag(&response);
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(
+    put,
+    path = "/specifications/{specification_id}",
+    params(
+        ("specification_id" = String, Path, description = "Stable specification identifier"),
+        ("If-Match" = String, Header, description = "Strong ETag from the current specification representation")
+    ),
+    request_body = UpdateSpecificationRequest,
+    responses(
+        (status = 400, description = "Malformed request JSON", body = ErrorResponse),
+        (status = 413, description = "Request body too large", body = ErrorResponse),
+        (status = 415, description = "Unsupported content type", body = ErrorResponse),
+        (
+            status = 200,
+            description = "Specification updated",
+            body = SpecificationResponse,
+            headers(("ETag" = String, description = "New strong validator for subsequent conditional updates"))
+        ),
+        (status = 401, description = "Missing request context", body = ErrorResponse),
+        (status = 403, description = "Specification is outside the authorized scope", body = ErrorResponse),
+        (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
+        (status = 404, description = "Specification does not exist", body = ErrorResponse),
+        (status = 412, description = "If-Match does not match the current specification", body = ErrorResponse),
+        (status = 422, description = "Invalid specification", body = ErrorResponse),
+        (status = 428, description = "If-Match is required", body = ErrorResponse),
+        (status = 500, description = "Storage failure", body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn update_specification(
+    State(state): State<ApiState>,
+    Path(specification_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateSpecificationRequest>,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let expected_etags: Vec<_> = headers.get_all(IF_MATCH).iter().filter_map(|value| value.to_str().ok()).collect();
+    if expected_etags.is_empty() {
+        return Err(ApiError::PreconditionRequired);
+    }
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let existing = core
+        .list_specifications(&context)
+        .into_iter()
+        .find(|specification| specification.id == specification_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("specification"))?;
+    let existing_response = SpecificationResponse::from(existing.clone());
+    let current_etag = specification_etag(&existing_response);
+    if !expected_etags.iter().any(|if_match| if_match_satisfies(if_match, &current_etag)) {
+        return Err(ApiError::PreconditionFailed);
+    }
+    let updated = core.update_markdown_specification(&context, &specification_id, input.title, input.content)?;
+    let audit = audit_event(&context, &headers, "update", "specification", &specification_id);
+    if !inner.store.update_specification_if_current_with_audit(&context, &existing, &updated, Some(&audit))? {
+        return Err(ApiError::PreconditionFailed);
+    }
+    inner.seed_core = None;
+    let persisted_core = inner.store.load_core(&context)?;
+    let specification = persisted_core
+        .list_specifications(&context)
+        .into_iter()
+        .find(|value| value.id == specification_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("specification"))?;
+    let response = SpecificationResponse::from(specification);
+    let etag = specification_etag(&response);
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/specifications/{specification_id}",
+    params(
+        ("specification_id" = String, Path, description = "Stable specification identifier"),
+        ("If-Match" = String, Header, description = "Strong ETag from the current specification representation")
+    ),
+    responses(
+        (status = 400, description = "Malformed path or request", body = ErrorResponse),
+        (status = 204, description = "Specification and its immutable revisions deleted"),
+        (status = 401, body = ErrorResponse),
+        (status = 403, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 412, body = ErrorResponse),
+        (status = 428, body = ErrorResponse)
+    ),
+    tag = "catalog"
+)]
+async fn delete_specification(
+    State(state): State<ApiState>,
+    Path(specification_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    let specification = core
+        .list_specifications(&context)
+        .into_iter()
+        .find(|specification| specification.id == specification_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("specification"))?;
+    let current_etag = SpecificationResponse::from(specification).etag;
+    let expected_etags: Vec<_> = headers.get_all(IF_MATCH).iter().filter_map(|value| value.to_str().ok()).collect();
+    if expected_etags.is_empty() {
+        return Err(ApiError::PreconditionRequired);
+    }
+    if !expected_etags.iter().any(|if_match| if_match_satisfies(if_match, &current_etag)) {
+        return Err(ApiError::PreconditionFailed);
+    }
+    let audit = audit_event(&context, &headers, "delete", "specification", &specification_id);
+    inner.store.delete_specification(&context, &specification_id, &audit)?;
+    inner.seed_core = None;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn specification_etag(specification: &SpecificationResponse) -> String {
+    let representation = serde_json::to_vec(&(
+        &specification.id,
+        &specification.tenant_id,
+        &specification.workspace_id,
+        &specification.service_id,
+        &specification.title,
+        specification.kind,
+        &specification.content,
+        specification.version,
+        &specification.content_hash,
+        &specification.updated_at,
+    ))
+    .expect("specification ETag payload is serializable");
+    let digest = Sha256::digest(representation);
+    format!("\"sha256:{digest:x}\"")
+}
+
+fn service_etag(service: &ServiceResponse) -> String {
+    let representation = serde_json::to_vec(&(
+        &service.id,
+        &service.tenant_id,
+        &service.workspace_id,
+        &service.group_id,
+        &service.name,
+        &service.slug,
+        &service.description,
+        &service.tag_ids,
+        &service.updated_at,
+        service.archived,
+    ))
+    .expect("service ETag payload is serializable");
+    let digest = Sha256::digest(representation);
+    format!("\"sha256:{digest:x}\"")
+}
+
+fn if_match_satisfies(if_match: &str, current_etag: &str) -> bool {
+    if_match.split(',').any(|candidate| candidate.trim() == "*" || candidate.trim() == current_etag)
+}
+
+fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
+    let mut response = Json(value).into_response();
+    response.headers_mut().insert(ETAG, HeaderValue::from_str(&etag).expect("generated ETag is valid"));
+    response
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "specX API", version = "1.0.0", description = "Service catalog and specification API."),
+    servers((url = "/api/specx")),
+    paths(health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
+    components(schemas(
+        HealthResponse,
+        ReadyResponse,
+        CatalogResponse,
+        GroupPageResponse,
+        TagPageResponse,
+        SpecificationPageResponse,
+        SpecificationRevisionPageResponse,
+        SpecificationRevisionResponse,
+        ServicePageResponse,
+        WorkspaceRole,
+        WorkspaceResponse,
+        WorkspaceListResponse,
+        CreateWorkspaceRequest,
+        UpdateWorkspaceRequest,
+        WorkspaceMemberResponse,
+        WorkspaceMemberPageResponse,
+        SetMemberRoleRequest,
+        CreateInvitationRequest,
+        AcceptInvitationRequest,
+        InvitationResponse,
+        CreatedInvitationResponse,
+        AcceptedInvitationResponse,
+        ServiceGroupResponse,
+        TagResponse,
+        ServiceResponse,
+        SpecificationKindResponse,
+        SpecificationResponse,
+        CreateGroupRequest,
+        UpdateGroupRequest,
+        GroupOrderItem,
+        ReorderGroupsRequest,
+        CreateTagRequest,
+        UpdateTagRequest,
+        CreateServiceRequest,
+        UpdateServiceRequest,
+        SetServiceArchivedRequest,
+        CreateSpecificationRequest,
+        UpdateSpecificationRequest,
+        BackupResponse,
+        ErrorResponse
+    )),
+    tags(
+        (name = "system", description = "Service health"),
+        (name = "catalog", description = "Workspace service catalog and specifications"),
+        (name = "workspaces", description = "Workspace metadata and membership access"),
+        (name = "members", description = "Workspace member roles and access")
+        ,(name = "backups", description = "Server-owned specX SQLite snapshots")
+    )
+)]
+pub struct ApiDoc;
+
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}

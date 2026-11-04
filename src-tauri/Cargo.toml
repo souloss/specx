@@ -1,0 +1,38 @@
+[package]
+name = "specx-desktop"
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0"
+description = "Native specX desktop shell"
+build = "build.rs"
+
+[lib]
+name = "specx_desktop_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+
+[dependencies]
+axum = "0.8"
+http-body-util = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+specx-api = { path = "../crates/specx-api" }
+specx-platform = { path = "../crates/specx-platform" }
+tauri = { version = "2.10", features = [] }
+tauri-plugin-process = "=2.3.1"
+tauri-plugin-updater = "=2.10.1"
+tower = "0.5"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dev-dependencies]
+tempfile = "3"
+
+# Keep the native shell independently versioned from the server crate workspace,
+# matching Tauri's host boundary and allowing platform-specific build features.
+[workspace]

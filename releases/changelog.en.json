@@ -1,0 +1,28 @@
+{
+  "unreleased": {
+    "sections": []
+  },
+  "releases": [
+    {
+      "tag": "v0.0.1",
+      "name": "specX 0.0.1",
+      "date": "2026-11-04",
+      "sections": [
+        {
+          "type": "added",
+          "title": "Added",
+          "items": [
+            {
+              "title": "Desktop application updates",
+              "desc": "Manual checks, signed downloads and confirmed installation, with version information and bilingual release notes in About."
+            },
+            {
+              "title": "Tag-based releases",
+              "desc": "A consistent application version and vX.Y.Z releases containing platform installers, updater metadata and bilingual release notes."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

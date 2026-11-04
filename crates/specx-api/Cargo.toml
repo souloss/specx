@@ -1,0 +1,30 @@
+[package]
+name = "specx-api"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "HTTP API boundary for the specX service asset core"
+
+[features]
+default = ["postgres"]
+postgres = ["specx-core/postgres"]
+s3-backup = ["dep:aws-sdk-s3", "tokio/fs", "tokio/io-util", "tokio/macros", "tokio/time"]
+
+[dependencies]
+aws-sdk-s3 = { version = "=1.104.0", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+http = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+specx-core = { path = "../../core", default-features = false }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"] }
+tracing = "0.1"
+utoipa = { version = "5.5", features = ["axum_extras"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

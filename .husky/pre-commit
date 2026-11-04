@@ -1,0 +1,8 @@
+set -eu
+
+if rustfmt --version >/dev/null 2>&1; then
+  cargo fmt --all -- --check
+  cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+fi
+pnpm --dir apps/desktop format:check
+pnpm --dir apps/desktop build
