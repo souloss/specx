@@ -109,7 +109,9 @@ git push origin v0.0.1
 Tag：先校验版本、双语日志和签名配置，再创建草稿；Windows x64、Linux x64、
 macOS arm64/x64 构建并上传安装包及 `latest.json`。全部平台的签名资产齐备后，
 工作流上传双语日志并将草稿发布为 latest。失败会保留草稿，不应手工发布缺少平台
-的版本；修复后重跑失败的工作流。
+的版本；修复后重跑失败的工作流。工作流按 Release ID 读写构建资产，重跑同一
+Tag 时复用最新草稿并删除旧的同名草稿，避免同名 Draft 导致安装包与
+`latest.json` 串包。
 
 当前首版未配置 Apple Developer ID 证书，macOS 构建使用 `--no-sign`，但更新包
 仍使用 Tauri updater 私钥签名。配置 `APPLE_CERTIFICATE` 等 Secrets 后，应移除
