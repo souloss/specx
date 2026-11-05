@@ -12,7 +12,10 @@ use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use axum::{
@@ -27,9 +30,29 @@ use tauri::{Manager, State};
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 
+#[derive(Debug, Default)]
+struct MigrationGate {
+    ready: AtomicBool,
+}
+
+impl MigrationGate {
+    fn new(ready: bool) -> Self {
+        Self { ready: AtomicBool::new(ready) }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
+    fn set_ready(&self, ready: bool) {
+        self.ready.store(ready, Ordering::Release);
+    }
+}
+
 #[derive(Clone)]
 struct DesktopState {
     api: Arc<Mutex<Option<ApiState>>>,
+    migration: Arc<MigrationGate>,
     database: DatabaseUrl,
     backup_dir: PathBuf,
 }
@@ -52,6 +75,42 @@ pub struct DesktopApiResponse {
     body: serde_json::Value,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MigrationStatusResponse {
+    ready: bool,
+}
+
+async fn ensure_api(state: &DesktopState) -> Result<ApiState, String> {
+    let mut current = state.api.lock().await;
+    if let Some(api) = current.as_ref() {
+        state.migration.set_ready(true);
+        return Ok(api.clone());
+    }
+    match open_api(&state.database, &state.backup_dir).await {
+        Ok(api) => {
+            *current = Some(api.clone());
+            state.migration.set_ready(true);
+            Ok(api)
+        }
+        Err(error) => {
+            state.migration.set_ready(false);
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+async fn migration_status(state: State<'_, DesktopState>) -> Result<MigrationStatusResponse, ()> {
+    Ok(MigrationStatusResponse { ready: state.migration.is_ready() })
+}
+
+#[tauri::command]
+async fn migration_retry(state: State<'_, DesktopState>) -> Result<MigrationStatusResponse, ()> {
+    let ready = ensure_api(&state).await.is_ok();
+    Ok(MigrationStatusResponse { ready })
+}
+
 /// Execute one frontend request against the shared in-process API router.
 #[tauri::command]
 async fn specx_api_request(
@@ -60,18 +119,12 @@ async fn specx_api_request(
 ) -> Result<DesktopApiResponse, ()> {
     // Tauri requires Result for async commands borrowing State. API failures
     // still travel as successful IPC responses with their HTTP-style envelope.
-    let api = {
-        let mut current = state.api.lock().await;
-        if current.is_none() {
-            match open_api(&state.database, &state.backup_dir).await {
-                Ok(api) => *current = Some(api),
-                Err(error) => {
-                    eprintln!("specX storage migration is not ready: {error}");
-                    return Ok(desktop_error_response(ErrorKind::NotReady));
-                }
-            }
+    let api = match ensure_api(&state).await {
+        Ok(api) => api,
+        Err(error) => {
+            eprintln!("specX storage migration is not ready: {error}");
+            return Ok(desktop_error_response(ErrorKind::NotReady));
         }
-        current.clone().expect("storage state is initialized")
     };
     Ok(dispatch_api_request(&api, request).await.unwrap_or_else(desktop_error_response))
 }
@@ -200,11 +253,14 @@ pub fn run() {
             if let Err(error) = &initial_api {
                 eprintln!("specX storage migration will be retried after startup: {error}");
             }
-            app.manage(DesktopState { api: Arc::new(Mutex::new(initial_api.ok())), database, backup_dir });
+            let migration = Arc::new(MigrationGate::new(initial_api.is_ok()));
+            app.manage(DesktopState { api: Arc::new(Mutex::new(initial_api.ok())), migration, database, backup_dir });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             specx_api_request,
+            migration_status,
+            migration_retry,
             release::get_app_release_info,
             release::fetch_app_changelog
         ])
@@ -214,7 +270,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopApiRequest, desktop_error_response, dispatch_api_request, native_window_decorations_override};
+    use super::{
+        DesktopApiRequest, MigrationGate, desktop_error_response, dispatch_api_request,
+        native_window_decorations_override,
+    };
     use specx_api::ApiState;
 
     #[test]
@@ -222,6 +281,16 @@ mod tests {
         assert_eq!(native_window_decorations_override("windows"), Some(false));
         assert_eq!(native_window_decorations_override("linux"), Some(false));
         assert_eq!(native_window_decorations_override("macos"), None);
+    }
+
+    #[test]
+    fn migration_gate_starts_blocked_and_is_explicitly_released() {
+        let gate = MigrationGate::new(false);
+        assert!(!gate.is_ready());
+        gate.set_ready(true);
+        assert!(gate.is_ready());
+        gate.set_ready(false);
+        assert!(!gate.is_ready());
     }
 
     #[test]

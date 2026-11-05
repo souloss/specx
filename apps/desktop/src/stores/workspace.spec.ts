@@ -6,11 +6,12 @@ import { catalogFixture } from "@/test/catalogFixture";
 import { installMemoryStorage } from "@/test/browserStorage";
 import type { Catalog } from "@/types/domain";
 
-vi.mock("@/lib/backend/client", () => ({ specxApi: { listWorkspaces: vi.fn(), loadCatalog: vi.fn() } }));
+vi.mock("@/lib/backend/client", () => ({ specxApi: { migrationRetry: vi.fn(), authCheck: vi.fn(), listWorkspaces: vi.fn(), loadCatalog: vi.fn() } }));
 beforeEach(() => {
   installMemoryStorage();
   vi.resetAllMocks();
   setActivePinia(createPinia());
+  vi.mocked(specxApi.migrationRetry).mockResolvedValue({ ready: true });
   vi.mocked(specxApi.listWorkspaces).mockResolvedValue({ items: [] });
 });
 describe("catalog loading", () => {
@@ -50,5 +51,16 @@ describe("catalog loading", () => {
     await first;
     expect(workspace.catalog?.workspace.id).toBe("latest");
     expect(workspace.loading).toBe(false);
+  });
+
+  it("keeps the app out of the business startup path while desktop migration is blocked", async () => {
+    vi.mocked(specxApi.migrationRetry).mockResolvedValue({ ready: false });
+    const workspace = useWorkspaceStore();
+
+    await workspace.initialize();
+
+    expect(workspace.migrationReady).toBe(false);
+    expect(workspace.error).toBe("specX 存储迁移尚未完成");
+    expect(specxApi.authCheck).not.toHaveBeenCalled();
   });
 });

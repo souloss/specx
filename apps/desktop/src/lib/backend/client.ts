@@ -44,6 +44,11 @@ export function toService(service: CatalogResponse["services"][number]): Service
 
 export const specxApi = {
   isDesktop: () => isTauriRuntime(),
+  migrationRetry: async () => {
+    if (!isTauriRuntime()) return { ready: true };
+    const { retryDesktopMigration } = await import("./tauri");
+    return retryDesktopMigration();
+  },
   authCheck: () => request<AuthResponse>("/api/auth/check"),
   login: (password: string) => request<AuthResponse>("/api/auth/login", { method: "POST", body: { password } }),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),

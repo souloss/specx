@@ -79,7 +79,7 @@ async function logout() {
   <div v-if="workspace.loading" class="app-loading" role="status">{{ t("app.connecting") }}</div>
   <LoginPanel v-else-if="workspace.authenticated === false" />
   <main v-else-if="workspace.error && !workspace.catalog" class="app-loading gap-3">
-    <h1>{{ t("app.loadFailed") }}</h1>
+    <h1>{{ workspace.migrationReady ? t("app.loadFailed") : t("app.storageNotReady") }}</h1>
     <p>{{ workspace.error }}</p>
     <Button variant="outline" @click="workspace.initialize()">{{ t("common.retry") }}</Button>
   </main>

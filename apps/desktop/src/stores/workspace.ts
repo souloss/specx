@@ -8,6 +8,7 @@ import { translate } from "@/i18n";
 
 export const useWorkspaceStore = defineStore("workspace", () => {
   const authenticated = ref<boolean | null>(null);
+  const migrationReady = ref(true);
   const loading = ref(true);
   const error = ref("");
   const workspaces = ref<WorkspaceResponse[]>([]);
@@ -85,7 +86,14 @@ export const useWorkspaceStore = defineStore("workspace", () => {
 
   async function initialize() {
     loading.value = true;
+    migrationReady.value = true;
     try {
+      const migration = await specxApi.migrationRetry();
+      migrationReady.value = migration.ready;
+      if (!migration.ready) {
+        error.value = translate("app.storageNotReady");
+        return;
+      }
       const status = await specxApi.authCheck();
       authenticated.value = status.authenticated;
       if (status.authenticated) await load();
@@ -144,6 +152,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
 
   return {
     authenticated,
+    migrationReady,
     loading,
     error,
     workspaces,

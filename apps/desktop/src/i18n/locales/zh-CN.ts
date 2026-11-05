@@ -18,6 +18,7 @@ const zhCN = {
   app: {
     connecting: "正在连接 specX…",
     loadFailed: "无法加载工作区",
+    storageNotReady: "specX 存储迁移尚未完成",
     connectionFailed: "无法连接到 specX",
     emptyTitle: "specX 工作区",
     emptyDescription: "从左侧选择服务，或创建分组开始整理团队的服务规范。",

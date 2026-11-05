@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type { DesktopApiRequest, DesktopApiResponse } from "../../types/api";
 import { ApiError, type BackendTransport, type RequestOptions } from "./types";
 
+export type MigrationStatus = { ready: boolean };
+
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const request: DesktopApiRequest = {
     method: options.method ?? "GET",
@@ -18,3 +20,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 }
 
 export const desktopTransport: BackendTransport = { request };
+
+export function retryDesktopMigration(): Promise<MigrationStatus> {
+  return invoke<MigrationStatus>("migration_retry");
+}
+
+export function desktopMigrationStatus(): Promise<MigrationStatus> {
+  return invoke<MigrationStatus>("migration_status");
+}

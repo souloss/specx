@@ -20,6 +20,7 @@ const en: MessageSchema = {
   app: {
     connecting: "Connecting to specX…",
     loadFailed: "Unable to load workspace",
+    storageNotReady: "specX storage migration is not ready",
     connectionFailed: "Unable to connect to specX",
     emptyTitle: "specX workspace",
     emptyDescription: "Select a service on the left, or create a group to organize your team's specifications.",

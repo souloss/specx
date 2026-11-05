@@ -23,7 +23,11 @@ until the latest marker exists. Web startup makes three bounded attempts with a
 short backoff, logs the final storage error, and exits without
 binding business handlers if the database remains unavailable. The process
 supervisor may then restart it. The desktop shell remains visible and retries
-opening the adapter on the next request. Both hosts therefore follow this
+opening the adapter on the next request. The desktop host exposes the
+read-only `migration_status` command and the retryable `migration_retry`
+command so startup UI can show a stable gate state without receiving storage
+diagnostic text. Business IPC still returns the shared `not_ready` envelope
+until the gate is released. Both hosts therefore follow this
 order: install the new binary, acquire the migration lock, migrate, verify
 readiness, then expose writes. If migration fails, retain the previous database
 and diagnostic error; never continue with partially migrated business handlers.
