@@ -40,14 +40,15 @@ jobs:
             const fs = require('node:fs');
             const tag = context.ref.replace('refs/tags/', '');
             const { owner, repo } = context.repo;
-            let release;
-            try {
-              release = (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
-              if (!release.draft) throw new Error('Published releases are immutable. Use a new version.');
-            } catch (error) {
-              if (error.status !== 404) throw error;
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const matching = releases.filter((item) => item.tag_name === tag);
+            if (matching.some((item) => !item.draft)) throw new Error('Published releases are immutable. Use a new version.');
+            const drafts = matching.filter((item) => item.draft).sort((left, right) => right.created_at.localeCompare(left.created_at));
+            let release = drafts[0];
+            if (!release) {
               release = (await github.rest.repos.createRelease({ owner, repo, tag_name: tag, name: `specX ${tag}`, draft: true, prerelease: false, body: fs.readFileSync('.local/release-assets/notes.md', 'utf8') })).data;
             }
+            for (const stale of drafts.slice(1)) await github.rest.repos.deleteRelease({ owner, repo, release_id: stale.id });
             core.setOutput('id', release.id);
 
   desktop:
@@ -136,7 +137,7 @@ jobs:
             name="$(basename "$path")"
             asset_id="$(gh api "repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets" --paginate --jq ".[] | select(.name == \"${name}\") | .id" | head -n 1)"
             if [ -n "$asset_id" ]; then
-              gh api --method DELETE "repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets/${asset_id}" >/dev/null
+              gh api --method DELETE "repos/${SPECX_RELEASE_REPOSITORY}/releases/assets/${asset_id}" >/dev/null
             fi
             curl --fail-with-body --silent --show-error \
               --request POST \
@@ -163,9 +164,22 @@ jobs:
       - name: Validate all platforms and upload bilingual changelogs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPECX_RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
         run: |
           node scripts/release.mjs assets "$GITHUB_REF_NAME"
-          gh release download "$GITHUB_REF_NAME" --pattern latest.json --pattern 'specX_aarch64.app.tar.gz' --pattern 'specX_aarch64.app.tar.gz.sig' --pattern 'specX_x64.app.tar.gz' --pattern 'specX_x64.app.tar.gz.sig' --dir .local/release-assets
+          download_asset() {
+            local name="$1"
+            local asset_id
+            asset_id="$(gh api "repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets" --paginate --jq ".[] | select(.name == \"${name}\") | .id" | head -n 1)"
+            if [ -z "$asset_id" ]; then
+              echo "Missing release asset: $name" >&2
+              return 1
+            fi
+            gh api -H 'Accept: application/octet-stream' "repos/${SPECX_RELEASE_REPOSITORY}/releases/assets/${asset_id}" > ".local/release-assets/$name"
+          }
+          download_asset latest.json
+          download_asset specX_aarch64.app.tar.gz.sig
+          download_asset specX_x64.app.tar.gz.sig
           node --input-type=module <<'NODE'
           import { readFile, writeFile } from 'node:fs/promises';
           import { mergeUpdaterPlatforms } from './scripts/release.mjs';
@@ -179,7 +193,26 @@ jobs:
           await writeFile(`${directory}/latest.json`, `${JSON.stringify(manifest, null, 2)}\n`);
           NODE
           node scripts/release.mjs verify-manifest .local/release-assets/latest.json
-          gh release upload "$GITHUB_REF_NAME" .local/release-assets/latest.json .local/release-assets/releases-zh-CN.json .local/release-assets/releases-en.json --clobber
+          upload_asset() {
+            local path="$1"
+            local name
+            local asset_id
+            name="$(basename "$path")"
+            asset_id="$(gh api "repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets" --paginate --jq ".[] | select(.name == \"${name}\") | .id" | head -n 1)"
+            if [ -n "$asset_id" ]; then
+              gh api --method DELETE "repos/${SPECX_RELEASE_REPOSITORY}/releases/assets/${asset_id}" >/dev/null
+            fi
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'Content-Type: application/octet-stream' \
+              --data-binary "@${path}" \
+              "https://uploads.github.com/repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets?name=${name}" >/dev/null
+          }
+          upload_asset .local/release-assets/latest.json
+          upload_asset .local/release-assets/releases-zh-CN.json
+          upload_asset .local/release-assets/releases-en.json
       - name: Advance the production channel and publish the complete release
         uses: actions/github-script@v7
         with:
