@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue";
-import { Settings, Palette, FolderTree, Keyboard, ArrowDownUp, Info, Search, X, Sun, Moon, SunMoon } from "@lucide/vue";
+import { Settings, Palette, FolderTree, Keyboard, Info, Search, X, Sun, Moon, SunMoon } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -13,7 +13,6 @@ import { APP_THEME_PALETTES, APP_CUSTOM_UI_COLOR_DEFS } from "@/lib/app/appTheme
 import { customUiFontFamily, DEFAULT_UI_FONT_FAMILY, readableFontFamily, SYSTEM_UI_FONT_FAMILY, uiFontPresetFor, type UiFontPreset } from "@/lib/app/appFonts";
 import { i18n, setLocale, translate } from "@/i18n";
 
-const emit = defineEmits<{ import: []; export: [] }>();
 const settings = useSettingsStore();
 const t = translate;
 const { themeMode, themePalette, isDark, activeCustomUiColors, cornerStyle, setThemeMode, setThemePalette, previewThemePalette, clearThemePalettePreview, setCustomUiColors, resetCustomUiColors, setCornerStyle } = useTheme();
@@ -23,7 +22,6 @@ const categories = computed(() => [
   { id: "appearance", label: t("settings.appearance"), icon: Palette, keywords: t("settings.appearanceKeywords") },
   { id: "navigation", label: t("settings.navigation"), icon: FolderTree, keywords: t("settings.navigationKeywords") },
   { id: "shortcuts", label: t("settings.shortcuts"), icon: Keyboard, keywords: t("settings.shortcutsKeywords") },
-  { id: "transfer", label: t("settings.transfer"), icon: ArrowDownUp, keywords: t("settings.transferKeywords") },
   { id: "about", label: t("settings.about"), icon: Info, keywords: t("settings.aboutKeywords") },
 ]);
 const visibleCategories = computed(() => categories.value.filter((category) => !search.value.trim() || `${category.label} ${category.keywords}`.toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase())));
@@ -255,14 +253,6 @@ onBeforeUnmount(clearThemePalettePreview);
             <Button variant="outline" size="sm" @click="settings.resetNavigation">{{ t("settings.resetNavigation") }}</Button>
           </section>
           <ShortcutSettings v-else-if="current === 'shortcuts'" />
-          <section v-else-if="current === 'transfer'" class="space-y-4 py-2">
-            <h2 class="text-sm font-medium">{{ t("settings.contentTransfer") }}</h2>
-            <p class="text-sm text-muted-foreground">{{ t("settings.transferDescription") }}</p>
-            <div class="flex gap-2">
-              <Button variant="outline" size="sm" @click="emit('import')">{{ t("settings.import") }}</Button
-              ><Button variant="outline" size="sm" @click="emit('export')">{{ t("settings.export") }}</Button>
-            </div>
-          </section>
           <AppReleasePanel v-else />
         </div>
       </div>

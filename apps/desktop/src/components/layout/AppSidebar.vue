@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { ArrowDownUp, Download, Upload, ChevronsDownUp, FolderPlus, RefreshCw, ChevronsLeft, Search, X, Plus } from "@lucide/vue";
+import { ChevronsDownUp, FolderPlus, RefreshCw, ChevronsLeft, Search, X, Plus } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
@@ -17,7 +17,7 @@ import { useCreateQueueStore } from "@/stores/createQueueStore";
 import { translate } from "@/i18n";
 
 defineProps<{ sidebarWidth: number }>();
-const emit = defineEmits<{ import: []; export: []; startResize: [event: PointerEvent]; collapse: []; remove: [node: ResourceTreeNode] }>();
+const emit = defineEmits<{ startResize: [event: PointerEvent]; collapse: []; remove: [node: ResourceTreeNode] }>();
 const navigation = useNavigationStore();
 const settings = useSettingsStore();
 const workspace = useWorkspaceStore();
@@ -27,10 +27,6 @@ const shortcuts = useShortcutStore();
 const creations = useCreateQueueStore();
 const parentSaving = computed(() => creations.current.some((item) => item.id === navigation.selectedId && item.kind === "group"));
 const searchInput = ref<HTMLInputElement>();
-const transferItems = computed(() => [
-  { value: "import", label: t("sidebar.import"), icon: Download },
-  { value: "export", label: t("sidebar.export"), icon: Upload, separatorBefore: true },
-]);
 const options = computed(() => [
   { value: "sort:manual", label: t("sidebar.manualSort") },
   { value: "sort:asc", label: t("sidebar.nameAsc") },
@@ -72,19 +68,6 @@ defineExpose({ focusSearch });
   <aside data-app-sidebar class="app-sidebar-panel h-full shrink-0 relative select-none" :class="{ 'specx-panel': settings.appLayout === 'separated' }" :style="{ width: sidebarWidth + 'px' }">
     <div class="h-full flex flex-col overflow-hidden rounded-[inherit]">
       <div class="app-sidebar-toolbar flex items-center gap-px px-3 text-xs font-medium text-muted-foreground border-b bg-muted/20" :class="settings.appLayout === 'classic' ? 'h-9' : 'h-10'">
-        <LightDropdown
-          model-value=""
-          :items="transferItems"
-          :aria-label="t('sidebar.importExport')"
-          :trigger-label="t('sidebar.importExport')"
-          :trigger-icon="ArrowDownUp"
-          trigger-class="inline-flex h-7 min-w-0 items-center gap-1 rounded-md px-1 hover:bg-muted hover:text-foreground"
-          trigger-icon-class="h-3.5 w-3.5 shrink-0"
-          content-class="w-48"
-          :highlight-selected="false"
-          check-position="none"
-          @update:model-value="(value) => (value === 'import' ? emit('import') : emit('export'))"
-        />
         <span class="flex-1 self-stretch" />
         <AppTooltip :text="t('sidebar.collapseAll')"
           ><Button variant="ghost" size="icon" class="h-5 w-5" :aria-label="t('sidebar.collapseAll')" @click="navigation.collapseAll"><ChevronsDownUp class="h-3 w-3" /></Button

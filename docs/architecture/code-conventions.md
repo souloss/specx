@@ -68,6 +68,9 @@ owner or independent consumer, not just to make the directory tree deeper.
   adapter. See [the error contract](api-error-contract.md).
 - Treat authentication and workspace context as host-owned and server-verified.
   Do not trust client-supplied actor or tenant identity.
+- Schema changes use the next monotonic migration version in both persistence
+  adapters. Run `pnpm migration:check` and follow the startup/update rules in
+  [the migration policy](storage-migrations.md); never edit an applied version.
 
 ## Tests and Documentation
 

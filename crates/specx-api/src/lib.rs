@@ -28,8 +28,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use specx_core::persistence::{
-    AuditEvent, BackupArtifact, IdempotencyRecord, PersistenceError, SpecificationRevision, SqliteStore, WebSession,
-    WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
+    AuditEvent, BackupArtifact, IdempotencyRecord, LATEST_SCHEMA_VERSION, PersistenceError, SpecificationRevision,
+    SqliteStore, WebSession, WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
 };
 #[cfg(feature = "postgres")]
 use specx_core::postgres::PostgresStore;
@@ -113,9 +113,9 @@ impl StoreBackend {
 
     fn schema_version(&self) -> i64 {
         match self {
-            Self::Sqlite(_) => 11,
+            Self::Sqlite(_) => LATEST_SCHEMA_VERSION,
             #[cfg(feature = "postgres")]
-            Self::Postgres(_) => 7,
+            Self::Postgres(_) => LATEST_SCHEMA_VERSION,
         }
     }
 
@@ -966,13 +966,9 @@ impl ApiState {
         let inner = self.inner.lock().await;
         let artifact = inner.store.create_workspace_backup(context, self.backup_root.as_ref(), &prefix, retention);
         drop(inner);
-        let artifact = match artifact {
-            Ok(artifact) => artifact,
-            Err(error) => {
-                self.metrics.backup_creation_failures_total.fetch_add(1, Ordering::Relaxed);
-                return Err(error);
-            }
-        };
+        let artifact = artifact.inspect_err(|_| {
+            self.metrics.backup_creation_failures_total.fetch_add(1, Ordering::Relaxed);
+        })?;
         if self.backup_storage.is_some() {
             let file_name =
                 backup_file_name(&artifact.path).ok_or_else(|| PersistenceError::new("backup file name is invalid"))?;
@@ -1002,7 +998,7 @@ impl ApiState {
         #[cfg(not(feature = "s3-backup"))]
         {
             let _ = storage;
-            return Err(PersistenceError::new("shared S3 backup storage requires the s3-backup feature"));
+            Err(PersistenceError::new("shared S3 backup storage requires the s3-backup feature"))
         }
         #[cfg(feature = "s3-backup")]
         {
@@ -1042,7 +1038,7 @@ impl ApiState {
         #[cfg(not(feature = "s3-backup"))]
         {
             let _ = storage;
-            return Err(PersistenceError::new("shared S3 backup storage requires the s3-backup feature"));
+            Err(PersistenceError::new("shared S3 backup storage requires the s3-backup feature"))
         }
         #[cfg(feature = "s3-backup")]
         {
@@ -1083,7 +1079,7 @@ impl ApiState {
         #[cfg(not(feature = "s3-backup"))]
         {
             let _ = storage;
-            return Err(PersistenceError::new("shared S3 backup storage requires the s3-backup feature"));
+            Err(PersistenceError::new("shared S3 backup storage requires the s3-backup feature"))
         }
         #[cfg(feature = "s3-backup")]
         {

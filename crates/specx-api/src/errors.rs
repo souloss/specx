@@ -23,9 +23,9 @@ pub struct ErrorResponse {
     version: u8,
     code: &'static str,
     message_key: &'static str,
-    /// All current catalog entries are parameterless. Extend with typed parameters
-    /// at the catalog boundary when a concrete error needs interpolation.
-    message_params: BTreeMap<String, String>,
+    /// Parameters are JSON scalars selected by the catalog entry. The current
+    /// catalog is parameterless, but this keeps future interpolation typed.
+    message_params: BTreeMap<String, serde_json::Value>,
 }
 
 macro_rules! error_catalog {

@@ -1,10 +1,11 @@
 export type Group = { id: string; name: string; parentId: string | null; position?: number };
 export type Tag = { id: string; name: string; color: string };
+export type SpecificationKind = "markdown";
 export type Specification = {
   id: string;
   serviceId: string;
   title: string;
-  kind: "markdown";
+  kind: SpecificationKind;
   content: string;
   updatedAt: string;
 };

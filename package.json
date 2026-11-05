@@ -15,6 +15,7 @@
     "release:check": "node scripts/release.mjs check",
     "release:prepare": "node scripts/release.mjs prepare",
     "test:release": "node --test scripts/release.test.mjs",
+    "migration:check": "node scripts/check-migrations.mjs",
     "test": "pnpm --dir apps/desktop test",
     "test:core": "cargo test --workspace --locked",
     "test:specx": "pnpm test && pnpm test:core && cargo test --manifest-path src-tauri/Cargo.toml --locked",

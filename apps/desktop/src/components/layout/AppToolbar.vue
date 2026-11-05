@@ -15,6 +15,8 @@ import type { AppThemeMode } from "@/lib/app/appTheme";
 import { useShortcutStore } from "@/stores/shortcutStore";
 import { useAppUpdateStore } from "@/stores/appUpdateStore";
 import { translate } from "@/i18n";
+import WindowControls from "@/components/layout/WindowControls.vue";
+import { useWindowControls } from "@/composables/useWindowControls";
 const emit = defineEmits<{ newService: []; newSpecification: []; logout: [] }>();
 const settings = useSettingsStore();
 const workspace = useWorkspaceStore();
@@ -24,6 +26,7 @@ const { themeMode, setThemeMode, isDark } = useTheme();
 const t = translate;
 const shortcuts = useShortcutStore();
 const updates = useAppUpdateStore();
+const { isDesktop, isMaximized, toggleMaximize, minimize, close, startDragging } = useWindowControls();
 const themeIcon = computed(() => (themeMode.value === "system" ? SunMoon : isDark.value ? Moon : Sun));
 function cycleTheme() {
   const modes: AppThemeMode[] = ["light", "dark", "system"];
@@ -39,11 +42,23 @@ async function switchWorkspace(value: string) {
     toast(error instanceof Error ? error.message : t("theme.switchFailed"), 5000);
   }
 }
+function onToolbarPointerDown(event: PointerEvent) {
+  if (!isDesktop || event.button !== 0) return;
+  const target = event.target as HTMLElement;
+  if (target.closest("button, input, select, a, [role='button'], [data-window-controls]")) return;
+  void startDragging();
+}
+function onToolbarDoubleClick(event: MouseEvent) {
+  if (!isDesktop) return;
+  const target = event.target as HTMLElement;
+  if (target.closest("button, input, select, a, [role='button'], [data-window-controls]")) return;
+  void toggleMaximize();
+}
 </script>
 
 <template>
   <!-- Resource actions are grouped separately from application controls. -->
-  <header class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0">
+  <header class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0" @pointerdown="onToolbarPointerDown" @dblclick="onToolbarDoubleClick">
     <div class="flex h-8 shrink-0 items-center px-2"><SpecxLogo :size="24" /></div>
     <AppTooltip v-if="settings.sidebarCollapsed" :text="shortcuts.hint(t('toolbar.expandSidebar'), 'sidebar')"
       ><Button variant="ghost" size="icon" class="h-8 w-8" :aria-label="shortcuts.hint(t('sidebar.expand'), 'sidebar')" @click="settings.sidebarCollapsed = false"><ChevronsRight class="h-4 w-4" /></Button
@@ -73,5 +88,6 @@ async function switchWorkspace(value: string) {
     <AppTooltip v-if="!isTauriRuntime()" :text="t('toolbar.logout')"
       ><Button variant="ghost" size="icon" class="h-8 w-8" :aria-label="t('toolbar.logout')" @click="emit('logout')"><LogOut class="h-4 w-4" /></Button
     ></AppTooltip>
+    <WindowControls v-if="isDesktop" :is-maximized="isMaximized" @minimize="minimize" @toggle-maximize="toggleMaximize" @close="close" />
   </header>
 </template>

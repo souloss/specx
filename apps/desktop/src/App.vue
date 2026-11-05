@@ -7,7 +7,6 @@ import AppSidebar from "@/components/layout/AppSidebar.vue";
 import AppTabBar from "@/components/layout/AppTabBar.vue";
 import SpecificationDialog from "@/components/layout/SpecificationDialog.vue";
 import SettingsPage from "@/components/settings/SettingsPage.vue";
-import CatalogTransferDialog from "@/components/settings/CatalogTransferDialog.vue";
 import ServicePanel from "@/components/ServicePanel.vue";
 import LoginPanel from "@/components/auth/LoginPanel.vue";
 import { Button } from "@/components/ui/button";
@@ -19,7 +18,6 @@ import { usePanelResize } from "@/composables/usePanelResize";
 import { useToast } from "@/composables/useToast";
 import { useAppShortcuts } from "@/composables/useAppShortcuts";
 import { useUiFontFamily } from "@/composables/useUiFontFamily";
-import { downloadCatalog } from "@/lib/transfer/catalogTransfer";
 import { specxApi } from "@/lib/backend/client";
 import type { ResourceTreeNode } from "@/types/navigation";
 import { useShortcutStore } from "@/stores/shortcutStore";
@@ -38,7 +36,6 @@ const { message, visible, action, toast, dismissToast } = useToast();
 useUiFontFamily();
 const sidebar = ref<InstanceType<typeof AppSidebar>>();
 const showSpecification = ref(false);
-const showImport = ref(false);
 const pendingDelete = ref<ResourceTreeNode | null>(null);
 const deleting = ref(false);
 useAppShortcuts(() => {
@@ -53,9 +50,6 @@ onMounted(() => {
 function newService() {
   settings.sidebarCollapsed = false;
   navigation.beginCreate("resource");
-}
-function exportWorkspace() {
-  if (workspace.catalog) downloadCatalog(workspace.catalog);
 }
 async function remove() {
   if (!pendingDelete.value || deleting.value) return;
@@ -92,10 +86,10 @@ async function logout() {
   <div v-else-if="workspace.catalog" data-app-shell class="app-shell flex flex-col overflow-hidden bg-background text-foreground">
     <AppToolbar @new-service="newService" @new-specification="showSpecification = true" @logout="logout" />
     <div class="flex min-h-0 flex-1" :class="settings.appLayout === 'classic' ? 'app-layout-classic' : 'app-panel-gutter gap-1 p-1'">
-      <AppSidebar v-if="!settings.sidebarCollapsed" ref="sidebar" :sidebar-width="sidebarWidth" @start-resize="startSidebarResize" @collapse="settings.sidebarCollapsed = true" @import="showImport = true" @export="exportWorkspace" @remove="pendingDelete = $event" />
+      <AppSidebar v-if="!settings.sidebarCollapsed" ref="sidebar" :sidebar-width="sidebarWidth" @start-resize="startSidebarResize" @collapse="settings.sidebarCollapsed = true" @remove="pendingDelete = $event" />
       <main class="flex min-w-0 flex-1 flex-col overflow-hidden bg-background" :class="{ 'specx-panel': settings.appLayout === 'separated' }">
         <AppTabBar v-if="workspace.tabs.length || settings.showSettingsPage" />
-        <SettingsPage v-if="settings.showSettingsPage" @import="showImport = true" @export="exportWorkspace" />
+        <SettingsPage v-if="settings.showSettingsPage" />
         <div v-else-if="workspace.activeTab && workspace.activeServiceId" class="min-h-0 flex-1 overflow-auto p-6 lg:p-8">
           <ServicePanel :catalog="workspace.catalog" :service-id="workspace.activeServiceId" :tab="workspace.activeTab" @open-specification="workspace.openSpecification" @new-specification="showSpecification = true" />
         </div>
@@ -131,7 +125,6 @@ async function logout() {
         >
       </DialogContent>
     </Dialog>
-    <CatalogTransferDialog v-model:open="showImport" />
     <Dialog
       :open="!!pendingDelete"
       @update:open="

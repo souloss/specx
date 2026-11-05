@@ -1598,7 +1598,7 @@ async fn create_group(
         durable_idempotency(descriptor.as_ref(), &context, "service_group", &resource_id),
     )?;
     inner.seed_core = None;
-    Ok(Json(group.into()))
+    Ok(Json(group))
 }
 
 #[utoipa::path(
@@ -1780,7 +1780,7 @@ async fn create_tag(
         durable_idempotency(descriptor.as_ref(), &context, "tag", &resource_id),
     )?;
     inner.seed_core = None;
-    Ok(Json(tag.into()))
+    Ok(Json(tag))
 }
 
 #[utoipa::path(

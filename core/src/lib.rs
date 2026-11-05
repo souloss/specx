@@ -210,10 +210,10 @@ impl Core {
             ensure_workspace(context, &group.workspace_id)?;
         }
         for item in items {
-            if let Some(parent_id) = item.parent_id.as_deref() {
-                if !order_by_id.contains_key(parent_id) {
-                    return Err(CoreError::InvalidParent);
-                }
+            if let Some(parent_id) = item.parent_id.as_deref()
+                && !order_by_id.contains_key(parent_id)
+            {
+                return Err(CoreError::InvalidParent);
             }
             let mut path = HashSet::new();
             let mut cursor = Some(item.id.as_str());

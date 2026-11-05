@@ -5,6 +5,8 @@
 //! same contract a PostgreSQL adapter must implement for the production API.
 
 use crate::{Core, Id, Service, ServiceGroup, Specification, SpecificationKind, Tag, Workspace, WorkspaceContext};
+
+pub const LATEST_SCHEMA_VERSION: i64 = 11;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, backup::Backup, params};
 use sha2::{Digest, Sha256};
@@ -1643,7 +1645,7 @@ impl SqliteStore {
     }
 
     pub fn ready(&self) -> Result<bool, PersistenceError> {
-        self.has_migration(11)
+        self.has_migration(LATEST_SCHEMA_VERSION)
     }
 }
 

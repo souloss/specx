@@ -10,14 +10,14 @@
 | `src/components/layout/` | 顶部栏、侧栏、标签栏；只转发界面动作 |
 | `src/components/brand/` | JSX/TSX 编写的 SVG 品牌图标与完整字标 |
 | `src/components/sidebar/` | 资源树的键盘、右键菜单、内联命名、拖放与定位 |
-| `src/components/settings/` | 设置分类、外观、导航偏好与目录导入 |
+| `src/components/settings/` | 设置分类、外观、导航偏好与快捷键 |
 | `src/components/ui/` | 通用控件，不依赖 specX 领域 |
 | `src/stores/workspace.ts` | 工作区事实、打开的服务/规范标签与加载生命周期 |
 | `src/stores/navigationStore.ts` | 目录命令、命名草稿、筛选、定位与 API 接线 |
 | `src/stores/settingsStore.ts` | 当前设备的导航偏好、经典/分隔布局和设置页状态 |
 | `src/lib/sidebar/` | 目录布局算法和 SpecX catalog 适配，便于独立测试 |
 | `src/lib/backend/` | 统一 client、HTTP/Tauri transport、错误与安全存储 |
-| `src/lib/transfer/` | 目录 JSON 协议、校验、导入与导出 |
+| `src/lib/specifications/` | 规范类型注册表与创建流程适配 |
 | `src/composables/` | 主题、拖放、尺寸、标签滚动和快捷键等界面能力 |
 | `src/i18n/` | 简体中文和英文资源、语言偏好与运行时翻译 |
 | `src/styles/` | RGB 基础 tokens、主题色板、OKLCH 渐进增强、应用壳和资源内容样式 |

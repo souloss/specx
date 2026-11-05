@@ -9,8 +9,8 @@
 //! connections are pooled and must never block an HTTP executor thread.
 
 use crate::persistence::{
-    AuditEvent, BackupArtifact, IdempotencyRecord, PersistenceError, SpecificationRevision, WebSession,
-    WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
+    AuditEvent, BackupArtifact, IdempotencyRecord, LATEST_SCHEMA_VERSION, PersistenceError, SpecificationRevision,
+    WebSession, WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
 };
 use crate::{Core, Service, ServiceGroup, Specification, SpecificationKind, Tag, Workspace, WorkspaceContext};
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
@@ -34,7 +34,6 @@ use std::{
 };
 use tokio_postgres::{Config, NoTls, Row, Transaction, config::SslMode};
 
-const LATEST_SCHEMA_VERSION: i64 = 7;
 const MIGRATION_LOCK_KEY: (i32, i32) = (0x5350_5801, 0x4d49_4701);
 
 /// A pooled PostgreSQL store.  Cloning the handle is cheap and safe; the pool
@@ -320,6 +319,30 @@ impl PostgresStore {
             .execute("INSERT INTO schema_migrations(version) VALUES (7) ON CONFLICT DO NOTHING", &[])
             .await
             .map_err(pg_error)?;
+        // Versions 8-10 are retained as explicit no-op markers here because
+        // PostgreSQL creates these columns/indexes in the initial schema.
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (8) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (9) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .batch_execute(
+                "CREATE INDEX IF NOT EXISTS idx_workspace_invitations_expires_at ON workspace_invitations(expires_at);",
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (10) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (11) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
         transaction.commit().await.map_err(pg_error)?;
         Ok(())
     }
@@ -390,13 +413,13 @@ impl PostgresStore {
 
     pub async fn revoke_other_web_sessions(&self, token_hash: &str, revoked_at: &str) -> Result<u64, PersistenceError> {
         let client = self.client().await?;
-        Ok(client
+        client
             .execute(
                 "UPDATE web_sessions SET revoked_at=$1 WHERE token_hash<>$2 AND revoked_at IS NULL",
                 &[&revoked_at, &token_hash],
             )
             .await
-            .map_err(pg_error)?)
+            .map_err(pg_error)
     }
 
     pub async fn persist_core(&self, core: &Core, context: &WorkspaceContext) -> Result<(), PersistenceError> {

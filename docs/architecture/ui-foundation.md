@@ -11,10 +11,10 @@ Web 与 Tauri 共用 `apps/desktop`。基础层提供界面控件、主题、语
 | `components/ui/` | Button、Input、Select、菜单、提示和对话框等控件 | 不读取业务 store 或直接调用 API |
 | `components/layout/` | 顶栏、侧栏和标签栏壳层 | 只转发用户动作并组合视图 |
 | `components/sidebar/` | 分组/服务树、筛选、定位、拖放和内联命名 | 领域操作交给 navigation store |
-| `components/settings/` | 分类设置、外观、快捷键和导入 | 用户可见文本必须进入双语资源 |
+| `components/settings/` | 分类设置、外观和快捷键 | 用户可见文本必须进入双语资源 |
 | `composables/` | 主题、拖放、面板尺寸、滚动和快捷键生命周期 | DOM 监听需在卸载时清理 |
 | `lib/app/`、`lib/common/`、`lib/editor/` | 偏好、几何工具、快捷键与展示格式 | 纯逻辑优先，避免依赖组件实例 |
-| `lib/sidebar/`、`lib/transfer/` | 目录视图适配、导入/导出校验 | 不持有持久化真相 |
+| `lib/sidebar/`、`lib/specifications/` | 目录视图和规范类型适配 | 不持有持久化真相 |
 | `stores/` | 页面状态与领域命令 | 通过 backend client 调用服务端事实 |
 | `lib/backend/` | HTTP/Tauri transport、错误解析和请求类型 | 两种 Host 遵守同一 API 契约 |
 | `i18n/`、`styles/` | 中英文资源、tokens、主题和布局样式 | 不硬编码用户可见文本或重复主题状态 |
