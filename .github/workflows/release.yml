@@ -138,11 +138,13 @@ jobs:
             if [ -n "$asset_id" ]; then
               gh api --method DELETE "repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets/${asset_id}" >/dev/null
             fi
-            gh api --hostname uploads.github.com --method POST \
-              -H 'Accept: application/vnd.github+json' \
-              -H 'Content-Type: application/octet-stream' \
-              "repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets?name=${name}" \
-              --input "$path" >/dev/null
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'Content-Type: application/octet-stream' \
+              --data-binary "@${path}" \
+              "https://uploads.github.com/repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets?name=${name}" >/dev/null
           }
           upload_asset "$dmg"
           upload_asset "$updater_archive"
