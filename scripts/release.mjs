@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
@@ -153,7 +154,8 @@ async function main() {
   } else throw new Error("Usage: release.mjs check [vX.Y.Z] | prepare X.Y.Z | config [--required] | assets vX.Y.Z | verify-manifest <path>");
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))
+const scriptPath = fileURLToPath(import.meta.url);
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(scriptPath))
   main().catch((error) => {
     console.error(error.message);
     process.exitCode = 1;
