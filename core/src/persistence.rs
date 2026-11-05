@@ -8,7 +8,7 @@ use crate::{Core, Id, Service, ServiceGroup, Specification, SpecificationKind, T
 
 pub const LATEST_SCHEMA_VERSION: i64 = 11;
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, backup::Backup, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, backup::Backup, params};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
@@ -132,7 +132,7 @@ impl SqliteStore {
         let path = path.as_ref().to_path_buf();
         let connection = Connection::open(&path).map_err(PersistenceError::from)?;
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")?;
-        let store = Self { connection, path: Some(path) };
+        let mut store = Self { connection, path: Some(path) };
         store.migrate()?;
         Ok(store)
     }
@@ -140,7 +140,7 @@ impl SqliteStore {
     pub fn open_in_memory() -> Result<Self, PersistenceError> {
         let connection = Connection::open_in_memory().map_err(PersistenceError::from)?;
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")?;
-        let store = Self { connection, path: None };
+        let mut store = Self { connection, path: None };
         store.migrate()?;
         Ok(store)
     }
@@ -149,8 +149,9 @@ impl SqliteStore {
         self.path.as_deref()
     }
 
-    fn migrate(&self) -> Result<(), PersistenceError> {
-        self.connection.execute_batch(
+    fn migrate(&mut self) -> Result<(), PersistenceError> {
+        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS service_groups (
                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
@@ -229,24 +230,24 @@ impl SqliteStore {
              );
              INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, datetime('now'));",
         )?;
-        if !has_column(&self.connection, "services", "updated_at")? {
-            self.connection.execute("ALTER TABLE services ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''", [])?;
+        if !has_column(&transaction, "services", "updated_at")? {
+            transaction.execute("ALTER TABLE services ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''", [])?;
         }
-        if !has_column(&self.connection, "services", "archived")? {
-            self.connection.execute("ALTER TABLE services ADD COLUMN archived INTEGER NOT NULL DEFAULT 0", [])?;
+        if !has_column(&transaction, "services", "archived")? {
+            transaction.execute("ALTER TABLE services ADD COLUMN archived INTEGER NOT NULL DEFAULT 0", [])?;
         }
-        if !has_column(&self.connection, "service_groups", "position")? {
-            self.connection.execute("ALTER TABLE service_groups ADD COLUMN position INTEGER NOT NULL DEFAULT 0", [])?;
+        if !has_column(&transaction, "service_groups", "position")? {
+            transaction.execute("ALTER TABLE service_groups ADD COLUMN position INTEGER NOT NULL DEFAULT 0", [])?;
         }
-        self.connection
+        transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, datetime('now'))", [])?;
-        self.connection
+        transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, datetime('now'))", [])?;
-        self.connection
+        transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, datetime('now'))", [])?;
-        self.connection
+        transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (5, datetime('now'))", [])?;
-        self.connection.execute(
+        transaction.execute(
             "CREATE TABLE IF NOT EXISTS api_idempotency (
                idempotency_key TEXT PRIMARY KEY,
                tenant_id TEXT NOT NULL,
@@ -258,9 +259,9 @@ impl SqliteStore {
              )",
             [],
         )?;
-        self.connection
+        transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (6, datetime('now'))", [])?;
-        self.connection.execute(
+        transaction.execute(
             "INSERT OR IGNORE INTO workspaces(tenant_id, id, name, slug, created_at)
              SELECT tenant_id, workspace_id,
                     CASE WHEN workspace_id = 'default' THEN '默认工作区' ELSE workspace_id END,
@@ -275,9 +276,9 @@ impl SqliteStore {
              GROUP BY tenant_id, workspace_id",
             [],
         )?;
-        self.connection
+        transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (7, datetime('now'))", [])?;
-        self.connection.execute(
+        transaction.execute(
             "CREATE TABLE IF NOT EXISTS workspace_invitations (
                id TEXT PRIMARY KEY,
                tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
@@ -286,21 +287,21 @@ impl SqliteStore {
              )",
             [],
         )?;
-        if !has_column(&self.connection, "workspace_invitations", "revoked_at")? {
-            self.connection.execute("ALTER TABLE workspace_invitations ADD COLUMN revoked_at TEXT", [])?;
+        if !has_column(&transaction, "workspace_invitations", "revoked_at")? {
+            transaction.execute("ALTER TABLE workspace_invitations ADD COLUMN revoked_at TEXT", [])?;
         }
-        self.connection
+        transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (8, datetime('now'))", [])?;
-        self.connection
+        transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (9, datetime('now'))", [])?;
-        self.connection.execute(
+        transaction.execute(
             "CREATE INDEX IF NOT EXISTS idx_workspace_invitations_expires_at
              ON workspace_invitations(expires_at)",
             [],
         )?;
-        self.connection
+        transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (10, datetime('now'))", [])?;
-        self.connection.execute(
+        transaction.execute(
             "CREATE TABLE IF NOT EXISTS web_sessions (
                token_hash TEXT PRIMARY KEY,
                actor_id TEXT NOT NULL,
@@ -311,8 +312,9 @@ impl SqliteStore {
              CREATE INDEX IF NOT EXISTS idx_web_sessions_expires_at ON web_sessions(expires_at);",
             [],
         )?;
-        self.connection
+        transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (11, datetime('now'))", [])?;
+        transaction.commit().map_err(PersistenceError::from)?;
         Ok(())
     }
 
@@ -1866,6 +1868,39 @@ mod tests {
         let updated = Core::load(&store, &context).unwrap();
         assert_eq!(updated.specifications.get("spec-1").unwrap().version, 2);
         assert_eq!(updated.specifications.get("spec-1").unwrap().content, "# Updated Gateway");
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_schema_and_markers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("broken-migration.db");
+        let connection = Connection::open(&path).unwrap();
+        // This deliberately collides with the v1 table name while omitting the
+        // columns required by the v7 workspace backfill. The migration must
+        // leave the file exactly as it was when that backfill fails.
+        connection.execute("CREATE TABLE workspaces (tenant_id TEXT NOT NULL)", []).unwrap();
+        drop(connection);
+
+        assert!(SqliteStore::open(&path).is_err());
+
+        let connection = Connection::open(&path).unwrap();
+        let migrations_table: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!migrations_table);
+        let services_columns = connection
+            .prepare("PRAGMA table_info(services)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(services_columns.is_empty());
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[test]

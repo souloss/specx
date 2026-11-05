@@ -19,10 +19,12 @@ delete an applied migration, or edit a migration that may already be deployed.
 Add the next version and update both adapters in the same change.
 
 Hosts open the adapter before exposing the API router. `/ready` remains false
-until the latest marker exists. Web startup reports a failed migration and
-does not serve business handlers; the desktop shell remains visible and
-retries opening the adapter on the next request. Both hosts therefore follow
-this order: install the new binary, acquire the migration lock, migrate, verify
+until the latest marker exists. Web startup makes three bounded attempts with a
+short backoff, logs the final storage error, and exits without
+binding business handlers if the database remains unavailable. The process
+supervisor may then restart it. The desktop shell remains visible and retries
+opening the adapter on the next request. Both hosts therefore follow this
+order: install the new binary, acquire the migration lock, migrate, verify
 readiness, then expose writes. If migration fails, retain the previous database
 and diagnostic error; never continue with partially migrated business handlers.
 Release packages must include a backup or provider snapshot policy appropriate
@@ -35,5 +37,7 @@ must surface that state and retry after migration succeeds. The `/ready`
 probe refreshes the shared gate after a host recovers its storage connection.
 
 The CI gate runs `pnpm migration:check`, Rust tests for fresh and legacy SQLite
-databases, and the PostgreSQL migration tests when a PostgreSQL service is
-available. The check rejects missing or divergent versions before a release.
+databases, and PostgreSQL integration tests against a service container. The
+PostgreSQL job sets `SPECX_REQUIRE_POSTGRES=1`, so a missing connection URL
+fails instead of silently skipping the suite. The check rejects missing or
+divergent versions before a release.

@@ -25,6 +25,9 @@ owner or independent consumer, not just to make the directory tree deeper.
 - Use `rustfmt` formatting. Modules, functions, methods, and fields use
   `snake_case`; types, traits, and enum variants use `UpperCamelCase`; constants
   use `SCREAMING_SNAKE_CASE`.
+- Keep `cargo clippy --all-targets -- -D warnings` clean for changed workspace
+  crates. Avoid `unsafe`; when an unsafe boundary is necessary, keep it small
+  and document its invariants at the call site.
 - Keep domain failures as typed errors. Map them at the API boundary; do not
   return formatted `Debug` output or storage internals to clients.
 - Keep API DTO serialization explicit with `#[serde(rename_all = "camelCase")]`
@@ -42,6 +45,11 @@ owner or independent consumer, not just to make the directory tree deeper.
   functions, and object properties use `camelCase`; types and Vue components use
   `UpperCamelCase`. Follow local file naming: Vue components are PascalCase,
   utilities and stores are camelCase.
+- Run `pnpm --dir apps/desktop lint` for the Oxlint correctness rules. Keep
+  intentional exceptions local and documented with an inline disable; do not
+  weaken the project configuration to hide an unrelated warning.
+- Keep `vue-tsc --noEmit` clean under strict mode. Avoid `any`; use `unknown`
+  at untrusted boundaries and narrow it before use.
 - Keep components focused on rendering and dispatch. Put shared state and
   commands in Pinia stores, reusable deterministic logic in `lib/`, and host
   differences behind `lib/backend` transports.
@@ -83,6 +91,10 @@ owner or independent consumer, not just to make the directory tree deeper.
   checked fixtures, and focused tests agree. Treat a document-only rule as
   incomplete until a formatter, type check, lint rule, contract test, or
   migration check enforces it.
+- CI keeps frontend, Core/API/SQLite, PostgreSQL integration, desktop/Tauri,
+  and release-contract checks as separate required jobs. PostgreSQL integration
+  runs with `SPECX_REQUIRE_POSTGRES=1`; a missing test URL is therefore a
+  failure in that job instead of a skipped test.
 - Run the focused package checks first. Before finishing, run
   `git diff --check`, frontend formatting/type/tests for frontend changes, and
   `cargo fmt --all -- --check` plus the affected Rust checks/tests for Rust

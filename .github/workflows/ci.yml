@@ -8,17 +8,89 @@ on:
 permissions:
   contents: read
 
+env:
+  PNPM_VERSION: 10.34.7
+  NODE_VERSION: 22
+
 jobs:
-  check:
+  frontend:
+    name: Frontend and web contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 10.34.7
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir apps/desktop lint
+      - run: pnpm --dir apps/desktop format:check
+      - run: pnpm --dir apps/desktop check:dev-styles
+      - run: pnpm --dir apps/desktop exec vue-tsc --noEmit
+      - run: pnpm --dir apps/desktop test
+      - run: pnpm --dir apps/desktop build
+
+  core-api:
+    name: Core, API, and SQLite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt, clippy
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm migration:check
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy -p specx-core -p specx-api -p specx-web --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  postgres-integration:
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+    env:
+      SPECX_TEST_POSTGRES_URL: postgres://specx:specx@127.0.0.1:5432/specx_test
+      SPECX_REQUIRE_POSTGRES: "1"
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: specx
+          POSTGRES_PASSWORD: specx
+          POSTGRES_DB: specx_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U specx -d specx_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - run: cargo test -p specx-core --test postgres_integration --locked -- --test-threads=1
+      - run: cargo test -p specx-api --test postgres_api_integration --locked -- --test-threads=1
+
+  desktop:
+    name: Desktop and Tauri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
       - uses: dtolnay/rust-toolchain@1.90.0
         with:
@@ -26,14 +98,25 @@ jobs:
       - run: sudo apt-get update
       - run: sudo apt-get install --yes libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir apps/desktop build
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+  release-contract:
+    name: Release contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - run: pnpm release:check
       - run: pnpm test:release
       - run: pnpm migration:check
-      - run: pnpm --dir apps/desktop format:check
-      - run: pnpm --dir apps/desktop check:dev-styles
-      - run: cargo fmt --all -- --check
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - run: cargo clippy -p specx-core -p specx-api -p specx-web --all-targets --locked -- -D warnings
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
-      - run: pnpm build:checked
-      - run: pnpm test:specx

@@ -20,7 +20,7 @@ export function readableFontFamily(fontFamily: string): string {
 
 export function customUiFontFamily(name: string): string | null {
   const family = name.trim().replace(/^(['"])(.*)\1$/, "$2");
-  if (!family || /[\u0000-\u001f;{}]/.test(family)) return null;
+  if (!family || [...family].some((character) => character.charCodeAt(0) < 0x20) || /[;{}]/.test(family)) return null;
   const quoted = family.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return `"${quoted}", ${DEFAULT_UI_FONT_FAMILY}`;
 }

@@ -7,10 +7,20 @@ use specx_core::{Core, Service, Specification, SpecificationKind, WorkspaceConte
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+fn postgres_url() -> Option<String> {
+    match std::env::var("SPECX_TEST_POSTGRES_URL").ok().filter(|url| !url.trim().is_empty()) {
+        Some(url) => Some(url),
+        None if std::env::var_os("SPECX_REQUIRE_POSTGRES").is_some() => {
+            panic!("SPECX_TEST_POSTGRES_URL must be set for PostgreSQL integration tests")
+        }
+        None => None,
+    }
+}
+
 #[tokio::test]
 async fn postgres_migrations_serialize_across_clients() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;
-    let Ok(url) = std::env::var("SPECX_TEST_POSTGRES_URL") else { return };
+    let Some(url) = postgres_url() else { return };
     let first = PostgresStore::connect(&url, 2).await.expect("connect first migration client");
     let second = PostgresStore::connect(&url, 2).await.expect("connect second migration client");
     let (first_result, second_result) = tokio::join!(first.migrate(), second.migrate());
@@ -23,7 +33,7 @@ async fn postgres_migrations_serialize_across_clients() {
 #[tokio::test]
 async fn postgres_web_sessions_revoke_across_clients() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;
-    let Ok(url) = std::env::var("SPECX_TEST_POSTGRES_URL") else { return };
+    let Some(url) = postgres_url() else { return };
     let first = PostgresStore::connect(&url, 2).await.expect("connect first session client");
     let second = PostgresStore::connect(&url, 2).await.expect("connect second session client");
     let token_hash = "sha256:session-integration".to_owned();
@@ -43,7 +53,7 @@ async fn postgres_web_sessions_revoke_across_clients() {
 #[tokio::test]
 async fn postgres_backup_retention_lock_serializes_distinct_clients() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;
-    let Ok(url) = std::env::var("SPECX_TEST_POSTGRES_URL") else { return };
+    let Some(url) = postgres_url() else { return };
     let first = PostgresStore::connect(&url, 2).await.expect("connect first PostgreSQL client");
     let second = PostgresStore::connect(&url, 2).await.expect("connect second PostgreSQL client");
     let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -78,7 +88,7 @@ async fn postgres_backup_retention_lock_serializes_distinct_clients() {
 #[tokio::test]
 async fn postgres_managed_backup_job_rotates_hashes_and_rolls_back_failures() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;
-    let Ok(url) = std::env::var("SPECX_TEST_POSTGRES_URL") else { return };
+    let Some(url) = postgres_url() else { return };
     let directory = tempfile::tempdir().expect("backup directory");
     let dump_script = directory.path().join("fake-pg-dump.sh");
     let restore_script = directory.path().join("fake-pg-restore.sh");
@@ -176,7 +186,7 @@ async fn postgres_managed_backup_job_rotates_hashes_and_rolls_back_failures() {
 #[tokio::test]
 async fn postgres_round_trip_is_scoped_and_transactional() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;
-    let Ok(url) = std::env::var("SPECX_TEST_POSTGRES_URL") else { return };
+    let Some(url) = postgres_url() else { return };
     let store = PostgresStore::connect(&url, 4).await.expect("connect to PostgreSQL");
     assert!(store.ready().await.expect("schema is ready"));
 
@@ -335,7 +345,7 @@ async fn postgres_round_trip_is_scoped_and_transactional() {
 #[tokio::test]
 async fn postgres_purges_only_expired_pending_invitations() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;
-    let Ok(url) = std::env::var("SPECX_TEST_POSTGRES_URL") else { return };
+    let Some(url) = postgres_url() else { return };
     let store = PostgresStore::connect(&url, 2).await.expect("connect to PostgreSQL");
     let suffix = Utc::now().timestamp_nanos_opt().unwrap_or_default();
     let tenant = format!("invitation-cleanup-{suffix}");
@@ -432,7 +442,7 @@ async fn postgres_tls_policy_rejects_explicit_plaintext_when_required() {
 #[tokio::test]
 async fn postgres_migration_failure_rolls_back_the_entire_transaction() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;
-    let Ok(url) = std::env::var("SPECX_TEST_POSTGRES_URL") else { return };
+    let Some(url) = postgres_url() else { return };
     let store = PostgresStore::connect(&url, 2).await.expect("connect to PostgreSQL");
     let mut client = store.pool().get().await.expect("pool client");
     let transaction = client.transaction().await.expect("transaction");

@@ -28,7 +28,7 @@ export function isAssignableShortcut(shortcut: string): boolean {
   if (!shortcut) return true;
   const parts = parseShortcutParts(shortcut);
   const key = parts.at(-1) ?? "";
-  if (!key || !/^(?:[A-Z0-9]|F(?:[1-9]|1[0-2])|Delete|Backspace|Space|Plus|[\[\]\\;,./'`=\-])$/i.test(key)) return false;
+  if (!key || !/^(?:[A-Z0-9]|F(?:[1-9]|1[0-2])|Delete|Backspace|Space|Plus|[[\]\\;,./'`=-])$/i.test(key)) return false;
   const modifiers = parts.slice(0, -1);
   if (new Set(modifiers).size !== modifiers.length || modifiers.some((part) => !["Mod", "Ctrl", "Meta", "Alt", "Shift"].includes(part))) return false;
   // Plain text, native navigation and common browser/OS commands stay available.

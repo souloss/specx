@@ -24,30 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let database = config::parse_database_url(env::var("SPECX_DATABASE_URL").ok().as_deref(), &paths.data_dir)
         .map_err(|error| format!("invalid database configuration: {error}"))?;
-    let mut api = match database {
-        config::DatabaseUrl::Sqlite(path) => {
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            ApiState::open(path)?
-        }
-        config::DatabaseUrl::Postgres(url) => {
-            #[cfg(feature = "postgres")]
-            {
-                let pool_size =
-                    env::var("SPECX_DATABASE_MAX_POOL_SIZE").ok().and_then(|value| value.parse().ok()).unwrap_or(16);
-                ApiState::open_postgres_with_backup_root(&url, pool_size, &paths.backup_dir).await?
-            }
-            #[cfg(not(feature = "postgres"))]
-            {
-                let _ = url;
-                return Err(
-                    "SPECX_DATABASE_URL selects PostgreSQL, but this binary was built without the postgres feature"
-                        .into(),
-                );
-            }
-        }
-    };
+    let mut api = open_api_with_retry(&database, &paths).await?;
     if let Some(origin) = env::var("SPECX_PUBLIC_ORIGIN").ok().filter(|value| !value.trim().is_empty()) {
         api = api.with_public_origin(&origin)?;
     }
@@ -82,4 +59,94 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+const MIGRATION_RETRY_ATTEMPTS: u32 = 3;
+const MIGRATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+async fn open_api_with_retry(
+    database: &config::DatabaseUrl,
+    paths: &AppPaths,
+) -> Result<ApiState, Box<dyn std::error::Error>> {
+    #[cfg(not(feature = "postgres"))]
+    if matches!(database, config::DatabaseUrl::Postgres(_)) {
+        return Err(
+            "SPECX_DATABASE_URL selects PostgreSQL, but this binary was built without the postgres feature".into()
+        );
+    }
+
+    let mut last_error = None;
+    for attempt in 1..=MIGRATION_RETRY_ATTEMPTS {
+        let result = match database {
+            config::DatabaseUrl::Sqlite(path) => {
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                ApiState::open(path).map_err(|error| error.to_string())
+            }
+            config::DatabaseUrl::Postgres(url) => {
+                #[cfg(feature = "postgres")]
+                {
+                    let pool_size = env::var("SPECX_DATABASE_MAX_POOL_SIZE")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(16);
+                    ApiState::open_postgres_with_backup_root(url, pool_size, &paths.backup_dir)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+                #[cfg(not(feature = "postgres"))]
+                {
+                    let _ = url;
+                    Err("SPECX_DATABASE_URL selects PostgreSQL, but this binary was built without the postgres feature"
+                        .to_owned())
+                }
+            }
+        };
+        match result {
+            Ok(api) => {
+                tracing::info!(attempt, "storage migrations are ready");
+                return Ok(api);
+            }
+            Err(error) => {
+                tracing::warn!(attempt, max_attempts = MIGRATION_RETRY_ATTEMPTS, %error, "storage migration attempt failed");
+                last_error = Some(error);
+                if attempt < MIGRATION_RETRY_ATTEMPTS {
+                    tokio::time::sleep(MIGRATION_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+    Err(format!(
+        "storage migrations failed after {MIGRATION_RETRY_ATTEMPTS} attempts; refusing to bind business handlers: {}",
+        last_error.unwrap_or_else(|| "unknown storage error".to_owned())
+    )
+    .into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MIGRATION_RETRY_ATTEMPTS, open_api_with_retry};
+    use crate::config::DatabaseUrl;
+    use specx_platform::AppPaths;
+
+    #[tokio::test]
+    async fn failed_storage_open_retries_before_refusing_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("invalid.sqlite");
+        std::fs::write(&database, b"not a SQLite database").unwrap();
+        let paths = AppPaths {
+            data_dir: directory.path().to_path_buf(),
+            backup_dir: directory.path().join("backups"),
+            static_dir: directory.path().join("static"),
+        };
+
+        let error = match open_api_with_retry(&DatabaseUrl::Sqlite(database), &paths).await {
+            Ok(_) => panic!("invalid database unexpectedly opened"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains(&format!("failed after {MIGRATION_RETRY_ATTEMPTS} attempts")));
+        assert!(error.contains("refusing to bind business handlers"));
+    }
 }

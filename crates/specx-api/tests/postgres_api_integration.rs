@@ -10,6 +10,16 @@ use specx_api::{ApiState, router};
 use std::sync::OnceLock;
 use tower::ServiceExt;
 
+fn postgres_url() -> Option<String> {
+    match std::env::var("SPECX_TEST_POSTGRES_URL").ok().filter(|url| !url.trim().is_empty()) {
+        Some(url) => Some(url),
+        None if std::env::var_os("SPECX_REQUIRE_POSTGRES").is_some() => {
+            panic!("SPECX_TEST_POSTGRES_URL must be set for PostgreSQL integration tests")
+        }
+        None => None,
+    }
+}
+
 fn tenant() -> &'static str {
     static TENANT: OnceLock<String> = OnceLock::new();
     TENANT.get_or_init(|| {
@@ -54,7 +64,7 @@ fn request_in_tenant(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_api_enforces_membership_and_specification_cas() {
-    let Ok(url) = std::env::var("SPECX_TEST_POSTGRES_URL") else { return };
+    let Some(url) = postgres_url() else { return };
     let state = ApiState::open_postgres(&url, 4).await.expect("connect to PostgreSQL");
     let app = router::<()>(state.clone());
     let group_id = format!("root-{}", tenant());
@@ -65,7 +75,7 @@ async fn postgres_api_enforces_membership_and_specification_cas() {
     assert_eq!(ready.status(), StatusCode::OK);
     let ready: serde_json::Value =
         serde_json::from_slice(&ready.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(ready["schemaVersion"], 7);
+    assert_eq!(ready["schemaVersion"], specx_core::persistence::LATEST_SCHEMA_VERSION);
 
     let owner_catalog = app.clone().oneshot(request(axum::http::Method::GET, "/catalog", "owner", None)).await.unwrap();
     assert_eq!(owner_catalog.status(), StatusCode::OK);

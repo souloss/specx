@@ -78,13 +78,12 @@ async fn specx_api_request(
 
 async fn open_api(database: &DatabaseUrl, backup_dir: &Path) -> Result<ApiState, String> {
     match database {
-        DatabaseUrl::Sqlite(path) =>
-            ApiState::open_with_backup_root(path, backup_dir).map_err(|error| error.to_string()),
+        DatabaseUrl::Sqlite(path) => {
+            ApiState::open_with_backup_root(path, backup_dir).map_err(|error| error.to_string())
+        }
         DatabaseUrl::Postgres(url) => {
-            let pool_size = env::var("SPECX_DATABASE_MAX_POOL_SIZE")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(16);
+            let pool_size =
+                env::var("SPECX_DATABASE_MAX_POOL_SIZE").ok().and_then(|value| value.parse().ok()).unwrap_or(16);
             ApiState::open_postgres_with_backup_root(url, pool_size, backup_dir)
                 .await
                 .map_err(|error| error.to_string())
@@ -179,10 +178,10 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
-            if let Some(decorations) = native_window_decorations_override(std::env::consts::OS) {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.set_decorations(decorations);
-                }
+            if let Some(decorations) = native_window_decorations_override(std::env::consts::OS)
+                && let Some(window) = app.get_webview_window("main")
+            {
+                let _ = window.set_decorations(decorations);
             }
             let default_data_dir = app.path().app_data_dir()?;
             let data_dir = env::var_os("SPECX_DATA_DIR").map(PathBuf::from).unwrap_or(default_data_dir);
@@ -192,20 +191,16 @@ pub fn run() {
             fs::create_dir_all(&backup_dir)?;
             let database = parse_database_url(env::var("SPECX_DATABASE_URL").ok().as_deref(), &data_dir)
                 .map_err(std::io::Error::other)?;
-            if let DatabaseUrl::Sqlite(path) = &database {
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
+            if let DatabaseUrl::Sqlite(path) = &database
+                && let Some(parent) = path.parent()
+            {
+                fs::create_dir_all(parent)?;
             }
             let initial_api = tauri::async_runtime::block_on(open_api(&database, &backup_dir));
             if let Err(error) = &initial_api {
                 eprintln!("specX storage migration will be retried after startup: {error}");
             }
-            app.manage(DesktopState {
-                api: Arc::new(Mutex::new(initial_api.ok())),
-                database,
-                backup_dir,
-            });
+            app.manage(DesktopState { api: Arc::new(Mutex::new(initial_api.ok())), database, backup_dir });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
