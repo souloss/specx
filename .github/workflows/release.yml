@@ -138,7 +138,7 @@ jobs:
             if [ -n "$asset_id" ]; then
               gh api --method DELETE "repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets/${asset_id}" >/dev/null
             fi
-            gh api --method POST \
+            gh api --hostname uploads.github.com --method POST \
               -H 'Accept: application/vnd.github+json' \
               -H 'Content-Type: application/octet-stream' \
               "repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets?name=${name}" \
