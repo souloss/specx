@@ -111,5 +111,9 @@ macOS arm64/x64 构建并上传安装包及 `latest.json`。全部平台的签�
 工作流上传双语日志并将草稿发布为 latest。失败会保留草稿，不应手工发布缺少平台
 的版本；修复后重跑失败的工作流。
 
+当前首版未配置 Apple Developer ID 证书，macOS 构建使用 `--no-sign`，但更新包
+仍使用 Tauri updater 私钥签名。配置 `APPLE_CERTIFICATE` 等 Secrets 后，应移除
+macOS matrix 的 `tauri_args: --no-sign`，再发布新的 patch 版本完成系统签名与公证。
+
 首次发布后，使用前一版本的真实安装包检查签名更新、下载进度、安装确认、重启、
 版本变化与数据保留。CI 不能替代各操作系统上的实际安装和升级验收。

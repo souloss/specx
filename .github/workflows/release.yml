@@ -60,12 +60,16 @@ jobs:
         include:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            tauri_args: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            tauri_args: ""
           - os: macos-14
             target: aarch64-apple-darwin
+            tauri_args: --no-sign
           - os: macos-14
             target: x86_64-apple-darwin
+            tauri_args: --no-sign
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -108,7 +112,7 @@ jobs:
           releaseId: ${{ needs.prepare.outputs.release_id }}
           releaseDraft: true
           includeUpdaterJson: true
-          args: --target ${{ matrix.target }} --config .local/tauri-update.conf.json -- --locked
+          args: --target ${{ matrix.target }} --config .local/tauri-update.conf.json ${{ matrix.tauri_args }} -- --locked
 
   publish:
     needs: [prepare, desktop]
