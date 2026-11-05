@@ -18,7 +18,9 @@
         "minWidth": 900,
         "minHeight": 600,
         "resizable": true,
-        "decorations": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "acceptFirstMouse": true,
         "fullscreen": false,
         "visible": true
       }

@@ -43,6 +43,8 @@ const zhCN = {
     minimize: "最小化",
     maximize: "最大化",
     restore: "还原",
+    fullscreen: "全屏",
+    exitFullscreen: "退出全屏",
     close: "关闭窗口",
   },
   theme: {

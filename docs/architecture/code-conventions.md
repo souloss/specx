@@ -79,6 +79,10 @@ owner or independent consumer, not just to make the directory tree deeper.
   authorization, response shape, and concurrency at the API boundary.
 - For cross-layer changes, update all affected transports, locale files,
   fixtures, and architecture documentation in the same change.
+- A boundary rule is complete only when executable behavior, OpenAPI output,
+  checked fixtures, and focused tests agree. Treat a document-only rule as
+  incomplete until a formatter, type check, lint rule, contract test, or
+  migration check enforces it.
 - Run the focused package checks first. Before finishing, run
   `git diff --check`, frontend formatting/type/tests for frontend changes, and
   `cargo fmt --all -- --check` plus the affected Rust checks/tests for Rust

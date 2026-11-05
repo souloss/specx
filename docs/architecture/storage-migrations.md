@@ -18,13 +18,21 @@ markers) so both adapters share one upgrade history. Do not reuse a version,
 delete an applied migration, or edit a migration that may already be deployed.
 Add the next version and update both adapters in the same change.
 
-Application startup calls the adapter migration before constructing the API
-router. `/ready` remains false until the latest marker exists. Desktop and Web
-updates therefore follow this order: install the new binary, acquire the
-migration lock, migrate, verify readiness, then expose writes. If migration
-fails, retain the previous database and diagnostic error; never continue with
-partially migrated business handlers. Release packages must include a backup
-or provider snapshot policy appropriate to the deployment.
+Hosts open the adapter before exposing the API router. `/ready` remains false
+until the latest marker exists. Web startup reports a failed migration and
+does not serve business handlers; the desktop shell remains visible and
+retries opening the adapter on the next request. Both hosts therefore follow
+this order: install the new binary, acquire the migration lock, migrate, verify
+readiness, then expose writes. If migration fails, retain the previous database
+and diagnostic error; never continue with partially migrated business handlers.
+Release packages must include a backup or provider snapshot policy appropriate
+to the deployment.
+
+The API also checks the shared readiness gate before every business request. Only
+`/health`, `/ready`, and `/openapi.json` remain available while migrations are
+incomplete; other routes return the stable `not_ready` error envelope. Hosts
+must surface that state and retry after migration succeeds. The `/ready`
+probe refreshes the shared gate after a host recovers its storage connection.
 
 The CI gate runs `pnpm migration:check`, Rust tests for fresh and legacy SQLite
 databases, and the PostgreSQL migration tests when a PostgreSQL service is

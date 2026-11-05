@@ -711,6 +711,25 @@ async fn readiness_reports_migration_state_and_health_headers() {
 }
 
 #[tokio::test]
+async fn business_requests_are_gated_when_storage_is_not_ready() {
+    let state = ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap());
+    state.metrics.ready.store(0, Ordering::Release);
+    let app = router(state);
+
+    let response = headers(axum::http::Request::get("/catalog")).body(Body::empty()).unwrap();
+    let response = app.clone().oneshot(response).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["version"], 1);
+    assert_eq!(body["code"], "not_ready");
+    assert_eq!(body["messageKey"], "apiError.notReady");
+
+    let health = app.oneshot(axum::http::Request::get("/health").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn successful_mutations_write_a_scoped_audit_event() {
     let state = ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap());
     let app = router(state.clone());

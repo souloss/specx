@@ -82,6 +82,12 @@ struct ApiMetrics {
     ready: AtomicU64,
 }
 
+impl ApiMetrics {
+    fn storage_ready() -> Self {
+        Self { ready: AtomicU64::new(1), ..Self::default() }
+    }
+}
+
 struct ApiInner {
     store: StoreBackend,
     seed_core: Option<Core>,
@@ -765,7 +771,7 @@ impl ApiState {
             backup_root: Arc::new(test_backup_root()),
             backup_storage: None,
             backup_retention: 10,
-            metrics: Arc::new(ApiMetrics::default()),
+            metrics: Arc::new(ApiMetrics::storage_ready()),
             postgres_backend: false,
             public_origin: None,
         }
@@ -781,7 +787,7 @@ impl ApiState {
             backup_root: Arc::new(backup_root),
             backup_storage: None,
             backup_retention: 10,
-            metrics: Arc::new(ApiMetrics::default()),
+            metrics: Arc::new(ApiMetrics::storage_ready()),
             postgres_backend: false,
             public_origin: None,
         }
@@ -793,7 +799,7 @@ impl ApiState {
             backup_root: Arc::new(backup_root.as_ref().to_path_buf()),
             backup_storage: None,
             backup_retention: 10,
-            metrics: Arc::new(ApiMetrics::default()),
+            metrics: Arc::new(ApiMetrics::storage_ready()),
             postgres_backend: false,
             public_origin: None,
         }
@@ -820,7 +826,7 @@ impl ApiState {
             backup_root: Arc::new(backup_root.as_ref().to_path_buf()),
             backup_storage: None,
             backup_retention: 10,
-            metrics: Arc::new(ApiMetrics::default()),
+            metrics: Arc::new(ApiMetrics::storage_ready()),
             postgres_backend: true,
             public_origin: None,
         })
@@ -1174,6 +1180,8 @@ async fn authorize_request(State(state): State<ApiState>, mut request: Request, 
     }
     let result = if matches!(request.uri().path(), "/health" | "/ready" | "/openapi.json") {
         next.run(request).await
+    } else if state.metrics.ready.load(Ordering::Acquire) == 0 {
+        ApiError::NotReady.into_response()
     } else if !write_origin_allowed(request.headers(), request.method(), state.public_origin.as_ref()) {
         ApiError::OriginRejected.into_response()
     } else if request.method() == axum::http::Method::POST && request.uri().path() == "/invitations/accept" {

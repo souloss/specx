@@ -6,14 +6,14 @@ import { Button } from "@/components/ui/button";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { specxApi } from "@/lib/backend/client";
 import { createId } from "@/lib/core";
-import { SPECIFICATION_TYPES } from "@/lib/specifications/registry";
+import { SPECIFICATION_TYPES, type SpecificationFieldDefinition } from "@/lib/specifications/registry";
 import type { SpecificationKind } from "@/types/domain";
 import { translate, type MessageKey } from "@/i18n";
 
 const open = defineModel<boolean>("open", { required: true });
 const workspace = useWorkspaceStore();
 const t = translate;
-const step = ref<1 | 2 | 3>(1);
+const step = ref(1);
 const query = ref("");
 const selectedKind = ref<SpecificationKind>("markdown");
 const title = ref("");
@@ -21,16 +21,16 @@ const content = ref("");
 const error = ref("");
 const busy = ref(false);
 const serviceId = ref("");
-const stepLabels = ["specification.step1", "specification.step2", "specification.step3"] as const;
 const viewMode = ref<"grid" | "list">("grid");
 const categoryFilter = ref<"all" | "document">("all");
 const selectedType = computed(() => SPECIFICATION_TYPES.find((item) => item.kind === selectedKind.value) ?? SPECIFICATION_TYPES[0]!);
+const currentStep = computed(() => selectedType.value.steps[step.value - 1] ?? selectedType.value.steps[0]!);
 const categories = computed(() => ["all", ...new Set(SPECIFICATION_TYPES.map((item) => item.category))] as const);
 const visibleTypes = computed(() => {
   const normalized = query.value.trim().toLocaleLowerCase();
   return SPECIFICATION_TYPES.filter((item) => item.enabled && (categoryFilter.value === "all" || item.category === categoryFilter.value) && (!normalized || [t(item.titleKey), t(item.descriptionKey), t(item.keywordsKey)].join(" ").toLocaleLowerCase().includes(normalized)));
 });
-const canContinue = computed(() => Boolean(selectedKind.value) && (step.value !== 2 || Boolean(title.value.trim() && content.value.trim())));
+const canContinue = computed(() => Boolean(selectedKind.value) && currentStep.value.fields?.every((field) => !field.required || fieldValue(field).trim()) !== false);
 
 watch(open, (value) => {
   if (!value) return;
@@ -48,20 +48,28 @@ function selectType(kind: SpecificationKind) {
   selectedKind.value = kind;
   if (kind === "markdown" && !content.value) content.value = t("specification.defaultContent");
 }
+function fieldValue(field: SpecificationFieldDefinition) {
+  return field.id === "title" ? title.value : content.value;
+}
+function updateField(field: SpecificationFieldDefinition, event: Event) {
+  const value = (event.target as HTMLInputElement | HTMLTextAreaElement).value;
+  if (field.id === "title") title.value = value;
+  else content.value = value;
+}
 function next() {
-  if (!canContinue.value || step.value === 3) return;
-  step.value = (step.value + 1) as 2 | 3;
+  if (!canContinue.value || step.value >= selectedType.value.steps.length) return;
+  step.value += 1;
 }
 function previous() {
-  if (step.value > 1) step.value = (step.value - 1) as 1 | 2;
+  if (step.value > 1) step.value -= 1;
 }
 async function save() {
-  if (!workspace.catalog || !serviceId.value || busy.value || selectedKind.value !== "markdown") return;
+  if (!workspace.catalog || !serviceId.value || busy.value || !canContinue.value) return;
   busy.value = true;
   error.value = "";
   try {
     const id = createId("spec");
-    await specxApi.createSpecification(workspace.catalog.workspace.id, { id, serviceId: serviceId.value, title: title.value.trim(), content: content.value });
+    await specxApi.createSpecification(workspace.catalog.workspace.id, selectedType.value.createRequest({ id, serviceId: serviceId.value, title: title.value.trim(), content: content.value }));
     await workspace.refresh();
     workspace.openSpecification(id);
     open.value = false;
@@ -79,14 +87,14 @@ async function save() {
       <DialogHeader>
         <DialogTitle>{{ t("specification.createTitle") }}</DialogTitle>
         <div class="flex flex-wrap items-center gap-2 pt-2 text-xs text-muted-foreground" :aria-label="t('specification.steps')">
-          <span v-for="index in 3" :key="index" class="flex items-center gap-1" :class="step >= index ? 'text-foreground' : ''"
-            ><span class="flex h-5 w-5 items-center justify-center rounded-full border" :class="step >= index ? 'border-primary bg-primary text-primary-foreground' : 'border-border'">{{ index }}</span
-            >{{ t(stepLabels[index - 1]!) }}</span
+          <span v-for="(item, index) in selectedType.steps" :key="item.id" class="flex items-center gap-1" :class="step >= index + 1 ? 'text-foreground' : ''"
+            ><span class="flex h-5 w-5 items-center justify-center rounded-full border" :class="step >= index + 1 ? 'border-primary bg-primary text-primary-foreground' : 'border-border'">{{ index + 1 }}</span
+            >{{ t(item.labelKey) }}</span
           >
         </div>
       </DialogHeader>
-      <form class="flex min-h-0 flex-col gap-4" @submit.prevent="step === 3 ? save() : next()">
-        <section v-if="step === 1" class="flex min-h-0 flex-col gap-3">
+      <form class="flex min-h-0 flex-col gap-4" @submit.prevent="step === selectedType.steps.length ? save() : next()">
+        <section v-if="currentStep.id === 'type'" class="flex min-h-0 flex-col gap-3">
           <div class="flex gap-2">
             <div class="relative min-w-0 flex-1">
               <Search class="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><input v-model="query" class="settings-input pl-9" :aria-label="t('specification.searchTypes')" :placeholder="t('specification.searchTypes')" />
@@ -111,13 +119,16 @@ async function save() {
           </div>
           <p v-if="!visibleTypes.length" class="py-8 text-center text-sm text-muted-foreground">{{ t("specification.noTypes") }}</p>
         </section>
-        <section v-else-if="step === 2" class="flex min-h-0 flex-col gap-4">
+        <section v-else-if="currentStep.id === 'content'" class="flex min-h-0 flex-col gap-4">
           <div class="rounded-md border border-border bg-muted/20 p-3">
             <div class="text-sm font-medium">{{ t(selectedType.titleKey) }}</div>
             <div class="text-xs text-muted-foreground">{{ t(selectedType.descriptionKey) }}</div>
           </div>
-          <label class="settings-field">{{ t("specification.title") }}<input v-model="title" class="settings-input" required autofocus /></label>
-          <label class="settings-field">{{ t("specification.content") }}<textarea v-model="content" class="settings-input min-h-56 resize-y font-mono" rows="12" required /></label>
+          <label v-for="field in currentStep.fields ?? []" :key="field.id" class="settings-field">
+            {{ t(field.labelKey) }}
+            <input v-if="field.control === 'text'" :value="fieldValue(field)" class="settings-input" :required="field.required" autofocus @input="updateField(field, $event)" />
+            <textarea v-else :value="fieldValue(field)" class="settings-input min-h-56 resize-y font-mono" rows="12" :required="field.required" @input="updateField(field, $event)" />
+          </label>
         </section>
         <section v-else class="flex flex-col gap-3">
           <div class="rounded-md border border-border p-4">
@@ -134,8 +145,8 @@ async function save() {
         <p v-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
         <DialogFooter>
           <Button type="button" variant="outline" :disabled="busy" @click="step === 1 ? (open = false) : previous()"><ArrowLeft v-if="step > 1" class="h-3.5 w-3.5" />{{ step === 1 ? t("common.cancel") : t("common.back") }}</Button>
-          <Button v-if="step < 3" type="submit" :disabled="!canContinue"><ArrowRight class="h-3.5 w-3.5" />{{ t("common.next") }}</Button>
-          <Button v-else type="submit" :disabled="busy || !title.trim() || !content.trim()">{{ busy ? t("common.creating") : t("specification.create") }}</Button>
+          <Button v-if="step < selectedType.steps.length" type="submit" :disabled="!canContinue"><ArrowRight class="h-3.5 w-3.5" />{{ t("common.next") }}</Button>
+          <Button v-else type="submit" :disabled="busy || !canContinue">{{ busy ? t("common.creating") : t("specification.create") }}</Button>
         </DialogFooter>
       </form>
     </DialogContent>

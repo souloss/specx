@@ -8,7 +8,12 @@
 
 mod release;
 
-use std::{collections::BTreeMap, env, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use axum::{
     body::Body,
@@ -19,11 +24,14 @@ use serde::{Deserialize, Serialize};
 use specx_api::{ApiState, errors::ErrorKind, router};
 use specx_platform::{DatabaseUrl, parse_database_url};
 use tauri::{Manager, State};
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 #[derive(Clone)]
 struct DesktopState {
-    api: ApiState,
+    api: Arc<Mutex<Option<ApiState>>>,
+    database: DatabaseUrl,
+    backup_dir: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,7 +60,36 @@ async fn specx_api_request(
 ) -> Result<DesktopApiResponse, ()> {
     // Tauri requires Result for async commands borrowing State. API failures
     // still travel as successful IPC responses with their HTTP-style envelope.
-    Ok(dispatch_api_request(&state.api, request).await.unwrap_or_else(desktop_error_response))
+    let api = {
+        let mut current = state.api.lock().await;
+        if current.is_none() {
+            match open_api(&state.database, &state.backup_dir).await {
+                Ok(api) => *current = Some(api),
+                Err(error) => {
+                    eprintln!("specX storage migration is not ready: {error}");
+                    return Ok(desktop_error_response(ErrorKind::NotReady));
+                }
+            }
+        }
+        current.clone().expect("storage state is initialized")
+    };
+    Ok(dispatch_api_request(&api, request).await.unwrap_or_else(desktop_error_response))
+}
+
+async fn open_api(database: &DatabaseUrl, backup_dir: &Path) -> Result<ApiState, String> {
+    match database {
+        DatabaseUrl::Sqlite(path) =>
+            ApiState::open_with_backup_root(path, backup_dir).map_err(|error| error.to_string()),
+        DatabaseUrl::Postgres(url) => {
+            let pool_size = env::var("SPECX_DATABASE_MAX_POOL_SIZE")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(16);
+            ApiState::open_postgres_with_backup_root(url, pool_size, backup_dir)
+                .await
+                .map_err(|error| error.to_string())
+        }
+    }
 }
 
 fn desktop_error_response(error: ErrorKind) -> DesktopApiResponse {
@@ -60,6 +97,13 @@ fn desktop_error_response(error: ErrorKind) -> DesktopApiResponse {
         status: error.status().as_u16(),
         headers: BTreeMap::new(),
         body: serde_json::to_value(error.body()).expect("catalog error is serializable"),
+    }
+}
+
+fn native_window_decorations_override(target_os: &str) -> Option<bool> {
+    match target_os {
+        "windows" | "linux" => Some(false),
+        _ => None,
     }
 }
 
@@ -135,6 +179,11 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            if let Some(decorations) = native_window_decorations_override(std::env::consts::OS) {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_decorations(decorations);
+                }
+            }
             let default_data_dir = app.path().app_data_dir()?;
             let data_dir = env::var_os("SPECX_DATA_DIR").map(PathBuf::from).unwrap_or(default_data_dir);
             let backup_dir =
@@ -143,24 +192,20 @@ pub fn run() {
             fs::create_dir_all(&backup_dir)?;
             let database = parse_database_url(env::var("SPECX_DATABASE_URL").ok().as_deref(), &data_dir)
                 .map_err(std::io::Error::other)?;
-            let api = match database {
-                DatabaseUrl::Sqlite(path) => {
-                    if let Some(parent) = path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    ApiState::open_with_backup_root(path, backup_dir)?
+            if let DatabaseUrl::Sqlite(path) = &database {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
                 }
-                DatabaseUrl::Postgres(url) => {
-                    let pool_size = env::var("SPECX_DATABASE_MAX_POOL_SIZE")
-                        .ok()
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(16);
-                    tauri::async_runtime::block_on(ApiState::open_postgres_with_backup_root(
-                        &url, pool_size, backup_dir,
-                    ))?
-                }
-            };
-            app.manage(DesktopState { api });
+            }
+            let initial_api = tauri::async_runtime::block_on(open_api(&database, &backup_dir));
+            if let Err(error) = &initial_api {
+                eprintln!("specX storage migration will be retried after startup: {error}");
+            }
+            app.manage(DesktopState {
+                api: Arc::new(Mutex::new(initial_api.ok())),
+                database,
+                backup_dir,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -174,8 +219,15 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopApiRequest, desktop_error_response, dispatch_api_request};
+    use super::{DesktopApiRequest, desktop_error_response, dispatch_api_request, native_window_decorations_override};
     use specx_api::ApiState;
+
+    #[test]
+    fn native_window_decorations_match_platform_titlebar_strategy() {
+        assert_eq!(native_window_decorations_override("windows"), Some(false));
+        assert_eq!(native_window_decorations_override("linux"), Some(false));
+        assert_eq!(native_window_decorations_override("macos"), None);
+    }
 
     #[test]
     fn desktop_bridge_uses_the_shared_router_and_bootstraps_its_workspace() {

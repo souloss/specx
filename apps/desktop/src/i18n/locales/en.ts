@@ -45,6 +45,8 @@ const en: MessageSchema = {
     minimize: "Minimize",
     maximize: "Maximize",
     restore: "Restore",
+    fullscreen: "Fullscreen",
+    exitFullscreen: "Exit fullscreen",
     close: "Close window",
   },
   theme: {

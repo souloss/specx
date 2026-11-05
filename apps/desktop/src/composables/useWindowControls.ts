@@ -4,6 +4,7 @@ import { isTauriRuntime } from "@/lib/backend/runtime";
 /** Native window actions stay behind this small runtime-neutral boundary. */
 export function useWindowControls() {
   const desktop = isTauriRuntime();
+  const isMac = typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac");
   const isMaximized = ref(false);
   const isFullscreen = ref(false);
   let unlistenResize: (() => void) | undefined;
@@ -29,6 +30,12 @@ export function useWindowControls() {
     await window.toggleMaximize();
     await refresh();
   }
+  async function toggleFullscreen() {
+    const window = await loadWindow();
+    if (!window) return;
+    await window.setFullscreen(!isFullscreen.value);
+    await refresh();
+  }
   async function close() {
     await (await loadWindow())?.close();
   }
@@ -42,5 +49,5 @@ export function useWindowControls() {
     unlistenResize = await window.onResized(() => void refresh());
   });
   onUnmounted(() => unlistenResize?.());
-  return { isDesktop: desktop, isMaximized, isFullscreen, minimize, toggleMaximize, close, startDragging };
+  return { isDesktop: desktop, isMac, isMaximized, isFullscreen, minimize, toggleMaximize, toggleFullscreen, close, startDragging };
 }
