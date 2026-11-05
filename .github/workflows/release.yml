@@ -117,6 +117,8 @@ jobs:
         if: runner.os == 'macOS'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPECX_RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          SPECX_RELEASE_REPOSITORY: ${{ github.repository }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
@@ -127,7 +129,24 @@ jobs:
           cp "$source_archive" "$updater_archive"
           TAURI_SIGNING_PRIVATE_KEY="$TAURI_SIGNING_PRIVATE_KEY" pnpm tauri signer sign "$updater_archive" --app-version "${GITHUB_REF_NAME#v}"
           dmg="$(find "$bundle_dir/dmg" -maxdepth 1 -name '*.dmg' -print -quit)"
-          gh release upload "$GITHUB_REF_NAME" "$dmg" "$updater_archive" "$updater_archive.sig" --clobber
+          upload_asset() {
+            local path="$1"
+            local name
+            local asset_id
+            name="$(basename "$path")"
+            asset_id="$(gh api "repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets" --paginate --jq ".[] | select(.name == \"${name}\") | .id" | head -n 1)"
+            if [ -n "$asset_id" ]; then
+              gh api --method DELETE "repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets/${asset_id}" >/dev/null
+            fi
+            gh api --method POST \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'Content-Type: application/octet-stream' \
+              "repos/${SPECX_RELEASE_REPOSITORY}/releases/${SPECX_RELEASE_ID}/assets?name=${name}" \
+              --input "$path" >/dev/null
+          }
+          upload_asset "$dmg"
+          upload_asset "$updater_archive"
+          upload_asset "$updater_archive.sig"
 
   publish:
     needs: [prepare, desktop]
