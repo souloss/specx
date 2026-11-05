@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, cp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { releaseVersion, releaseConfiguration, validateChangelogs, validateUpdaterManifest, assertReleaseAdvance, root } from "./release.mjs";
+import { releaseVersion, releaseConfiguration, validateChangelogs, validateUpdaterManifest, mergeUpdaterPlatforms, assertReleaseAdvance, root } from "./release.mjs";
 
 const section = { type: "fixed", title: "Fixes", items: [{ title: "A real correction", desc: "Retains user data." }] };
 const notes = () => ({ unreleased: { sections: [section] }, releases: [{ tag: "v1.2.3", name: "specX 1.2.3", date: "2026-11-04", sections: [section] }] });
@@ -58,6 +58,24 @@ test("publication requires signed, fixed-version assets for all supported platfo
   const redirected = structuredClone(manifest);
   redirected.platforms["linux-x86_64"].url = "https://other.example/package";
   assert.throws(() => validateUpdaterManifest(redirected, "1.2.3", "org/repo"));
+});
+
+test("manual macOS updater signatures merge into the release manifest", () => {
+  const signed = (name) => ({ signature: "existing", url: `https://github.com/org/repo/releases/latest/download/${name}` });
+  const manifest = {
+    version: "1.2.3",
+    pub_date: "2026-11-04T00:00:00Z",
+    platforms: {
+      "linux-x86_64": signed("specX.AppImage"),
+      "windows-x86_64": signed("specX.msi"),
+    },
+  };
+  mergeUpdaterPlatforms(manifest, "org/repo", {
+    "darwin-aarch64": { name: "specX_aarch64.app.tar.gz", signature: "signed-arm" },
+    "darwin-x86_64": { name: "specX_x64.app.tar.gz", signature: "signed-intel" },
+  });
+  validateUpdaterManifest(manifest, "1.2.3", "org/repo");
+  assert.equal(manifest.platforms["darwin-aarch64"].url, "https://github.com/org/repo/releases/latest/download/specX_aarch64.app.tar.gz");
 });
 
 test("preparing a release synchronizes versions, seals bilingual notes and remains checkable", async () => {

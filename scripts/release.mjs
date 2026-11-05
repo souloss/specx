@@ -135,10 +135,23 @@ async function writeReleaseAssets(tag) {
 
 export function validateUpdaterManifest(manifest, version, repository) {
   if (manifest.version !== version || !Number.isFinite(Date.parse(manifest.pub_date))) throw new Error("Invalid updater version or publish date.");
+  const allowedPrefixes = [`https://github.com/${repository}/releases/download/v${version}/`, `https://github.com/${repository}/releases/latest/download/`];
   for (const platform of ["darwin-aarch64", "darwin-x86_64", "windows-x86_64", "linux-x86_64"]) {
     const asset = manifest.platforms?.[platform];
-    if (!asset || typeof asset.signature !== "string" || !asset.signature.trim() || !asset.url?.startsWith(`https://github.com/${repository}/releases/download/v${version}/`)) throw new Error(`Missing or invalid signed update artifact: ${platform}`);
+    if (!asset || typeof asset.signature !== "string" || !asset.signature.trim() || !allowedPrefixes.some((prefix) => asset.url?.startsWith(prefix))) throw new Error(`Missing or invalid signed update artifact: ${platform}`);
   }
+}
+
+export function mergeUpdaterPlatforms(manifest, repository, platforms) {
+  for (const [platform, artifact] of Object.entries(platforms)) {
+    if (!artifact || typeof artifact.name !== "string" || typeof artifact.signature !== "string" || !artifact.signature.trim()) throw new Error(`Missing signed updater artifact: ${platform}`);
+    manifest.platforms ??= {};
+    manifest.platforms[platform] = {
+      signature: artifact.signature,
+      url: `https://github.com/${repository}/releases/latest/download/${artifact.name}`,
+    };
+  }
+  return manifest;
 }
 
 async function main() {
