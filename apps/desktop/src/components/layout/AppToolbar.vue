@@ -25,7 +25,7 @@ const { themeMode, setThemeMode, isDark } = useTheme();
 const t = translate;
 const shortcuts = useShortcutStore();
 const updates = useAppUpdateStore();
-const { isDesktop, isMac, isMaximized, isFullscreen, toggleMaximize, toggleFullscreen, minimize, close, startDragging } = useWindowControls();
+const { isDesktop, isMac, isLinux, isMaximized, isFullscreen, toggleMaximize, toggleFullscreen, minimize, close, startDragging } = useWindowControls();
 const themeIcon = computed(() => (themeMode.value === "system" ? SunMoon : isDark.value ? Moon : Sun));
 function cycleTheme() {
   const next = isDark.value ? "light" : "dark";
@@ -86,7 +86,7 @@ function onToolbarDoubleClick(event: MouseEvent) {
     <AppTooltip v-if="!isTauriRuntime()" :text="t('toolbar.logout')"
       ><Button variant="ghost" size="icon" class="h-8 w-8" :aria-label="t('toolbar.logout')" @click="emit('logout')"><LogOut class="h-4 w-4" /></Button
     ></AppTooltip>
-    <WindowControls v-if="isDesktop && !isMac" :is-maximized="isMaximized" :is-fullscreen="isFullscreen" @minimize="minimize" @toggle-maximize="toggleMaximize" @toggle-fullscreen="toggleFullscreen" @close="close" />
+    <WindowControls v-if="isDesktop && !isMac" :is-linux="isLinux" :is-maximized="isMaximized" :is-fullscreen="isFullscreen" @minimize="minimize" @toggle-maximize="toggleMaximize" @toggle-fullscreen="toggleFullscreen" @close="close" />
   </header>
 </template>
 

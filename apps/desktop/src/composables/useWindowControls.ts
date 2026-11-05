@@ -5,6 +5,7 @@ import { isTauriRuntime } from "@/lib/backend/runtime";
 export function useWindowControls() {
   const desktop = isTauriRuntime();
   const isMac = typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac");
+  const isLinux = typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("linux");
   const isMaximized = ref(false);
   const isFullscreen = ref(false);
   let unlistenResize: (() => void) | undefined;
@@ -49,5 +50,5 @@ export function useWindowControls() {
     unlistenResize = await window.onResized(() => void refresh());
   });
   onUnmounted(() => unlistenResize?.());
-  return { isDesktop: desktop, isMac, isMaximized, isFullscreen, minimize, toggleMaximize, toggleFullscreen, close, startDragging };
+  return { isDesktop: desktop, isMac, isLinux, isMaximized, isFullscreen, minimize, toggleMaximize, toggleFullscreen, close, startDragging };
 }
