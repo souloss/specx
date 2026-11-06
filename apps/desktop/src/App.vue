@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from "vue";
-import { FolderPlus, Plus } from "@lucide/vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { FolderPlus, Plus, Save } from "@lucide/vue";
 import { SpecxMark } from "@/components/brand";
 import AppToolbar from "@/components/layout/AppToolbar.vue";
 import AppSidebar from "@/components/layout/AppSidebar.vue";
@@ -38,15 +38,23 @@ const sidebar = ref<InstanceType<typeof AppSidebar>>();
 const showSpecification = ref(false);
 const pendingDelete = ref<ResourceTreeNode | null>(null);
 const deleting = ref(false);
+const pendingCloseTab = computed(() => workspace.tabs.find((tab) => tab.id === workspace.pendingCloseTabId));
 useAppShortcuts(() => {
   void nextTick(() => sidebar.value?.focusSearch());
 });
 onMounted(() => {
+  window.addEventListener("beforeunload", beforeUnload);
   void workspace.initialize();
   void updates.initialize().then(() => {
     if (updates.autoCheck) return updates.check();
   });
 });
+function beforeUnload(event: BeforeUnloadEvent) {
+  if (!workspace.tabs.some((tab) => tab.specificationId && workspace.hasUnsavedSpecification(tab.specificationId))) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+onBeforeUnmount(() => window.removeEventListener("beforeunload", beforeUnload));
 function newService() {
   settings.sidebarCollapsed = false;
   navigation.beginCreate("resource");
@@ -72,6 +80,9 @@ async function logout() {
   } catch (cause) {
     toast(cause instanceof Error ? cause.message : t("app.logoutFailed"), 5000);
   }
+}
+async function resolvePendingClose(action: "save" | "discard" | "cancel") {
+  await workspace.resolvePendingClose(action);
 }
 </script>
 
@@ -143,6 +154,20 @@ async function logout() {
         ></DialogContent
       ></Dialog
     >
+    <Dialog :open="!!workspace.pendingCloseTabId" @update:open="(value) => !value && resolvePendingClose('cancel')">
+      <DialogContent>
+        <DialogHeader
+          ><DialogTitle>{{ t("specification.closeWithUnsavedTitle") }}</DialogTitle></DialogHeader
+        >
+        <p class="text-sm text-muted-foreground">{{ t("specification.closeWithUnsavedDescription") }}</p>
+        <p v-if="pendingCloseTab" class="truncate text-xs text-muted-foreground">{{ pendingCloseTab.title }}</p>
+        <DialogFooter>
+          <Button variant="outline" @click="resolvePendingClose('cancel')">{{ t("common.cancel") }}</Button>
+          <Button variant="ghost" @click="resolvePendingClose('discard')">{{ t("specification.discardAndClose") }}</Button>
+          <Button @click="resolvePendingClose('save')"><Save class="h-3.5 w-3.5" />{{ t("specification.saveAndClose") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
   <div v-if="visible" role="status" class="toast">
     <span>{{ message }}</span

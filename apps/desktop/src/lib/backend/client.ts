@@ -1,6 +1,6 @@
 import { uuid } from "../common/utils";
 import type { Catalog, Group, Service, Specification } from "../../types/domain";
-import type { AuthResponse, CatalogResponse, WorkspaceListResponse, WorkspaceResponse } from "../../types/api";
+import type { AuthResponse, CatalogResponse, SpecificationResponse, SpecificationRevisionPageResponse, SpecificationRevisionResponse, WorkspaceListResponse, WorkspaceResponse } from "../../types/api";
 import { UNGROUPED_GROUP_ID } from "../core";
 import { getBackendTransport } from "./api";
 import { ApiError } from "./types";
@@ -133,7 +133,7 @@ export const specxApi = {
       content: string;
     },
   ) {
-    return request<unknown>(
+    return request<SpecificationResponse>(
       "/api/specx/specifications",
       {
         method: "POST",
@@ -142,5 +142,20 @@ export const specxApi = {
       },
       workspaceId,
     );
+  },
+  updateSpecification(workspaceId: string, specificationId: string, input: { title: string; content: string }, etag: string) {
+    return request<SpecificationResponse>(`/api/specx/specifications/${encodeURIComponent(specificationId)}`, { method: "PUT", headers: { "if-match": etag }, body: input }, workspaceId);
+  },
+  deleteSpecification(workspaceId: string, specificationId: string, etag: string) {
+    return request<void>(`/api/specx/specifications/${encodeURIComponent(specificationId)}`, { method: "DELETE", headers: { "if-match": etag } }, workspaceId);
+  },
+  listSpecificationRevisions(workspaceId: string, specificationId: string, limit = 50, offset = 0) {
+    return request<SpecificationRevisionPageResponse>(`/api/specx/specifications/${encodeURIComponent(specificationId)}/revisions?limit=${limit}&offset=${offset}`, {}, workspaceId);
+  },
+  getSpecificationRevision(workspaceId: string, specificationId: string, version: number) {
+    return request<SpecificationRevisionResponse>(`/api/specx/specifications/${encodeURIComponent(specificationId)}/revisions/${version}`, {}, workspaceId);
+  },
+  restoreSpecificationRevision(workspaceId: string, specificationId: string, version: number, etag: string) {
+    return request<SpecificationResponse>(`/api/specx/specifications/${encodeURIComponent(specificationId)}/revisions/${version}/restore`, { method: "POST", headers: { "if-match": etag } }, workspaceId);
   },
 };

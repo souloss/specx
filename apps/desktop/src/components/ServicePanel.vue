@@ -1,19 +1,56 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { FileText, Plus } from "@lucide/vue";
+import { computed, ref, watch } from "vue";
+import { Edit3, FileText, History, Plus, Trash2 } from "@lucide/vue";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import MarkdownPreview from "./MarkdownPreview.vue";
+import SpecificationEditor from "./SpecificationEditor.vue";
+import SpecificationHistory from "./SpecificationHistory.vue";
 import { formatDate, groupPath } from "../lib/core";
 import { i18n, translate } from "@/i18n";
+import { useWorkspaceStore } from "@/stores/workspace";
 import type { Catalog, PanelTab } from "../types/domain";
 
 const props = defineProps<{ catalog: Catalog; serviceId: string; tab: PanelTab }>();
 const emit = defineEmits<{ openSpecification: [id: string]; newSpecification: [] }>();
+const workspace = useWorkspaceStore();
 const service = computed(() => props.catalog.services.find((item) => item.id === props.serviceId));
 const activeSpecification = computed(() => (props.tab.specificationId ? props.catalog.specifications.find((item) => item.id === props.tab.specificationId) : undefined));
 const specifications = computed(() => props.catalog.specifications.filter((item) => item.serviceId === props.serviceId));
 const tags = computed(() => service.value?.tagIds.map((id) => props.catalog.tags.find((tag) => tag.id === id)).filter(Boolean) ?? []);
 const t = translate;
 const locale = computed(() => i18n.global.locale.value as "zh-CN" | "en");
+const editing = ref(false);
+const historyOpen = ref(false);
+const deleteOpen = ref(false);
+const deleting = ref(false);
+const error = ref("");
+
+watch(
+  () => activeSpecification.value?.id,
+  () => {
+    editing.value = false;
+    historyOpen.value = false;
+    deleteOpen.value = false;
+    error.value = "";
+  },
+);
+
+async function removeSpecification() {
+  if (!activeSpecification.value || deleting.value) return;
+  deleting.value = true;
+  error.value = "";
+  try {
+    const serviceId = activeSpecification.value.serviceId;
+    await workspace.deleteSpecification(activeSpecification.value.id);
+    deleteOpen.value = false;
+    workspace.openOverview(serviceId);
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : t("specification.deleteFailed");
+  } finally {
+    deleting.value = false;
+  }
+}
 </script>
 
 <template>
@@ -21,22 +58,43 @@ const locale = computed(() => i18n.global.locale.value as "zh-CN" | "en");
     <h2>{{ t("service.unavailable") }}</h2>
     <p>{{ t("service.unavailableDescription") }}</p>
   </div>
-  <div v-else-if="activeSpecification" class="spec-panel">
+  <div v-else-if="activeSpecification" class="spec-panel flex min-h-0 flex-col">
     <header class="spec-toolbar">
       <div>
         <span class="eyebrow">{{ t("service.specificationHeading") }}</span>
         <h2>{{ activeSpecification.title }}</h2>
-        <span class="muted">{{ service.name }} · {{ t("service.updatedAt", { date: formatDate(activeSpecification.updatedAt, locale) }) }}</span>
+        <span class="muted">{{ service.name }} · {{ t("service.updatedAt", { date: formatDate(activeSpecification.updatedAt, locale) }) }} · {{ t("specification.currentVersion", { version: activeSpecification.version }) }}</span>
+      </div>
+      <div v-if="!editing" class="flex flex-wrap items-center gap-2">
+        <Button size="sm" @click="editing = true"><Edit3 class="h-3.5 w-3.5" />{{ t("service.editSpecification") }}</Button>
+        <Button size="sm" variant="outline" @click="historyOpen = true"><History class="h-3.5 w-3.5" />{{ t("service.specificationHistory") }}</Button>
+        <Button size="sm" variant="destructive" @click="deleteOpen = true"><Trash2 class="h-3.5 w-3.5" />{{ t("service.deleteSpecification") }}</Button>
       </div>
     </header>
-    <div class="spec-layout">
+    <SpecificationEditor v-if="editing" :specification="activeSpecification" @close="editing = false" />
+    <div v-else class="spec-layout">
       <MarkdownPreview :content="activeSpecification.content" />
       <aside class="spec-meta">
         <span class="eyebrow">{{ t("service.serviceLabel") }}</span
         ><strong>{{ service.name }}</strong
         ><span>{{ service.slug }}</span>
+        <span class="mt-3 text-xs">{{ t("specification.currentVersion", { version: activeSpecification.version }) }}</span>
       </aside>
     </div>
+    <SpecificationHistory v-model:open="historyOpen" :specification="activeSpecification" />
+    <Dialog v-model:open="deleteOpen">
+      <DialogContent>
+        <DialogHeader
+          ><DialogTitle>{{ t("specification.deleteTitle") }}</DialogTitle></DialogHeader
+        >
+        <p class="text-sm text-muted-foreground">{{ t("specification.confirmDelete", { name: activeSpecification.title }) }}</p>
+        <p v-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
+        <DialogFooter
+          ><Button variant="outline" :disabled="deleting" @click="deleteOpen = false">{{ t("common.cancel") }}</Button
+          ><Button variant="destructive" :disabled="deleting" @click="removeSpecification"><Trash2 class="h-3.5 w-3.5" />{{ deleting ? t("app.deleting") : t("common.delete") }}</Button></DialogFooter
+        >
+      </DialogContent>
+    </Dialog>
   </div>
   <div v-else class="overview-panel">
     <header class="overview-hero">

@@ -28,6 +28,10 @@ export function useAppShortcuts(focusSearch: () => void) {
     } else if (action === "newService") {
       settings.sidebarCollapsed = false;
       navigation.beginCreate("resource");
+    } else if (action === "saveSpecification") {
+      const tab = workspace.activeTab;
+      if (tab?.kind !== "specification" || !tab.specificationId) return;
+      void workspace.saveSpecification(tab.specificationId);
     } else if (action === "closeTab") {
       if (settings.showSettingsPage) settings.showSettingsPage = false;
       else if (workspace.activeTabId) workspace.closeTab(workspace.activeTabId);

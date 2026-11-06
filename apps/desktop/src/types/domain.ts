@@ -7,7 +7,18 @@ export type Specification = {
   title: string;
   kind: SpecificationKind;
   content: string;
+  version: number;
+  contentHash: string;
   updatedAt: string;
+  etag: string;
+};
+export type SpecificationRevision = {
+  specificationId: string;
+  version: number;
+  content: string;
+  contentHash: string;
+  createdBy: string;
+  createdAt: string;
 };
 export type Service = {
   id: string;

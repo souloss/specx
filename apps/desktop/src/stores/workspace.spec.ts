@@ -6,7 +6,18 @@ import { catalogFixture } from "@/test/catalogFixture";
 import { installMemoryStorage } from "@/test/browserStorage";
 import type { Catalog } from "@/types/domain";
 
-vi.mock("@/lib/backend/client", () => ({ specxApi: { migrationRetry: vi.fn(), authCheck: vi.fn(), listWorkspaces: vi.fn(), loadCatalog: vi.fn() } }));
+vi.mock("@/lib/backend/client", () => ({
+  specxApi: {
+    migrationRetry: vi.fn(),
+    authCheck: vi.fn(),
+    listWorkspaces: vi.fn(),
+    loadCatalog: vi.fn(),
+    updateSpecification: vi.fn(),
+    listSpecificationRevisions: vi.fn(),
+    restoreSpecificationRevision: vi.fn(),
+    deleteSpecification: vi.fn(),
+  },
+}));
 beforeEach(() => {
   installMemoryStorage();
   vi.resetAllMocks();
@@ -62,5 +73,76 @@ describe("catalog loading", () => {
     expect(workspace.migrationReady).toBe(false);
     expect(workspace.error).toBe("specX 存储迁移尚未完成");
     expect(specxApi.authCheck).not.toHaveBeenCalled();
+  });
+
+  it("keeps a local draft until an ETag guarded update succeeds", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    workspace.openSpecification("spec");
+    workspace.beginSpecificationEdit("spec");
+    workspace.updateSpecificationDraft("spec", { title: "访问约定 v2", content: "# 新约定" });
+    expect(workspace.hasUnsavedSpecification("spec")).toBe(true);
+    vi.mocked(specxApi.updateSpecification).mockResolvedValue({
+      ...workspace.catalog.specifications[0],
+      title: "访问约定 v2",
+      content: "# 新约定",
+      version: 2,
+      etag: '"spec-v2"',
+    });
+
+    await expect(workspace.saveSpecification("spec")).resolves.toBe(true);
+
+    expect(specxApi.updateSpecification).toHaveBeenCalledWith("workspace", "spec", { title: "访问约定 v2", content: "# 新约定" }, '"spec-v1"');
+    expect(workspace.catalog.specifications[0]).toMatchObject({ title: "访问约定 v2", version: 2, etag: '"spec-v2"' });
+    expect(workspace.tabs[0]).toMatchObject({ title: "访问约定 v2" });
+    expect(workspace.specificationDraft("spec")).toBeUndefined();
+  });
+
+  it("retains the draft and records the remote representation on an ETag conflict", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    workspace.beginSpecificationEdit("spec");
+    workspace.updateSpecificationDraft("spec", { title: "本地版本", content: "# 本地" });
+    vi.mocked(specxApi.updateSpecification).mockRejectedValue({ status: 412 });
+    vi.mocked(specxApi.loadCatalog).mockResolvedValue({
+      ...catalogFixture(),
+      specifications: [{ ...catalogFixture().specifications[0], title: "远端版本", content: "# 远端", version: 2, etag: '"spec-v2"' }],
+    });
+
+    await expect(workspace.saveSpecification("spec")).resolves.toBe(false);
+
+    expect(workspace.specificationDraft("spec")).toMatchObject({ status: "conflict", title: "本地版本", remote: { title: "远端版本", version: 2 } });
+  });
+
+  it("requires an explicit decision before closing a tab with unsaved content", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    workspace.openSpecification("spec");
+    workspace.beginSpecificationEdit("spec");
+    workspace.updateSpecificationDraft("spec", { title: "草稿", content: "# 草稿" });
+
+    expect(workspace.closeTab("specification-spec")).toBe(false);
+    expect(workspace.pendingCloseTabId).toBe("specification-spec");
+    await workspace.resolvePendingClose("discard");
+    expect(workspace.tabs).toHaveLength(0);
+    expect(workspace.specificationDraft("spec")).toBeUndefined();
+  });
+
+  it("restores a revision through the current ETag and refreshes history", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    vi.mocked(specxApi.restoreSpecificationRevision).mockResolvedValue({
+      ...workspace.catalog.specifications[0],
+      content: "# 恢复内容",
+      version: 3,
+      etag: '"spec-v3"',
+    });
+    vi.mocked(specxApi.listSpecificationRevisions).mockResolvedValue({ items: [], total: 0, limit: 50, offset: 0 });
+
+    await expect(workspace.restoreSpecificationRevision("spec", 1)).resolves.toBe(true);
+
+    expect(specxApi.restoreSpecificationRevision).toHaveBeenCalledWith("workspace", "spec", 1, '"spec-v1"');
+    expect(workspace.catalog.specifications[0]).toMatchObject({ content: "# 恢复内容", version: 3 });
+    expect(specxApi.listSpecificationRevisions).toHaveBeenCalledWith("workspace", "spec");
   });
 });

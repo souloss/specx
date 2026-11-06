@@ -23,6 +23,9 @@ function activate(id: string) {
   settings.showSettingsPage = false;
   workspace.activeTabId = id;
 }
+function closeTabs(ids: string[]) {
+  for (const id of ids) if (!workspace.closeTab(id)) break;
+}
 function keyboard(event: KeyboardEvent) {
   const index = workspace.tabs.findIndex((tab) => tab.id === workspace.activeTabId);
   const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
@@ -43,15 +46,11 @@ function keyboard(event: KeyboardEvent) {
           { label: t('tabs.close'), action: () => workspace.closeTab(tab.id) },
           {
             label: t('tabs.closeOthers'),
-            action: () => {
-              for (const item of [...workspace.tabs]) if (item.id !== tab.id) workspace.closeTab(item.id);
-            },
+            action: () => closeTabs(workspace.tabs.filter((item) => item.id !== tab.id).map((item) => item.id)),
           },
           {
             label: t('tabs.closeAll'),
-            action: () => {
-              for (const item of [...workspace.tabs]) workspace.closeTab(item.id);
-            },
+            action: () => closeTabs(workspace.tabs.map((item) => item.id)),
           },
         ]"
       >

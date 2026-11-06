@@ -8,6 +8,7 @@ export const SHORTCUT_ACTIONS = [
   { id: "search", label: "settings.shortcutSearch", scope: "global", defaultShortcut: "Mod+K" },
   { id: "locate", label: "settings.shortcutLocate", scope: "global", defaultShortcut: "Shift+Mod+L" },
   { id: "newService", label: "settings.shortcutNewService", scope: "global", defaultShortcut: "Mod+N" },
+  { id: "saveSpecification", label: "settings.shortcutSaveSpecification", scope: "global", defaultShortcut: "Mod+S" },
   { id: "closeTab", label: "settings.shortcutCloseTab", scope: "global", defaultShortcut: "Mod+W" },
   { id: "rename", label: "settings.shortcutRename", scope: "tree", defaultShortcut: "F2" },
   { id: "delete", label: "settings.shortcutDelete", scope: "tree", defaultShortcut: "Delete" },

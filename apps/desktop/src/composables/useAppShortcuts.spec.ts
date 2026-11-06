@@ -7,6 +7,7 @@ import { useShortcutStore } from "@/stores/shortcutStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { installMemoryStorage } from "@/test/browserStorage";
+import { catalogFixture } from "@/test/catalogFixture";
 
 beforeEach(() => {
   installMemoryStorage();
@@ -25,7 +26,7 @@ function setup() {
       },
     }),
   );
-  return { shortcuts, settings, focus, component };
+  return { shortcuts, settings, focus, workspace: useWorkspaceStore(), component };
 }
 function key(key: string, options: KeyboardEventInit = {}, target: EventTarget = window) {
   const event = new KeyboardEvent("keydown", { key, ctrlKey: true, bubbles: true, cancelable: true, ...options });
@@ -78,5 +79,17 @@ describe("configurable application shortcuts", () => {
     component.unmount();
     setActivePinia(createPinia());
     expect(useShortcutStore().bindings.sidebar).toBe("Alt+B");
+  });
+
+  it("saves the active specification with the configured save shortcut", () => {
+    const { workspace, component } = setup();
+    workspace.catalog = catalogFixture();
+    workspace.openSpecification("spec");
+    const save = vi.spyOn(workspace, "saveSpecification").mockResolvedValue(true);
+
+    key("s");
+
+    expect(save).toHaveBeenCalledWith("spec");
+    component.unmount();
   });
 });

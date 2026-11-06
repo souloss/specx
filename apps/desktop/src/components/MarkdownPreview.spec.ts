@@ -12,4 +12,13 @@ describe("MarkdownPreview", () => {
     expect(wrapper.find("a").attributes("href")).toBeUndefined();
     expect(wrapper.text()).toContain("hello");
   });
+
+  it("renders the common first-version Markdown structures", () => {
+    const wrapper = mount(MarkdownPreview, {
+      props: { content: "| Name | Value |\n| --- | --- |\n| mode | safe |\n\n- [x] shipped" },
+    });
+
+    expect(wrapper.find("table").exists()).toBe(true);
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(true);
+  });
 });

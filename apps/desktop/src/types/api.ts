@@ -30,8 +30,28 @@ export type CatalogResponse = {
     title: string;
     kind: "markdown";
     content: string;
+    version: number;
+    contentHash: string;
     updatedAt: string;
+    etag: string;
   }>;
+};
+
+export type SpecificationResponse = CatalogResponse["specifications"][number];
+export type SpecificationRevisionResponse = {
+  specificationId: string;
+  version: number;
+  content: string;
+  contentHash: string;
+  createdBy: string;
+  createdAt: string;
+};
+export type SpecificationRevisionPageResponse = {
+  items: SpecificationRevisionResponse[];
+  total: number;
+  limit: number;
+  offset: number;
+  nextOffset?: number;
 };
 
 export type DesktopApiRequest = {
