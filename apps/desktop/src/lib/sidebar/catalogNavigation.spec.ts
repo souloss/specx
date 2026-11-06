@@ -32,6 +32,12 @@ describe("catalog navigation adaptation", () => {
     const found = filterResourceTree(layoutTree(catalogSidebarLayout(catalog), catalog), "身份", catalog);
     expect(found[0].children![0].children).toHaveLength(2);
   });
+  it("supports explicit regular expression matching", () => {
+    const catalog = catalogFixture();
+    const nodes = layoutTree(catalogSidebarLayout(catalog), catalog);
+    const found = filterResourceTree(nodes, "^billing$", catalog, "", /^billing$/i);
+    expect(found[0].children![0].children).toHaveLength(1);
+  });
   it("rejects dragging a group into its own descendant without changing the source", () => {
     const layout = catalogSidebarLayout(catalogFixture());
     const snapshot = JSON.stringify(layout);

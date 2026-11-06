@@ -46,13 +46,21 @@ export function layoutTree(layout: SidebarLayout, catalog: Catalog): ResourceTre
 }
 
 /** Keep matching ancestors and matching groups' descendants visible during search. */
-export function filterResourceTree(nodes: ResourceTreeNode[], query: string, catalog: Catalog, tagId = ""): ResourceTreeNode[] {
+export function filterResourceTree(nodes: ResourceTreeNode[], query: string, catalog: Catalog, tagId = "", searchRegex: RegExp | null = null): ResourceTreeNode[] {
   const needle = query.trim().toLocaleLowerCase();
+  const matches = (text: string | undefined) => {
+    if (!text) return false;
+    if (searchRegex) {
+      searchRegex.lastIndex = 0;
+      return searchRegex.test(text);
+    }
+    return text.toLocaleLowerCase().includes(needle);
+  };
   const services = new Map(catalog.services.map((service) => [service.id, service]));
   function visit(items: ResourceTreeNode[], ancestorMatches = false): ResourceTreeNode[] {
     return items.flatMap((node) => {
       const service = services.get(node.id);
-      const textMatch = !needle || ancestorMatches || [node.label, service?.slug, service?.description].some((text) => text?.toLocaleLowerCase().includes(needle));
+      const textMatch = (!needle && !searchRegex) || ancestorMatches || [node.label, service?.slug, service?.description].some(matches);
       if (node.type === "resource") return textMatch && (!tagId || service?.tagIds.includes(tagId)) ? [node] : [];
       const children = visit(node.children ?? [], textMatch && !!needle);
       return children.length || (textMatch && !tagId) ? [{ ...node, children }] : [];

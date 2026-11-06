@@ -9,6 +9,7 @@ import { sortResourceListForDisplay } from "@/lib/sidebar/resourceListSort";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { specxApi } from "@/lib/backend/client";
 import { createId, UNGROUPED_GROUP_ID } from "@/lib/core";
+import { compileSearchRegex } from "@/lib/common/searchPattern";
 import type { ResourceTreeNode, SidebarLayout } from "@/types/navigation";
 
 export type NamingDraft = { id: string; kind: "group" | "resource"; name: string; parentId: string | null; creating: boolean };
@@ -21,6 +22,7 @@ export const useNavigationStore = defineStore("navigation", () => {
   const creations = useCreateQueueStore();
   const layout = ref<SidebarLayout>({ groups: [], order: [] });
   const query = ref("");
+  const regexMode = ref(false);
   const tagId = ref("");
   const selectedId = ref("");
   const naming = ref<NamingDraft | null>(null);
@@ -65,7 +67,8 @@ export const useNavigationStore = defineStore("navigation", () => {
 
   const tree = computed(() => {
     if (!workspace.catalog) return [];
-    let nodes = filterResourceTree(layoutTree(layout.value, workspace.catalog), query.value, workspace.catalog, tagId.value);
+    const compiled = regexMode.value ? compileSearchRegex(query.value) : { regex: null, invalid: false };
+    let nodes = regexMode.value && compiled.invalid ? [] : filterResourceTree(layoutTree(layout.value, workspace.catalog), query.value, workspace.catalog, tagId.value, compiled.regex);
     nodes = sortResourceListForDisplay(nodes, settings.navigation.sortMode);
     const entries = [...creations.current, ...(naming.value?.creating ? [naming.value] : [])];
     for (const draft of entries) {
@@ -212,5 +215,7 @@ export const useNavigationStore = defineStore("navigation", () => {
       busy.value = false;
     }
   }
-  return { layout, tree, expandedIds, query, tagId, selectedId, naming, busy, revealRevision, toggle, select, collapseAll, expandAll, beginCreate, beginRename, commitName, remove, drop, locateActive, moveResource };
+  const regexInvalid = computed(() => regexMode.value && compileSearchRegex(query.value).invalid);
+
+  return { layout, tree, expandedIds, query, regexMode, regexInvalid, tagId, selectedId, naming, busy, revealRevision, toggle, select, collapseAll, expandAll, beginCreate, beginRename, commitName, remove, drop, locateActive, moveResource };
 });

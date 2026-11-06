@@ -2,17 +2,12 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { Download, ExternalLink, Loader2, RefreshCw } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useAppUpdateStore } from "@/stores/appUpdateStore";
-import { useNavigationStore } from "@/stores/navigationStore";
 import { fetchAppChangelog } from "@/lib/backend/appRelease";
 import { buildInfo, bundledChangelog, releasesUrl, type ChangelogRelease } from "@/lib/app/releases";
 import { i18n, translate as t } from "@/i18n";
-import { pendingWrites } from "@/lib/backend/writeActivity";
 
 const updates = useAppUpdateStore();
-const navigation = useNavigationStore();
-const confirmInstall = ref(false);
 const loading = ref(false);
 const remoteFailed = ref(false);
 const remote = ref<{ locale: string; releases: ChangelogRelease[] }>();
@@ -43,8 +38,6 @@ function releaseDate(value: string) {
 }
 
 async function install() {
-  if (pendingWrites.value || navigation.busy || navigation.naming) return;
-  confirmInstall.value = false;
   await updates.install();
 }
 
@@ -85,7 +78,7 @@ watch(() => i18n.global.locale.value, loadChangelog);
             <Loader2 v-if="updates.phase === 'checking'" class="h-3.5 w-3.5 animate-spin" /><RefreshCw v-else class="h-3.5 w-3.5" />{{ t("updates.check") }}
           </Button>
           <Button v-if="updates.phase === 'available'" size="sm" @click="updates.download"><Download class="h-3.5 w-3.5" />{{ t("updates.download") }}</Button>
-          <Button v-if="updates.phase === 'downloaded'" size="sm" @click="confirmInstall = true">{{ t("updates.install") }}</Button>
+          <Button v-if="updates.phase === 'downloaded'" size="sm" @click="install">{{ t("updates.install") }}</Button>
           <Button v-if="updates.phase === 'restart'" size="sm" @click="updates.restart">{{ t("updates.restart") }}</Button>
           <p v-if="updates.phase === 'installing'" role="status" class="text-sm">{{ t("updates.installing") }}</p>
         </div>
@@ -116,18 +109,5 @@ watch(() => i18n.global.locale.value, loadChangelog);
       </details>
       <Button v-if="visibleCount < releases.length" variant="outline" size="sm" @click="visibleCount += 5">{{ t("updates.moreNotes") }}</Button>
     </div>
-    <Dialog v-model:open="confirmInstall"
-      ><DialogContent
-        ><DialogHeader
-          ><DialogTitle>{{ t("updates.install") }}</DialogTitle
-          ><DialogDescription>{{ t("updates.confirmInstall") }}</DialogDescription></DialogHeader
-        >
-        <p v-if="pendingWrites || navigation.busy || navigation.naming" role="alert" class="text-sm text-destructive">{{ t("updates.pendingWork") }}</p>
-        <DialogFooter
-          ><Button variant="outline" @click="confirmInstall = false">{{ t("common.cancel") }}</Button
-          ><Button :disabled="!!pendingWrites || navigation.busy || !!navigation.naming" @click="install">{{ t("updates.install") }}</Button></DialogFooter
-        >
-      </DialogContent></Dialog
-    >
   </section>
 </template>
