@@ -9,6 +9,9 @@
     "/backups": {"get": ["200", "403"], "post": ["200", "403", "500"]},
     "/backups/{file_name}/restore": {"post": ["200", "400", "403", "404"]},
     "/catalog": {"get": ["200", "401", "403", "429", "500"]},
+    "/code-bindings/{binding_id}": {"delete": ["204"], "put": ["200"]},
+    "/code-sources": {"get": ["200"], "post": ["200"]},
+    "/code-sources/{source_id}": {"delete": ["204"], "put": ["200"]},
     "/groups": {"get": ["200", "400", "401", "403", "429"], "post": ["200", "400", "401", "403", "409", "413", "415", "422", "429", "500"]},
     "/groups/order": {"put": ["200", "400", "401", "403", "413", "415", "422"]},
     "/groups/{group_id}": {"delete": ["204", "400", "401", "403", "404", "409"], "put": ["200", "400", "401", "403", "404", "409", "413", "415", "422"]},
@@ -22,6 +25,7 @@
     "/ready": {"get": ["200", "503"]},
     "/services": {"get": ["200", "400", "401", "403", "429", "500"], "post": ["200", "400", "401", "403", "404", "409", "413", "415", "422", "429", "500"]},
     "/services/{service_id}": {"delete": ["204", "400", "401", "403", "404", "412", "428"], "patch": ["200", "400", "401", "403", "404", "412", "413", "415", "422", "429", "500"], "put": ["200", "400", "401", "403", "404", "409", "412", "413", "415", "422", "428", "429", "500"]},
+    "/services/{service_id}/code-bindings": {"get": ["200"], "post": ["200"]},
     "/specifications": {"get": ["200", "400", "401", "403", "429"], "post": ["200", "400", "401", "403", "404", "409", "413", "415", "422", "429", "500"]},
     "/specifications/{specification_id}": {"delete": ["204", "400", "401", "403", "404", "412", "428"], "put": ["200", "400", "401", "403", "404", "412", "413", "415", "422", "428", "429", "500"]},
     "/specifications/{specification_id}/revisions": {"get": ["200", "400", "401", "403", "404", "429", "500"]},
@@ -39,6 +43,10 @@
     "/services": {"get": ["cursor", "includeArchived", "limit", "offset", "q", "tagId"], "post": ["Idempotency-Key"]},
     "/groups/{group_id}": {"delete": ["group_id"], "put": ["group_id"]},
     "/services/{service_id}": {"delete": ["If-Match", "service_id"], "patch": ["service_id"], "put": ["If-Match", "service_id"]},
+    "/code-sources": {"post": ["Idempotency-Key"]},
+    "/code-sources/{source_id}": {"delete": ["If-Match", "source_id"], "put": ["If-Match", "source_id"]},
+    "/services/{service_id}/code-bindings": {"post": ["Idempotency-Key", "service_id"]},
+    "/code-bindings/{binding_id}": {"delete": ["If-Match", "binding_id"], "put": ["If-Match", "binding_id"]},
     "/members/{member_actor_id}": {"delete": ["member_actor_id"], "put": ["member_actor_id"]},
     "/invitations/{invitation_id}": {"delete": ["invitation_id"]},
     "/backups/{file_name}/restore": {"post": ["file_name"]},
@@ -52,7 +60,11 @@
   },
   "responseHeaders": {
     "/services": {"post": {"200": ["ETag"]}},
+    "/code-sources": {"post": {"200": ["ETag"]}},
+    "/code-sources/{source_id}": {"put": {"200": ["ETag"]}},
     "/services/{service_id}": {"patch": {"200": ["ETag"]}, "put": {"200": ["ETag"]}},
+    "/services/{service_id}/code-bindings": {"post": {"200": ["ETag"]}},
+    "/code-bindings/{binding_id}": {"put": {"200": ["ETag"]}},
     "/specifications": {"post": {"200": ["ETag"]}},
     "/specifications/{specification_id}": {"put": {"200": ["ETag"]}}
   },
@@ -152,6 +164,38 @@
     "ServiceResponse": {
       "required": ["archived", "description", "etag", "id", "name", "slug", "tagIds", "tenantId", "updatedAt", "workspaceId"],
       "properties": ["archived", "description", "etag", "groupId", "id", "name", "slug", "tagIds", "tenantId", "updatedAt", "workspaceId"]
+    },
+    "CodeSourcePageResponse": {
+      "required": ["items"],
+      "properties": ["items"]
+    },
+    "CodeSourceResponse": {
+      "required": ["archived", "canonicalKey", "createdAt", "displayName", "etag", "executionScope", "id", "provider", "rootLocator", "sourceType", "tenantId", "updatedAt", "workspaceId"],
+      "properties": ["archived", "canonicalKey", "createdAt", "displayName", "etag", "executionScope", "id", "provider", "rootLocator", "sourceType", "tenantId", "updatedAt", "workspaceId"]
+    },
+    "CreateCodeSourceRequest": {
+      "required": ["canonicalKey", "displayName", "executionScope", "id", "provider", "rootLocator", "sourceType"],
+      "properties": ["canonicalKey", "displayName", "executionScope", "id", "provider", "rootLocator", "sourceType"]
+    },
+    "UpdateCodeSourceRequest": {
+      "required": ["canonicalKey", "displayName", "executionScope", "provider", "rootLocator", "sourceType"],
+      "properties": ["canonicalKey", "displayName", "executionScope", "provider", "rootLocator", "sourceType"]
+    },
+    "ServiceCodeBindingPageResponse": {
+      "required": ["items"],
+      "properties": ["items"]
+    },
+    "ServiceCodeBindingResponse": {
+      "required": ["createdAt", "entityKind", "etag", "id", "path", "revisionKind", "role", "serviceId", "sourceId", "tenantId", "updatedAt", "workspaceId"],
+      "properties": ["createdAt", "entityKind", "etag", "id", "path", "revision", "revisionKind", "role", "serviceId", "sourceId", "tenantId", "updatedAt", "workspaceId"]
+    },
+    "CreateCodeBindingRequest": {
+      "required": ["entityKind", "id", "revisionKind", "role", "sourceId"],
+      "properties": ["entityKind", "id", "path", "revision", "revisionKind", "role", "sourceId"]
+    },
+    "UpdateCodeBindingRequest": {
+      "required": ["entityKind", "revisionKind", "role"],
+      "properties": ["entityKind", "path", "revision", "revisionKind", "role"]
     },
     "UpdateServiceRequest": {
       "required": ["name", "slug"],

@@ -130,6 +130,87 @@ async fn catalog_requires_context_and_persists_created_facts() {
 }
 
 #[tokio::test]
+async fn code_sources_and_bindings_validate_scope_paths_and_etags() {
+    let state = ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap());
+    let app = router(state);
+    let service = headers(axum::http::Request::post("/services"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"svc-code","name":"Payments","slug":"payments","tagIds":[]}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(service).await.unwrap().status(), StatusCode::OK);
+
+    let source = headers(axum::http::Request::post("/code-sources"))
+        .header("content-type", "application/json")
+        .header("idempotency-key", "source-key")
+        .body(Body::from(r#"{"id":"src-code","sourceType":"git","provider":"github","displayName":"acme/payments","canonicalKey":"github:acme/payments","rootLocator":"https://github.com/acme/payments.git","executionScope":"server"}"#))
+        .unwrap();
+    let response = app.clone().oneshot(source).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let source_etag = response.headers().get(ETAG).unwrap().to_str().unwrap().to_owned();
+
+    let source_update = headers(axum::http::Request::put("/code-sources/src-code"))
+        .header(IF_MATCH, &source_etag)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"sourceType":"git","provider":"gitlab","displayName":"acme/payments","canonicalKey":"gitlab:acme/payments","rootLocator":"https://gitlab.com/acme/payments.git","executionScope":"server"}"#))
+        .unwrap();
+    let response = app.clone().oneshot(source_update).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated_source_etag = response.headers().get(ETAG).unwrap().to_str().unwrap().to_owned();
+    assert_ne!(updated_source_etag, source_etag);
+
+    let stale_source_update = headers(axum::http::Request::put("/code-sources/src-code"))
+        .header(IF_MATCH, &source_etag)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"sourceType":"git","provider":"github","displayName":"stale","canonicalKey":"github:stale","rootLocator":"https://github.com/acme/stale.git","executionScope":"server"}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(stale_source_update).await.unwrap().status(), StatusCode::PRECONDITION_FAILED);
+
+    let binding = headers(axum::http::Request::post("/services/svc-code/code-bindings"))
+        .header("content-type", "application/json")
+        .header("idempotency-key", "binding-key")
+        .body(Body::from(r#"{"id":"binding-code","sourceId":"src-code","role":"primary","entityKind":"directory","path":"services/payments","revisionKind":"branch","revision":"main"}"#))
+        .unwrap();
+    let response = app.clone().oneshot(binding).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let binding_etag = response.headers().get(ETAG).unwrap().to_str().unwrap().to_owned();
+
+    let binding_update = headers(axum::http::Request::put("/code-bindings/binding-code"))
+        .header(IF_MATCH, &binding_etag)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"role":"primary","entityKind":"directory","path":"services/payments/api","revisionKind":"branch","revision":"main"}"#))
+        .unwrap();
+    let response = app.clone().oneshot(binding_update).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated_binding_etag = response.headers().get(ETAG).unwrap().to_str().unwrap().to_owned();
+    assert_ne!(updated_binding_etag, binding_etag);
+
+    let stale_binding_update = headers(axum::http::Request::put("/code-bindings/binding-code"))
+        .header(IF_MATCH, &binding_etag)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"role":"primary","entityKind":"directory","path":"stale","revisionKind":"branch","revision":"main"}"#,
+        ))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(stale_binding_update).await.unwrap().status(), StatusCode::PRECONDITION_FAILED);
+
+    let invalid = headers(axum::http::Request::post("/services/svc-code/code-bindings"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"binding-invalid","sourceId":"src-code","role":"additional","entityKind":"directory","path":"../escape","revisionKind":"default_branch","revision":null}"#))
+        .unwrap();
+    let response = app.clone().oneshot(invalid).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["code"], "invalid_code_binding");
+
+    let bindings = headers(axum::http::Request::get("/services/svc-code/code-bindings")).body(Body::empty()).unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&app.oneshot(bindings).await.unwrap().into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(body["items"][0]["path"], "services/payments/api");
+}
+
+#[tokio::test]
 async fn services_can_be_moved_edited_archived_and_restored() {
     let state = ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap());
     let app = router(state.clone());
@@ -707,7 +788,7 @@ async fn readiness_reports_migration_state_and_health_headers() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["status"], "ready");
-    assert_eq!(body["schemaVersion"], 11);
+    assert_eq!(body["schemaVersion"], 12);
 }
 
 #[tokio::test]

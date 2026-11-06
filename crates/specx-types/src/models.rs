@@ -109,6 +109,92 @@ pub struct Service {
     pub archived: bool,
 }
 
+/// Reusable location from which code can be resolved for one or more services.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSource {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    /// Structural source type. Provider names remain extensible strings.
+    pub source_type: CodeSourceType,
+    pub provider: String,
+    pub display_name: String,
+    /// Stable external identity used for workspace-local de-duplication.
+    pub canonical_key: String,
+    /// Repository URL or host-local root descriptor. It is never a credential.
+    pub root_locator: String,
+    pub execution_scope: CodeExecutionScope,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// Structural source types supported by the first binding workflow.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeSourceType {
+    Git,
+    LocalFilesystem,
+}
+
+/// Host boundary used to resolve a source.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeExecutionScope {
+    Server,
+    DesktopHost,
+}
+
+/// The concrete entity selected inside a source root.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeEntityKind {
+    RepositoryRoot,
+    Directory,
+    File,
+    Pattern,
+}
+
+/// The relationship's importance for a service.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeBindingRole {
+    Primary,
+    Additional,
+}
+
+/// How a binding selects a source revision.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeRevisionKind {
+    DefaultBranch,
+    Branch,
+    Tag,
+    Commit,
+    WorkingTree,
+}
+
+/// A service's explicit relationship with one source entity.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceCodeBinding {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    pub service_id: Id,
+    pub source_id: Id,
+    pub role: CodeBindingRole,
+    pub entity_kind: CodeEntityKind,
+    /// POSIX path relative to the source root; repository root is empty.
+    pub path: String,
+    pub revision_kind: CodeRevisionKind,
+    pub revision: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// Versioned document attached to a service.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

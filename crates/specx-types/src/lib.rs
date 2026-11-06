@@ -7,5 +7,7 @@
 mod models;
 
 pub use models::{
-    Id, Service, ServiceGroup, ServiceGroupOrder, Specification, SpecificationKind, Tag, Workspace, WorkspaceContext,
+    CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Id, Service,
+    ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, Specification, SpecificationKind, Tag, Workspace,
+    WorkspaceContext,
 };

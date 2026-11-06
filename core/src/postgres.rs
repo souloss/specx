@@ -12,7 +12,10 @@ use crate::persistence::{
     AuditEvent, BackupArtifact, IdempotencyRecord, LATEST_SCHEMA_VERSION, PersistenceError, SpecificationRevision,
     WebSession, WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
 };
-use crate::{Core, Service, ServiceGroup, Specification, SpecificationKind, Tag, Workspace, WorkspaceContext};
+use crate::{
+    CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Core, Service,
+    ServiceCodeBinding, ServiceGroup, Specification, SpecificationKind, Tag, Workspace, WorkspaceContext,
+};
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
@@ -190,6 +193,23 @@ impl PostgresStore {
                    archived BOOLEAN NOT NULL DEFAULT FALSE,
                    UNIQUE (tenant_id, workspace_id, slug)
                  );
+                 CREATE TABLE IF NOT EXISTS code_sources (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   source_type TEXT NOT NULL, provider TEXT NOT NULL, display_name TEXT NOT NULL,
+                   canonical_key TEXT NOT NULL, root_locator TEXT NOT NULL, execution_scope TEXT NOT NULL,
+                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived BOOLEAN NOT NULL DEFAULT FALSE,
+                   UNIQUE (tenant_id, workspace_id, canonical_key)
+                 );
+                 CREATE INDEX IF NOT EXISTS code_sources_scope ON code_sources(tenant_id, workspace_id, display_name);
+                 CREATE TABLE IF NOT EXISTS service_code_bindings (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+                   source_id TEXT NOT NULL REFERENCES code_sources(id) ON DELETE RESTRICT,
+                   role TEXT NOT NULL, entity_kind TEXT NOT NULL, path TEXT NOT NULL DEFAULT '',
+                   revision_kind TEXT NOT NULL, revision TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                   UNIQUE (tenant_id, workspace_id, service_id, source_id, entity_kind, path)
+                 );
+                 CREATE INDEX IF NOT EXISTS service_code_bindings_service ON service_code_bindings(tenant_id, workspace_id, service_id);
                  CREATE INDEX IF NOT EXISTS services_scope ON services(tenant_id, workspace_id, name);
                  CREATE TABLE IF NOT EXISTS service_tags (
                    tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
@@ -341,6 +361,10 @@ impl PostgresStore {
             .map_err(pg_error)?;
         transaction
             .execute("INSERT INTO schema_migrations(version) VALUES (11) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (12) ON CONFLICT DO NOTHING", &[])
             .await
             .map_err(pg_error)?;
         transaction.commit().await.map_err(pg_error)?;
@@ -509,6 +533,32 @@ impl PostgresStore {
                     .map_err(pg_error)?;
             }
         }
+        for source in core.code_sources().filter(|source| in_scope(context, &source.tenant_id, &source.workspace_id)) {
+            let changed = transaction.execute(
+                "INSERT INTO code_sources(id,tenant_id,workspace_id,source_type,provider,display_name,canonical_key,root_locator,execution_scope,created_at,updated_at,archived)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                 ON CONFLICT(id) DO UPDATE SET source_type=excluded.source_type,provider=excluded.provider,display_name=excluded.display_name,
+                   canonical_key=excluded.canonical_key,root_locator=excluded.root_locator,execution_scope=excluded.execution_scope,
+                   created_at=excluded.created_at,updated_at=excluded.updated_at,archived=excluded.archived
+                 WHERE code_sources.tenant_id=excluded.tenant_id AND code_sources.workspace_id=excluded.workspace_id",
+                &[&source.id, &source.tenant_id, &source.workspace_id, &source_type_name(source.source_type), &source.provider, &source.display_name, &source.canonical_key, &source.root_locator, &execution_scope_name(source.execution_scope), &source.created_at, &source.updated_at, &source.archived],
+            ).await.map_err(pg_error)?;
+            ensure_scope(changed, "code source")?;
+        }
+        for binding in
+            core.code_bindings().filter(|binding| in_scope(context, &binding.tenant_id, &binding.workspace_id))
+        {
+            let changed = transaction.execute(
+                "INSERT INTO service_code_bindings(id,tenant_id,workspace_id,service_id,source_id,role,entity_kind,path,revision_kind,revision,created_at,updated_at)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                 ON CONFLICT(id) DO UPDATE SET service_id=excluded.service_id,source_id=excluded.source_id,role=excluded.role,
+                   entity_kind=excluded.entity_kind,path=excluded.path,revision_kind=excluded.revision_kind,revision=excluded.revision,
+                   created_at=excluded.created_at,updated_at=excluded.updated_at
+                 WHERE service_code_bindings.tenant_id=excluded.tenant_id AND service_code_bindings.workspace_id=excluded.workspace_id",
+                &[&binding.id, &binding.tenant_id, &binding.workspace_id, &binding.service_id, &binding.source_id, &binding_role_name(binding.role), &entity_kind_name(binding.entity_kind), &binding.path, &revision_kind_name(binding.revision_kind), &binding.revision, &binding.created_at, &binding.updated_at],
+            ).await.map_err(pg_error)?;
+            ensure_scope(changed, "code binding")?;
+        }
         for specification in core
             .specifications()
             .filter(|specification| in_scope(context, &specification.tenant_id, &specification.workspace_id))
@@ -615,6 +665,14 @@ impl PostgresStore {
         }
         for row in spec_rows {
             core.insert_specification(specification_from_row(&row)?);
+        }
+        let source_rows = client.query("SELECT id,tenant_id,workspace_id,source_type,provider,display_name,canonical_key,root_locator,execution_scope,created_at,updated_at,archived FROM code_sources WHERE tenant_id=$1 AND workspace_id=$2", &[&context.tenant_id, &context.workspace_id]).await.map_err(pg_error)?;
+        for row in source_rows {
+            core.insert_code_source(code_source_from_row(&row)?);
+        }
+        let binding_rows = client.query("SELECT id,tenant_id,workspace_id,service_id,source_id,role,entity_kind,path,revision_kind,revision,created_at,updated_at FROM service_code_bindings WHERE tenant_id=$1 AND workspace_id=$2", &[&context.tenant_id, &context.workspace_id]).await.map_err(pg_error)?;
+        for row in binding_rows {
+            core.insert_code_binding(code_binding_from_row(&row)?);
         }
         Ok(core)
     }
@@ -846,6 +904,124 @@ impl PostgresStore {
                 )
                 .await
                 .map_err(pg_error)?;
+        }
+        if let Some(event) = audit {
+            insert_audit(&transaction, event).await?;
+        }
+        transaction.commit().await.map_err(pg_error)?;
+        Ok(true)
+    }
+
+    pub async fn update_code_source_if_current_with_audit(
+        &self,
+        context: &WorkspaceContext,
+        expected: &CodeSource,
+        updated: &CodeSource,
+        audit: Option<&AuditEvent>,
+    ) -> Result<bool, PersistenceError> {
+        if expected.id != updated.id
+            || expected.tenant_id != context.tenant_id
+            || expected.workspace_id != context.workspace_id
+            || updated.tenant_id != context.tenant_id
+            || updated.workspace_id != context.workspace_id
+        {
+            return Err(PersistenceError::new("code source update scope does not match"));
+        }
+
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(pg_error)?;
+        let changed = transaction
+            .execute(
+                "UPDATE code_sources SET source_type=$1,provider=$2,display_name=$3,canonical_key=$4,
+                   root_locator=$5,execution_scope=$6,updated_at=$7,archived=$8
+                 WHERE id=$9 AND tenant_id=$10 AND workspace_id=$11 AND source_type=$12 AND provider=$13
+                   AND display_name=$14 AND canonical_key=$15 AND root_locator=$16 AND execution_scope=$17
+                   AND updated_at=$18 AND archived=$19",
+                &[
+                    &source_type_name(updated.source_type),
+                    &updated.provider,
+                    &updated.display_name,
+                    &updated.canonical_key,
+                    &updated.root_locator,
+                    &execution_scope_name(updated.execution_scope),
+                    &updated.updated_at,
+                    &updated.archived,
+                    &expected.id,
+                    &context.tenant_id,
+                    &context.workspace_id,
+                    &source_type_name(expected.source_type),
+                    &expected.provider,
+                    &expected.display_name,
+                    &expected.canonical_key,
+                    &expected.root_locator,
+                    &execution_scope_name(expected.execution_scope),
+                    &expected.updated_at,
+                    &expected.archived,
+                ],
+            )
+            .await
+            .map_err(pg_error)?;
+        if changed != 1 {
+            transaction.commit().await.map_err(pg_error)?;
+            return Ok(false);
+        }
+        if let Some(event) = audit {
+            insert_audit(&transaction, event).await?;
+        }
+        transaction.commit().await.map_err(pg_error)?;
+        Ok(true)
+    }
+
+    pub async fn update_code_binding_if_current_with_audit(
+        &self,
+        context: &WorkspaceContext,
+        expected: &ServiceCodeBinding,
+        updated: &ServiceCodeBinding,
+        audit: Option<&AuditEvent>,
+    ) -> Result<bool, PersistenceError> {
+        if expected.id != updated.id
+            || expected.tenant_id != context.tenant_id
+            || expected.workspace_id != context.workspace_id
+            || updated.tenant_id != context.tenant_id
+            || updated.workspace_id != context.workspace_id
+        {
+            return Err(PersistenceError::new("code binding update scope does not match"));
+        }
+
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(pg_error)?;
+        let changed = transaction
+            .execute(
+                "UPDATE service_code_bindings SET role=$1,entity_kind=$2,path=$3,revision_kind=$4,
+                   revision=$5,updated_at=$6
+                 WHERE id=$7 AND tenant_id=$8 AND workspace_id=$9 AND service_id=$10 AND source_id=$11
+                   AND role=$12 AND entity_kind=$13 AND path=$14 AND revision_kind=$15
+                   AND revision IS NOT DISTINCT FROM $16 AND updated_at=$17",
+                &[
+                    &binding_role_name(updated.role),
+                    &entity_kind_name(updated.entity_kind),
+                    &updated.path,
+                    &revision_kind_name(updated.revision_kind),
+                    &updated.revision,
+                    &updated.updated_at,
+                    &expected.id,
+                    &context.tenant_id,
+                    &context.workspace_id,
+                    &expected.service_id,
+                    &expected.source_id,
+                    &binding_role_name(expected.role),
+                    &entity_kind_name(expected.entity_kind),
+                    &expected.path,
+                    &revision_kind_name(expected.revision_kind),
+                    &expected.revision,
+                    &expected.updated_at,
+                ],
+            )
+            .await
+            .map_err(pg_error)?;
+        if changed != 1 {
+            transaction.commit().await.map_err(pg_error)?;
+            return Ok(false);
         }
         if let Some(event) = audit {
             insert_audit(&transaction, event).await?;
@@ -1243,6 +1419,20 @@ impl PostgresStore {
             .map_err(pg_error)?;
         transaction
             .execute(
+                "DELETE FROM service_code_bindings WHERE tenant_id=$1 AND workspace_id=$2",
+                &[&context.tenant_id, &workspace_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute(
+                "DELETE FROM code_sources WHERE tenant_id=$1 AND workspace_id=$2",
+                &[&context.tenant_id, &workspace_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute(
                 "DELETE FROM services WHERE tenant_id=$1 AND workspace_id=$2",
                 &[&context.tenant_id, &workspace_id],
             )
@@ -1361,6 +1551,44 @@ impl PostgresStore {
             .execute(
                 "DELETE FROM services WHERE tenant_id=$1 AND workspace_id=$2 AND id=$3",
                 &[&context.tenant_id, &context.workspace_id, &service_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        insert_audit(&transaction, audit).await?;
+        transaction.commit().await.map_err(pg_error)
+    }
+
+    pub async fn delete_code_source(
+        &self,
+        context: &WorkspaceContext,
+        source_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(pg_error)?;
+        transaction
+            .execute(
+                "DELETE FROM code_sources WHERE tenant_id=$1 AND workspace_id=$2 AND id=$3",
+                &[&context.tenant_id, &context.workspace_id, &source_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        insert_audit(&transaction, audit).await?;
+        transaction.commit().await.map_err(pg_error)
+    }
+
+    pub async fn delete_code_binding(
+        &self,
+        context: &WorkspaceContext,
+        binding_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(pg_error)?;
+        transaction
+            .execute(
+                "DELETE FROM service_code_bindings WHERE tenant_id=$1 AND workspace_id=$2 AND id=$3",
+                &[&context.tenant_id, &context.workspace_id, &binding_id],
             )
             .await
             .map_err(pg_error)?;
@@ -1765,6 +1993,81 @@ fn parse_kind(kind: &str) -> Result<SpecificationKind, PersistenceError> {
         _ => Err(PersistenceError::new(format!("unsupported specification kind: {kind}"))),
     }
 }
+fn source_type_name(value: CodeSourceType) -> &'static str {
+    match value {
+        CodeSourceType::Git => "git",
+        CodeSourceType::LocalFilesystem => "local_filesystem",
+    }
+}
+fn parse_source_type(value: &str) -> Result<CodeSourceType, PersistenceError> {
+    match value {
+        "git" => Ok(CodeSourceType::Git),
+        "local_filesystem" => Ok(CodeSourceType::LocalFilesystem),
+        _ => Err(PersistenceError::new(format!("unsupported code source type: {value}"))),
+    }
+}
+fn execution_scope_name(value: CodeExecutionScope) -> &'static str {
+    match value {
+        CodeExecutionScope::Server => "server",
+        CodeExecutionScope::DesktopHost => "desktop_host",
+    }
+}
+fn parse_execution_scope(value: &str) -> Result<CodeExecutionScope, PersistenceError> {
+    match value {
+        "server" => Ok(CodeExecutionScope::Server),
+        "desktop_host" => Ok(CodeExecutionScope::DesktopHost),
+        _ => Err(PersistenceError::new(format!("unsupported code execution scope: {value}"))),
+    }
+}
+fn binding_role_name(value: CodeBindingRole) -> &'static str {
+    match value {
+        CodeBindingRole::Primary => "primary",
+        CodeBindingRole::Additional => "additional",
+    }
+}
+fn parse_binding_role(value: &str) -> Result<CodeBindingRole, PersistenceError> {
+    match value {
+        "primary" => Ok(CodeBindingRole::Primary),
+        "additional" => Ok(CodeBindingRole::Additional),
+        _ => Err(PersistenceError::new(format!("unsupported code binding role: {value}"))),
+    }
+}
+fn entity_kind_name(value: CodeEntityKind) -> &'static str {
+    match value {
+        CodeEntityKind::RepositoryRoot => "repository_root",
+        CodeEntityKind::Directory => "directory",
+        CodeEntityKind::File => "file",
+        CodeEntityKind::Pattern => "pattern",
+    }
+}
+fn parse_entity_kind(value: &str) -> Result<CodeEntityKind, PersistenceError> {
+    match value {
+        "repository_root" => Ok(CodeEntityKind::RepositoryRoot),
+        "directory" => Ok(CodeEntityKind::Directory),
+        "file" => Ok(CodeEntityKind::File),
+        "pattern" => Ok(CodeEntityKind::Pattern),
+        _ => Err(PersistenceError::new(format!("unsupported code entity kind: {value}"))),
+    }
+}
+fn revision_kind_name(value: CodeRevisionKind) -> &'static str {
+    match value {
+        CodeRevisionKind::DefaultBranch => "default_branch",
+        CodeRevisionKind::Branch => "branch",
+        CodeRevisionKind::Tag => "tag",
+        CodeRevisionKind::Commit => "commit",
+        CodeRevisionKind::WorkingTree => "working_tree",
+    }
+}
+fn parse_revision_kind(value: &str) -> Result<CodeRevisionKind, PersistenceError> {
+    match value {
+        "default_branch" => Ok(CodeRevisionKind::DefaultBranch),
+        "branch" => Ok(CodeRevisionKind::Branch),
+        "tag" => Ok(CodeRevisionKind::Tag),
+        "commit" => Ok(CodeRevisionKind::Commit),
+        "working_tree" => Ok(CodeRevisionKind::WorkingTree),
+        _ => Err(PersistenceError::new(format!("unsupported code revision kind: {value}"))),
+    }
+}
 fn content_hash(content: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(content.as_bytes());
@@ -1809,6 +2112,38 @@ fn specification_from_row(row: &Row) -> Result<Specification, PersistenceError> 
         version: row.get(7),
         content_hash: row.get(8),
         updated_at: row.get(9),
+    })
+}
+fn code_source_from_row(row: &Row) -> Result<CodeSource, PersistenceError> {
+    Ok(CodeSource {
+        id: row.get(0),
+        tenant_id: row.get(1),
+        workspace_id: row.get(2),
+        source_type: parse_source_type(&row.get::<_, String>(3))?,
+        provider: row.get(4),
+        display_name: row.get(5),
+        canonical_key: row.get(6),
+        root_locator: row.get(7),
+        execution_scope: parse_execution_scope(&row.get::<_, String>(8))?,
+        created_at: row.get(9),
+        updated_at: row.get(10),
+        archived: row.get(11),
+    })
+}
+fn code_binding_from_row(row: &Row) -> Result<ServiceCodeBinding, PersistenceError> {
+    Ok(ServiceCodeBinding {
+        id: row.get(0),
+        tenant_id: row.get(1),
+        workspace_id: row.get(2),
+        service_id: row.get(3),
+        source_id: row.get(4),
+        role: parse_binding_role(&row.get::<_, String>(5))?,
+        entity_kind: parse_entity_kind(&row.get::<_, String>(6))?,
+        path: row.get(7),
+        revision_kind: parse_revision_kind(&row.get::<_, String>(8))?,
+        revision: row.get(9),
+        created_at: row.get(10),
+        updated_at: row.get(11),
     })
 }
 

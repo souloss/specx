@@ -1,6 +1,18 @@
 import { uuid } from "../common/utils";
 import type { Catalog, Group, Service, Specification } from "../../types/domain";
-import type { AuthResponse, CatalogResponse, SpecificationResponse, SpecificationRevisionPageResponse, SpecificationRevisionResponse, WorkspaceListResponse, WorkspaceResponse } from "../../types/api";
+import type {
+  AuthResponse,
+  CatalogResponse,
+  CodeSourcePageResponse,
+  CodeSourceResponse,
+  ServiceCodeBindingPageResponse,
+  ServiceCodeBindingResponse,
+  SpecificationResponse,
+  SpecificationRevisionPageResponse,
+  SpecificationRevisionResponse,
+  WorkspaceListResponse,
+  WorkspaceResponse,
+} from "../../types/api";
 import { UNGROUPED_GROUP_ID } from "../core";
 import { getBackendTransport } from "./api";
 import { ApiError } from "./types";
@@ -119,6 +131,38 @@ export const specxApi = {
   },
   deleteService(workspaceId: string, service: Service) {
     return request<void>(`/api/specx/services/${encodeURIComponent(service.id)}`, { method: "DELETE", headers: { "if-match": service.etag ?? "" } }, workspaceId);
+  },
+  listCodeSources(workspaceId: string) {
+    return request<CodeSourcePageResponse>("/api/specx/code-sources", {}, workspaceId);
+  },
+  createCodeSource(workspaceId: string, input: Pick<CodeSourceResponse, "id" | "sourceType" | "provider" | "displayName" | "canonicalKey" | "rootLocator" | "executionScope">, key = idempotencyKey("code-source")) {
+    return request<CodeSourceResponse>("/api/specx/code-sources", { method: "POST", headers: { "idempotency-key": key }, body: input }, workspaceId);
+  },
+  updateCodeSource(workspaceId: string, source: CodeSourceResponse) {
+    return request<CodeSourceResponse>(
+      `/api/specx/code-sources/${encodeURIComponent(source.id)}`,
+      { method: "PUT", headers: { "if-match": source.etag }, body: { sourceType: source.sourceType, provider: source.provider, displayName: source.displayName, canonicalKey: source.canonicalKey, rootLocator: source.rootLocator, executionScope: source.executionScope } },
+      workspaceId,
+    );
+  },
+  deleteCodeSource(workspaceId: string, source: CodeSourceResponse) {
+    return request<void>(`/api/specx/code-sources/${encodeURIComponent(source.id)}`, { method: "DELETE", headers: { "if-match": source.etag } }, workspaceId);
+  },
+  listCodeBindings(workspaceId: string, serviceId: string) {
+    return request<ServiceCodeBindingPageResponse>(`/api/specx/services/${encodeURIComponent(serviceId)}/code-bindings`, {}, workspaceId);
+  },
+  createCodeBinding(workspaceId: string, serviceId: string, input: Pick<ServiceCodeBindingResponse, "id" | "sourceId" | "role" | "entityKind" | "path" | "revisionKind" | "revision">, key = idempotencyKey("code-binding")) {
+    return request<ServiceCodeBindingResponse>(`/api/specx/services/${encodeURIComponent(serviceId)}/code-bindings`, { method: "POST", headers: { "idempotency-key": key }, body: input }, workspaceId);
+  },
+  updateCodeBinding(workspaceId: string, binding: ServiceCodeBindingResponse) {
+    return request<ServiceCodeBindingResponse>(
+      `/api/specx/code-bindings/${encodeURIComponent(binding.id)}`,
+      { method: "PUT", headers: { "if-match": binding.etag }, body: { role: binding.role, entityKind: binding.entityKind, path: binding.path, revisionKind: binding.revisionKind, revision: binding.revision } },
+      workspaceId,
+    );
+  },
+  deleteCodeBinding(workspaceId: string, binding: ServiceCodeBindingResponse) {
+    return request<void>(`/api/specx/code-bindings/${encodeURIComponent(binding.id)}`, { method: "DELETE", headers: { "if-match": binding.etag } }, workspaceId);
   },
   createTag(workspaceId: string, tag: { id: string; name: string; color: string }) {
     return request<unknown>("/api/specx/tags", { method: "POST", headers: { "idempotency-key": idempotencyKey("tag") }, body: tag }, workspaceId);

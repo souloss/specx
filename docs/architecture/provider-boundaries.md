@@ -14,6 +14,11 @@ Provider 负责声明的格式或能力实现，例如 Markdown 预览。它接�
 
 一期不要求独立 Provider 进程、复杂插件包或插件市场。纯 UI 的 Markdown 贡献可以随 Web 发布；未来涉及不可信代码、用户输入执行或高资源消耗时，再使用受管进程或执行池隔离。
 
+代码来源 Provider 遵循相同边界：Core 只保存 `CodeSource`、`ServiceCodeBinding` 和
+版本选择器，GitHub、GitLab、Generic Git 与本地文件读取由 Host/Provider 实现。Provider
+可以校验来源、浏览目录、解析分支到 Commit 并生成 `CodeSnapshot`，但不能直接写服务、
+目录、规范或凭据。第一版只交付来源和绑定事实管理，读取与分析能力在快照协议稳定后接入。
+
 ## 请求方向
 
 ```text

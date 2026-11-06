@@ -25,6 +25,10 @@ where
         .route("/tags/{tag_id}", put(update_tag).delete(delete_tag))
         .route("/services", get(list_services).post(create_service))
         .route("/services/{service_id}", put(update_service).patch(set_service_archived).delete(delete_service))
+        .route("/code-sources", get(list_code_sources).post(create_code_source))
+        .route("/code-sources/{source_id}", put(update_code_source).delete(delete_code_source))
+        .route("/services/{service_id}/code-bindings", get(list_service_code_bindings).post(create_code_binding))
+        .route("/code-bindings/{binding_id}", put(update_code_binding).delete(delete_code_binding))
         .route("/specifications", get(list_specifications).post(create_specification))
         .route("/specifications/{specification_id}/revisions", get(list_specification_revisions))
         .route("/specifications/{specification_id}/revisions/{version}", get(get_specification_revision))
@@ -588,6 +592,91 @@ pub struct ServiceResponse {
     pub updated_at: String,
     pub archived: bool,
     pub etag: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSourceResponse {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    #[schema(value_type = String)]
+    pub source_type: CodeSourceType,
+    pub provider: String,
+    pub display_name: String,
+    pub canonical_key: String,
+    pub root_locator: String,
+    #[schema(value_type = String)]
+    pub execution_scope: CodeExecutionScope,
+    pub created_at: String,
+    pub updated_at: String,
+    pub archived: bool,
+    pub etag: String,
+}
+
+impl From<CodeSource> for CodeSourceResponse {
+    fn from(source: CodeSource) -> Self {
+        let mut response = Self {
+            id: source.id,
+            tenant_id: source.tenant_id,
+            workspace_id: source.workspace_id,
+            source_type: source.source_type,
+            provider: source.provider,
+            display_name: source.display_name,
+            canonical_key: source.canonical_key,
+            root_locator: source.root_locator,
+            execution_scope: source.execution_scope,
+            created_at: source.created_at,
+            updated_at: source.updated_at,
+            archived: source.archived,
+            etag: String::new(),
+        };
+        response.etag = code_source_etag(&response);
+        response
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceCodeBindingResponse {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    pub service_id: Id,
+    pub source_id: Id,
+    #[schema(value_type = String)]
+    pub role: CodeBindingRole,
+    #[schema(value_type = String)]
+    pub entity_kind: CodeEntityKind,
+    pub path: String,
+    #[schema(value_type = String)]
+    pub revision_kind: CodeRevisionKind,
+    pub revision: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub etag: String,
+}
+
+impl From<ServiceCodeBinding> for ServiceCodeBindingResponse {
+    fn from(binding: ServiceCodeBinding) -> Self {
+        let mut response = Self {
+            id: binding.id,
+            tenant_id: binding.tenant_id,
+            workspace_id: binding.workspace_id,
+            service_id: binding.service_id,
+            source_id: binding.source_id,
+            role: binding.role,
+            entity_kind: binding.entity_kind,
+            path: binding.path,
+            revision_kind: binding.revision_kind,
+            revision: binding.revision,
+            created_at: binding.created_at,
+            updated_at: binding.updated_at,
+            etag: String::new(),
+        };
+        response.etag = code_binding_etag(&response);
+        response
+    }
 }
 
 impl From<Service> for ServiceResponse {
@@ -2118,6 +2207,391 @@ async fn delete_service(
 
 #[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateCodeSourceRequest {
+    pub id: Id,
+    #[schema(value_type = String)]
+    pub source_type: CodeSourceType,
+    pub provider: String,
+    pub display_name: String,
+    pub canonical_key: String,
+    pub root_locator: String,
+    #[schema(value_type = String)]
+    pub execution_scope: CodeExecutionScope,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateCodeSourceRequest {
+    #[schema(value_type = String)]
+    pub source_type: CodeSourceType,
+    pub provider: String,
+    pub display_name: String,
+    pub canonical_key: String,
+    pub root_locator: String,
+    #[schema(value_type = String)]
+    pub execution_scope: CodeExecutionScope,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSourcePageResponse {
+    pub items: Vec<CodeSourceResponse>,
+}
+
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateCodeBindingRequest {
+    pub id: Id,
+    pub source_id: Id,
+    #[schema(value_type = String)]
+    pub role: CodeBindingRole,
+    #[schema(value_type = String)]
+    pub entity_kind: CodeEntityKind,
+    #[serde(default)]
+    pub path: String,
+    #[schema(value_type = String)]
+    pub revision_kind: CodeRevisionKind,
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateCodeBindingRequest {
+    #[schema(value_type = String)]
+    pub role: CodeBindingRole,
+    #[schema(value_type = String)]
+    pub entity_kind: CodeEntityKind,
+    #[serde(default)]
+    pub path: String,
+    #[schema(value_type = String)]
+    pub revision_kind: CodeRevisionKind,
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceCodeBindingPageResponse {
+    pub items: Vec<ServiceCodeBindingResponse>,
+}
+
+#[utoipa::path(get, path = "/code-sources", responses((status = 200, body = CodeSourcePageResponse)), tag = "code")]
+async fn list_code_sources(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<CodeSourcePageResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut items: Vec<_> =
+        load_core(&mut inner, &context)?.list_code_sources(&context).into_iter().cloned().map(Into::into).collect();
+    items.sort_by(|left: &CodeSourceResponse, right: &CodeSourceResponse| {
+        left.display_name.cmp(&right.display_name).then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(Json(CodeSourcePageResponse { items }))
+}
+
+#[utoipa::path(post, path = "/code-sources", params(("Idempotency-Key" = Option<String>, Header)), request_body = CreateCodeSourceRequest, responses((status = 200, body = CodeSourceResponse, headers(("ETag" = String, description = "Strong validator for subsequent updates")))), tag = "code")]
+async fn create_code_source(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateCodeSourceRequest>,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let descriptor = idempotency_descriptor(&headers, &context, "code-sources", &input)?;
+    let mut inner = state.inner.lock().await;
+    if let Some(record) = check_idempotency(&inner.store, descriptor.as_ref())? {
+        if record.resource_type != "code_source" {
+            return Err(ApiError::IdempotencyConflict);
+        }
+        let response = load_core(&mut inner, &context)?
+            .list_code_sources(&context)
+            .into_iter()
+            .find(|source| source.id == record.resource_id)
+            .cloned()
+            .ok_or(ApiError::IdempotencyConflict)?;
+        let response: CodeSourceResponse = response.into();
+        let etag = response.etag.clone();
+        return Ok(response_with_etag(response, etag));
+    }
+    let now = Utc::now().to_rfc3339();
+    let mut core = load_core(&mut inner, &context)?;
+    let source = core.create_code_source(
+        &context,
+        CodeSource {
+            id: input.id,
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            source_type: input.source_type,
+            provider: input.provider,
+            display_name: input.display_name,
+            canonical_key: input.canonical_key,
+            root_locator: input.root_locator,
+            execution_scope: input.execution_scope,
+            created_at: now.clone(),
+            updated_at: now,
+            archived: false,
+        },
+    )?;
+    let id = source.id.clone();
+    let audit = audit_event(&context, &headers, "create", "code_source", &id);
+    inner.store.persist_core_with_audit_and_idempotency(
+        &core,
+        &context,
+        Some(&audit),
+        durable_idempotency(descriptor.as_ref(), &context, "code_source", &id),
+    )?;
+    inner.seed_core = None;
+    let response: CodeSourceResponse = source.into();
+    let etag = response.etag.clone();
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(put, path = "/code-sources/{source_id}", params(("source_id" = String, Path), ("If-Match" = String, Header)), request_body = UpdateCodeSourceRequest, responses((status = 200, body = CodeSourceResponse, headers(("ETag" = String, description = "New strong validator for subsequent updates")))), tag = "code")]
+async fn update_code_source(
+    State(state): State<ApiState>,
+    Path(source_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateCodeSourceRequest>,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let expected = core
+        .list_code_sources(&context)
+        .into_iter()
+        .find(|source| source.id == source_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("code_source"))?;
+    let current = CodeSourceResponse::from(expected.clone()).etag;
+    let matches = headers
+        .get_all(IF_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| if_match_satisfies(value, &current));
+    if !matches {
+        return Err(if headers.get(IF_MATCH).is_none() {
+            ApiError::PreconditionRequired
+        } else {
+            ApiError::PreconditionFailed
+        });
+    }
+    let source = core.update_code_source(
+        &context,
+        &source_id,
+        input.source_type,
+        input.display_name,
+        input.provider,
+        input.canonical_key,
+        input.root_locator,
+        input.execution_scope,
+    )?;
+    let audit = audit_event(&context, &headers, "update", "code_source", &source_id);
+    if !inner.store.update_code_source_if_current_with_audit(&context, &expected, &source, Some(&audit))? {
+        return Err(ApiError::PreconditionFailed);
+    }
+    inner.seed_core = None;
+    let response: CodeSourceResponse = source.into();
+    let etag = response.etag.clone();
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(delete, path = "/code-sources/{source_id}", params(("source_id" = String, Path), ("If-Match" = String, Header)), responses((status = 204)), tag = "code")]
+async fn delete_code_source(
+    State(state): State<ApiState>,
+    Path(source_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    let source = core
+        .list_code_sources(&context)
+        .into_iter()
+        .find(|source| source.id == source_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("code_source"))?;
+    let current = CodeSourceResponse::from(source.clone()).etag;
+    let matches = headers
+        .get_all(IF_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| if_match_satisfies(value, &current));
+    if !matches {
+        return Err(if headers.get(IF_MATCH).is_none() {
+            ApiError::PreconditionRequired
+        } else {
+            ApiError::PreconditionFailed
+        });
+    }
+    let mut next = core;
+    next.delete_code_source(&context, &source_id)?;
+    let audit = audit_event(&context, &headers, "delete", "code_source", &source_id);
+    inner.store.delete_code_source(&context, &source_id, &audit)?;
+    inner.seed_core = None;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(get, path = "/services/{service_id}/code-bindings", params(("service_id" = String, Path)), responses((status = 200, body = ServiceCodeBindingPageResponse)), tag = "code")]
+async fn list_service_code_bindings(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<Json<ServiceCodeBindingPageResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    if !core.list_services(&context).into_iter().any(|service| service.id == service_id) {
+        return Err(CoreError::NotFound("service").into());
+    }
+    let mut items: Vec<_> =
+        core.list_service_code_bindings(&context, &service_id).into_iter().cloned().map(Into::into).collect();
+    items.sort_by(|left: &ServiceCodeBindingResponse, right: &ServiceCodeBindingResponse| {
+        left.role.cmp(&right.role).then_with(|| left.path.cmp(&right.path)).then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(Json(ServiceCodeBindingPageResponse { items }))
+}
+
+#[utoipa::path(post, path = "/services/{service_id}/code-bindings", params(("service_id" = String, Path), ("Idempotency-Key" = Option<String>, Header)), request_body = CreateCodeBindingRequest, responses((status = 200, body = ServiceCodeBindingResponse, headers(("ETag" = String, description = "Strong validator for subsequent updates")))), tag = "code")]
+async fn create_code_binding(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<CreateCodeBindingRequest>,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let descriptor = idempotency_descriptor(&headers, &context, "code-bindings", &input)?;
+    let mut inner = state.inner.lock().await;
+    if let Some(record) = check_idempotency(&inner.store, descriptor.as_ref())? {
+        if record.resource_type != "code_binding" {
+            return Err(ApiError::IdempotencyConflict);
+        }
+        let response = load_core(&mut inner, &context)?
+            .list_code_bindings(&context)
+            .into_iter()
+            .find(|binding| binding.id == record.resource_id)
+            .cloned()
+            .ok_or(ApiError::IdempotencyConflict)?;
+        let response: ServiceCodeBindingResponse = response.into();
+        let etag = response.etag.clone();
+        return Ok(response_with_etag(response, etag));
+    }
+    let now = Utc::now().to_rfc3339();
+    let mut core = load_core(&mut inner, &context)?;
+    let binding = core.create_code_binding(
+        &context,
+        ServiceCodeBinding {
+            id: input.id,
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            service_id,
+            source_id: input.source_id,
+            role: input.role,
+            entity_kind: input.entity_kind,
+            path: input.path,
+            revision_kind: input.revision_kind,
+            revision: input.revision,
+            created_at: now.clone(),
+            updated_at: now,
+        },
+    )?;
+    let id = binding.id.clone();
+    let audit = audit_event(&context, &headers, "create", "code_binding", &id);
+    inner.store.persist_core_with_audit_and_idempotency(
+        &core,
+        &context,
+        Some(&audit),
+        durable_idempotency(descriptor.as_ref(), &context, "code_binding", &id),
+    )?;
+    inner.seed_core = None;
+    let response: ServiceCodeBindingResponse = binding.into();
+    let etag = response.etag.clone();
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(put, path = "/code-bindings/{binding_id}", params(("binding_id" = String, Path), ("If-Match" = String, Header)), request_body = UpdateCodeBindingRequest, responses((status = 200, body = ServiceCodeBindingResponse, headers(("ETag" = String, description = "New strong validator for subsequent updates")))), tag = "code")]
+async fn update_code_binding(
+    State(state): State<ApiState>,
+    Path(binding_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateCodeBindingRequest>,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let expected = core
+        .list_code_bindings(&context)
+        .into_iter()
+        .find(|binding| binding.id == binding_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("code_binding"))?;
+    let current = ServiceCodeBindingResponse::from(expected.clone()).etag;
+    let matches = headers
+        .get_all(IF_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| if_match_satisfies(value, &current));
+    if !matches {
+        return Err(if headers.get(IF_MATCH).is_none() {
+            ApiError::PreconditionRequired
+        } else {
+            ApiError::PreconditionFailed
+        });
+    }
+    let binding = core.update_code_binding(
+        &context,
+        &binding_id,
+        input.role,
+        input.entity_kind,
+        input.path,
+        input.revision_kind,
+        input.revision,
+    )?;
+    let audit = audit_event(&context, &headers, "update", "code_binding", &binding_id);
+    if !inner.store.update_code_binding_if_current_with_audit(&context, &expected, &binding, Some(&audit))? {
+        return Err(ApiError::PreconditionFailed);
+    }
+    inner.seed_core = None;
+    let response: ServiceCodeBindingResponse = binding.into();
+    let etag = response.etag.clone();
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(delete, path = "/code-bindings/{binding_id}", params(("binding_id" = String, Path), ("If-Match" = String, Header)), responses((status = 204)), tag = "code")]
+async fn delete_code_binding(
+    State(state): State<ApiState>,
+    Path(binding_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let binding = core
+        .list_code_bindings(&context)
+        .into_iter()
+        .find(|binding| binding.id == binding_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("code_binding"))?;
+    let current = ServiceCodeBindingResponse::from(binding).etag;
+    let matches = headers
+        .get_all(IF_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| if_match_satisfies(value, &current));
+    if !matches {
+        return Err(if headers.get(IF_MATCH).is_none() {
+            ApiError::PreconditionRequired
+        } else {
+            ApiError::PreconditionFailed
+        });
+    }
+    core.delete_code_binding(&context, &binding_id)?;
+    let audit = audit_event(&context, &headers, "delete", "code_binding", &binding_id);
+    inner.store.delete_code_binding(&context, &binding_id, &audit)?;
+    inner.seed_core = None;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateSpecificationRequest {
     pub id: Id,
     pub service_id: Id,
@@ -2370,6 +2844,42 @@ fn service_etag(service: &ServiceResponse) -> String {
     format!("\"sha256:{digest:x}\"")
 }
 
+fn code_source_etag(source: &CodeSourceResponse) -> String {
+    let representation = serde_json::to_vec(&(
+        &source.id,
+        &source.tenant_id,
+        &source.workspace_id,
+        source.source_type,
+        &source.provider,
+        &source.display_name,
+        &source.canonical_key,
+        &source.root_locator,
+        source.execution_scope,
+        &source.updated_at,
+        source.archived,
+    ))
+    .expect("code source ETag payload is serializable");
+    format!("\"sha256:{:x}\"", Sha256::digest(representation))
+}
+
+fn code_binding_etag(binding: &ServiceCodeBindingResponse) -> String {
+    let representation = serde_json::to_vec(&(
+        &binding.id,
+        &binding.tenant_id,
+        &binding.workspace_id,
+        &binding.service_id,
+        &binding.source_id,
+        binding.role,
+        binding.entity_kind,
+        &binding.path,
+        binding.revision_kind,
+        &binding.revision,
+        &binding.updated_at,
+    ))
+    .expect("code binding ETag payload is serializable");
+    format!("\"sha256:{:x}\"", Sha256::digest(representation))
+}
+
 fn if_match_satisfies(if_match: &str, current_etag: &str) -> bool {
     if_match.split(',').any(|candidate| candidate.trim() == "*" || candidate.trim() == current_etag)
 }
@@ -2384,7 +2894,7 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
 #[openapi(
     info(title = "specX API", version = "1.0.0", description = "Service catalog and specification API."),
     servers((url = "/api/specx")),
-    paths(health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
+    paths(health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, list_code_sources, create_code_source, update_code_source, delete_code_source, list_service_code_bindings, create_code_binding, update_code_binding, delete_code_binding, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
     components(schemas(
         HealthResponse,
         ReadyResponse,
@@ -2411,6 +2921,14 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
         ServiceGroupResponse,
         TagResponse,
         ServiceResponse,
+        CodeSourceResponse,
+        CodeSourcePageResponse,
+        CreateCodeSourceRequest,
+        UpdateCodeSourceRequest,
+        ServiceCodeBindingResponse,
+        ServiceCodeBindingPageResponse,
+        CreateCodeBindingRequest,
+        UpdateCodeBindingRequest,
         SpecificationKindResponse,
         SpecificationResponse,
         CreateGroupRequest,
@@ -2430,6 +2948,7 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
     tags(
         (name = "system", description = "Service health"),
         (name = "catalog", description = "Workspace service catalog and specifications"),
+        (name = "code", description = "Code sources and service code bindings"),
         (name = "workspaces", description = "Workspace metadata and membership access"),
         (name = "members", description = "Workspace member roles and access")
         ,(name = "backups", description = "Server-owned specX SQLite snapshots")

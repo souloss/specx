@@ -54,6 +54,44 @@ export type SpecificationRevisionPageResponse = {
   nextOffset?: number;
 };
 
+export type CodeSourceType = "git" | "local_filesystem";
+export type CodeExecutionScope = "server" | "desktop_host";
+export type CodeBindingRole = "primary" | "additional";
+export type CodeEntityKind = "repository_root" | "directory" | "file" | "pattern";
+export type CodeRevisionKind = "default_branch" | "branch" | "tag" | "commit" | "working_tree";
+export type CodeSourceResponse = {
+  id: string;
+  tenantId: string;
+  workspaceId: string;
+  sourceType: CodeSourceType;
+  provider: string;
+  displayName: string;
+  canonicalKey: string;
+  rootLocator: string;
+  executionScope: CodeExecutionScope;
+  createdAt: string;
+  updatedAt: string;
+  archived: boolean;
+  etag: string;
+};
+export type CodeSourcePageResponse = { items: CodeSourceResponse[] };
+export type ServiceCodeBindingResponse = {
+  id: string;
+  tenantId: string;
+  workspaceId: string;
+  serviceId: string;
+  sourceId: string;
+  role: CodeBindingRole;
+  entityKind: CodeEntityKind;
+  path: string;
+  revisionKind: CodeRevisionKind;
+  revision: string | null;
+  createdAt: string;
+  updatedAt: string;
+  etag: string;
+};
+export type ServiceCodeBindingPageResponse = { items: ServiceCodeBindingResponse[] };
+
 export type DesktopApiRequest = {
   method: string;
   path: string;

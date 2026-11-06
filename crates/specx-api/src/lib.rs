@@ -34,7 +34,8 @@ use specx_core::persistence::{
 #[cfg(feature = "postgres")]
 use specx_core::postgres::PostgresStore;
 use specx_core::{
-    Core, CoreError, Id, Service, ServiceGroup, ServiceGroupOrder, Specification, SpecificationKind, Tag, Workspace,
+    CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Core, CoreError,
+    Id, Service, ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, Specification, SpecificationKind, Tag, Workspace,
     WorkspaceContext,
 };
 use std::path::{Path as FsPath, PathBuf};
@@ -518,6 +519,46 @@ impl StoreBackend {
         }
     }
 
+    fn delete_code_source(
+        &self,
+        context: &WorkspaceContext,
+        source_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.delete_code_source(context, source_id, audit),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let context = context.clone();
+                let source_id = source_id.to_owned();
+                let audit = audit.clone();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.delete_code_source(&context, &source_id, &audit).await
+                })
+            }
+        }
+    }
+
+    fn delete_code_binding(
+        &self,
+        context: &WorkspaceContext,
+        binding_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.delete_code_binding(context, binding_id, audit),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let context = context.clone();
+                let binding_id = binding_id.to_owned();
+                let audit = audit.clone();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.delete_code_binding(&context, &binding_id, &audit).await
+                })
+            }
+        }
+    }
+
     fn delete_specification(
         &self,
         context: &WorkspaceContext,
@@ -635,6 +676,50 @@ impl StoreBackend {
                 let audit = audit.cloned();
                 run_postgres_future(store.clone(), move |store| async move {
                     store.update_service_if_current_with_audit(&context, &expected, &updated, audit.as_ref()).await
+                })
+            }
+        }
+    }
+
+    fn update_code_source_if_current_with_audit(
+        &self,
+        context: &WorkspaceContext,
+        expected: &CodeSource,
+        updated: &CodeSource,
+        audit: Option<&AuditEvent>,
+    ) -> Result<bool, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.update_code_source_if_current_with_audit(context, expected, updated, audit),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let context = context.clone();
+                let expected = expected.clone();
+                let updated = updated.clone();
+                let audit = audit.cloned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.update_code_source_if_current_with_audit(&context, &expected, &updated, audit.as_ref()).await
+                })
+            }
+        }
+    }
+
+    fn update_code_binding_if_current_with_audit(
+        &self,
+        context: &WorkspaceContext,
+        expected: &ServiceCodeBinding,
+        updated: &ServiceCodeBinding,
+        audit: Option<&AuditEvent>,
+    ) -> Result<bool, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.update_code_binding_if_current_with_audit(context, expected, updated, audit),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let context = context.clone();
+                let expected = expected.clone();
+                let updated = updated.clone();
+                let audit = audit.cloned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.update_code_binding_if_current_with_audit(&context, &expected, &updated, audit.as_ref()).await
                 })
             }
         }

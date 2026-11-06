@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Edit3, FileText, History, Plus, Trash2 } from "@lucide/vue";
+import { Code2, Edit3, FileText, History, Plus, Trash2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import MarkdownPreview from "./MarkdownPreview.vue";
 import SpecificationEditor from "./SpecificationEditor.vue";
 import SpecificationHistory from "./SpecificationHistory.vue";
+import CodeBindingDialog from "./CodeBindingDialog.vue";
 import { formatDate, groupPath } from "../lib/core";
 import { i18n, translate } from "@/i18n";
 import { useWorkspaceStore } from "@/stores/workspace";
@@ -25,6 +26,7 @@ const historyOpen = ref(false);
 const deleteOpen = ref(false);
 const deleting = ref(false);
 const error = ref("");
+const codeBindingsOpen = ref(false);
 
 watch(
   () => activeSpecification.value?.id,
@@ -112,7 +114,9 @@ async function removeSpecification() {
           >
         </div>
       </div>
-      <button class="button primary" @click="emit('newSpecification')"><Plus :size="16" />{{ t("service.createSpecification") }}</button>
+      <div class="flex flex-wrap items-center gap-2">
+        <button class="button" @click="codeBindingsOpen = true"><Code2 :size="16" />{{ t("service.codeBindings") }}</button><button class="button primary" @click="emit('newSpecification')"><Plus :size="16" />{{ t("service.createSpecification") }}</button>
+      </div>
     </header>
     <section class="content-section">
       <div class="section-heading">
@@ -155,5 +159,6 @@ async function removeSpecification() {
         ><span v-if="!tags.length" class="muted">{{ t("service.noTags") }}</span>
       </div>
     </section>
+    <CodeBindingDialog v-model:open="codeBindingsOpen" :service-id="serviceId" />
   </div>
 </template>

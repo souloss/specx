@@ -6,7 +6,9 @@
 use std::collections::{HashMap, HashSet};
 
 pub use specx_types::{
-    Id, Service, ServiceGroup, ServiceGroupOrder, Specification, SpecificationKind, Tag, Workspace, WorkspaceContext,
+    CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Id, Service,
+    ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, Specification, SpecificationKind, Tag, Workspace,
+    WorkspaceContext,
 };
 
 pub mod persistence;
@@ -25,6 +27,10 @@ pub enum CoreError {
     InvalidGroupOrder,
     DuplicateTag,
     DuplicateSlug,
+    DuplicateCodeSource,
+    DuplicateCodeBinding,
+    InvalidCodeSource,
+    InvalidCodeBinding,
     HasDependents(&'static str),
 }
 
@@ -33,6 +39,8 @@ pub struct Core {
     groups: HashMap<Id, ServiceGroup>,
     tags: HashMap<Id, Tag>,
     services: HashMap<Id, Service>,
+    code_sources: HashMap<Id, CodeSource>,
+    code_bindings: HashMap<Id, ServiceCodeBinding>,
     specifications: HashMap<Id, Specification>,
 }
 
@@ -53,6 +61,16 @@ impl Core {
     }
 
     #[cfg(feature = "postgres")]
+    pub(crate) fn code_sources(&self) -> impl Iterator<Item = &CodeSource> {
+        self.code_sources.values()
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn code_bindings(&self) -> impl Iterator<Item = &ServiceCodeBinding> {
+        self.code_bindings.values()
+    }
+
+    #[cfg(feature = "postgres")]
     pub(crate) fn specifications(&self) -> impl Iterator<Item = &Specification> {
         self.specifications.values()
     }
@@ -70,6 +88,16 @@ impl Core {
     #[cfg(feature = "postgres")]
     pub(crate) fn insert_service(&mut self, service: Service) {
         self.services.insert(service.id.clone(), service);
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn insert_code_source(&mut self, source: CodeSource) {
+        self.code_sources.insert(source.id.clone(), source);
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn insert_code_binding(&mut self, binding: ServiceCodeBinding) {
+        self.code_bindings.insert(binding.id.clone(), binding);
     }
 
     #[cfg(feature = "postgres")]
@@ -346,8 +374,102 @@ impl Core {
         ensure_tenant(context, &service.tenant_id)?;
         ensure_workspace(context, &service.workspace_id)?;
         self.services.remove(service_id);
+        self.code_bindings.retain(|_, binding| binding.service_id != service_id);
         self.specifications.retain(|_, specification| specification.service_id != service_id);
         Ok(service)
+    }
+
+    pub fn create_code_source(
+        &mut self,
+        context: &WorkspaceContext,
+        source: CodeSource,
+    ) -> Result<CodeSource, CoreError> {
+        self.validate_code_source(context, &source, None)?;
+        self.code_sources.insert(source.id.clone(), source.clone());
+        Ok(source)
+    }
+
+    pub fn update_code_source(
+        &mut self,
+        context: &WorkspaceContext,
+        source_id: &str,
+        source_type: CodeSourceType,
+        display_name: String,
+        provider: String,
+        canonical_key: String,
+        root_locator: String,
+        execution_scope: CodeExecutionScope,
+    ) -> Result<CodeSource, CoreError> {
+        let mut source = self.code_sources.get(source_id).cloned().ok_or(CoreError::NotFound("code_source"))?;
+        ensure_tenant(context, &source.tenant_id)?;
+        ensure_workspace(context, &source.workspace_id)?;
+        source.display_name = display_name;
+        source.source_type = source_type;
+        source.provider = provider;
+        source.canonical_key = canonical_key;
+        source.root_locator = root_locator;
+        source.execution_scope = execution_scope;
+        source.updated_at = chrono::Utc::now().to_rfc3339();
+        self.validate_code_source(context, &source, Some(source_id))?;
+        self.code_sources.insert(source.id.clone(), source.clone());
+        Ok(source)
+    }
+
+    pub fn delete_code_source(&mut self, context: &WorkspaceContext, source_id: &str) -> Result<CodeSource, CoreError> {
+        let source = self.code_sources.get(source_id).cloned().ok_or(CoreError::NotFound("code_source"))?;
+        ensure_tenant(context, &source.tenant_id)?;
+        ensure_workspace(context, &source.workspace_id)?;
+        if self.code_bindings.values().any(|binding| binding.source_id == source_id) {
+            return Err(CoreError::HasDependents("code_binding"));
+        }
+        self.code_sources.remove(source_id);
+        Ok(source)
+    }
+
+    pub fn create_code_binding(
+        &mut self,
+        context: &WorkspaceContext,
+        binding: ServiceCodeBinding,
+    ) -> Result<ServiceCodeBinding, CoreError> {
+        self.validate_code_binding(context, &binding, None)?;
+        self.code_bindings.insert(binding.id.clone(), binding.clone());
+        Ok(binding)
+    }
+
+    pub fn update_code_binding(
+        &mut self,
+        context: &WorkspaceContext,
+        binding_id: &str,
+        role: CodeBindingRole,
+        entity_kind: CodeEntityKind,
+        path: String,
+        revision_kind: CodeRevisionKind,
+        revision: Option<String>,
+    ) -> Result<ServiceCodeBinding, CoreError> {
+        let mut binding = self.code_bindings.get(binding_id).cloned().ok_or(CoreError::NotFound("code_binding"))?;
+        ensure_tenant(context, &binding.tenant_id)?;
+        ensure_workspace(context, &binding.workspace_id)?;
+        binding.role = role;
+        binding.entity_kind = entity_kind;
+        binding.path = path;
+        binding.revision_kind = revision_kind;
+        binding.revision = revision;
+        binding.updated_at = chrono::Utc::now().to_rfc3339();
+        self.validate_code_binding(context, &binding, Some(binding_id))?;
+        self.code_bindings.insert(binding.id.clone(), binding.clone());
+        Ok(binding)
+    }
+
+    pub fn delete_code_binding(
+        &mut self,
+        context: &WorkspaceContext,
+        binding_id: &str,
+    ) -> Result<ServiceCodeBinding, CoreError> {
+        let binding = self.code_bindings.get(binding_id).cloned().ok_or(CoreError::NotFound("code_binding"))?;
+        ensure_tenant(context, &binding.tenant_id)?;
+        ensure_workspace(context, &binding.workspace_id)?;
+        self.code_bindings.remove(binding_id);
+        Ok(binding)
     }
 
     fn validate_service(
@@ -452,6 +574,108 @@ impl Core {
             .values()
             .filter(|service| service.tenant_id == context.tenant_id && service.workspace_id == context.workspace_id)
             .collect()
+    }
+
+    pub fn list_code_sources(&self, context: &WorkspaceContext) -> Vec<&CodeSource> {
+        self.code_sources
+            .values()
+            .filter(|source| source.tenant_id == context.tenant_id && source.workspace_id == context.workspace_id)
+            .collect()
+    }
+
+    pub fn list_code_bindings(&self, context: &WorkspaceContext) -> Vec<&ServiceCodeBinding> {
+        self.code_bindings
+            .values()
+            .filter(|binding| binding.tenant_id == context.tenant_id && binding.workspace_id == context.workspace_id)
+            .collect()
+    }
+
+    pub fn list_service_code_bindings(&self, context: &WorkspaceContext, service_id: &str) -> Vec<&ServiceCodeBinding> {
+        self.list_code_bindings(context).into_iter().filter(|binding| binding.service_id == service_id).collect()
+    }
+
+    fn validate_code_source(
+        &self,
+        context: &WorkspaceContext,
+        source: &CodeSource,
+        current_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        if source.display_name.trim().is_empty()
+            || source.provider.trim().is_empty()
+            || source.canonical_key.trim().is_empty()
+        {
+            return Err(CoreError::InvalidCodeSource);
+        }
+        if source.root_locator.trim().is_empty() {
+            return Err(CoreError::InvalidCodeSource);
+        }
+        ensure_tenant(context, &source.tenant_id)?;
+        ensure_workspace(context, &source.workspace_id)?;
+        if self.code_sources.values().any(|existing| {
+            Some(existing.id.as_str()) != current_id
+                && existing.tenant_id == context.tenant_id
+                && existing.workspace_id == context.workspace_id
+                && existing.canonical_key == source.canonical_key
+        }) {
+            return Err(CoreError::DuplicateCodeSource);
+        }
+        Ok(())
+    }
+
+    fn validate_code_binding(
+        &self,
+        context: &WorkspaceContext,
+        binding: &ServiceCodeBinding,
+        current_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        let service = self.services.get(&binding.service_id).ok_or(CoreError::NotFound("service"))?;
+        let source = self.code_sources.get(&binding.source_id).ok_or(CoreError::NotFound("code_source"))?;
+        ensure_tenant(context, &binding.tenant_id)?;
+        ensure_workspace(context, &binding.workspace_id)?;
+        ensure_tenant(context, &service.tenant_id)?;
+        ensure_workspace(context, &service.workspace_id)?;
+        ensure_tenant(context, &source.tenant_id)?;
+        ensure_workspace(context, &source.workspace_id)?;
+        if binding.path.starts_with('/')
+            || binding.path.contains('\\')
+            || binding.path.split('/').any(|segment| segment == ".." || segment.is_empty())
+            || binding.path.chars().any(char::is_control)
+        {
+            return Err(CoreError::InvalidCodeBinding);
+        }
+        if matches!(binding.entity_kind, CodeEntityKind::RepositoryRoot) && !binding.path.is_empty() {
+            return Err(CoreError::InvalidCodeBinding);
+        }
+        let revision_required = matches!(
+            binding.revision_kind,
+            CodeRevisionKind::Branch | CodeRevisionKind::Tag | CodeRevisionKind::Commit
+        );
+        if revision_required != binding.revision.as_ref().is_some_and(|value| !value.trim().is_empty()) {
+            return Err(CoreError::InvalidCodeBinding);
+        }
+        if self.code_bindings.values().any(|existing| {
+            Some(existing.id.as_str()) != current_id
+                && existing.tenant_id == context.tenant_id
+                && existing.workspace_id == context.workspace_id
+                && existing.service_id == binding.service_id
+                && existing.source_id == binding.source_id
+                && existing.entity_kind == binding.entity_kind
+                && existing.path == binding.path
+        }) {
+            return Err(CoreError::DuplicateCodeBinding);
+        }
+        if binding.role == CodeBindingRole::Primary
+            && self.code_bindings.values().any(|existing| {
+                Some(existing.id.as_str()) != current_id
+                    && existing.tenant_id == context.tenant_id
+                    && existing.workspace_id == context.workspace_id
+                    && existing.service_id == binding.service_id
+                    && existing.role == CodeBindingRole::Primary
+            })
+        {
+            return Err(CoreError::DuplicateCodeBinding);
+        }
+        Ok(())
     }
 
     pub fn list_groups(&self, context: &WorkspaceContext) -> Vec<&ServiceGroup> {
@@ -592,6 +816,77 @@ mod tests {
         let mut core = Core::default();
         core.create_group(&other_workspace, "other-root".into(), "Other".into(), None).unwrap();
         assert_eq!(core.create_service(&context, service(&context, "other-root")), Err(CoreError::ScopeMismatch));
+    }
+
+    #[test]
+    fn code_bindings_validate_paths_roles_and_references() {
+        let context = context("tenant-1", "workspace-1");
+        let mut core = Core::default();
+        core.create_service(
+            &context,
+            Service {
+                id: "svc-1".into(),
+                tenant_id: context.tenant_id.clone(),
+                workspace_id: context.workspace_id.clone(),
+                group_id: None,
+                name: "Search".into(),
+                slug: "search".into(),
+                description: String::new(),
+                tag_ids: vec![],
+                updated_at: "2026-11-01T00:00:00Z".into(),
+                archived: false,
+            },
+        )
+        .unwrap();
+        core.create_code_source(
+            &context,
+            CodeSource {
+                id: "src-1".into(),
+                tenant_id: context.tenant_id.clone(),
+                workspace_id: context.workspace_id.clone(),
+                source_type: CodeSourceType::Git,
+                provider: "github".into(),
+                display_name: "acme/search".into(),
+                canonical_key: "github:42".into(),
+                root_locator: "https://github.com/acme/search.git".into(),
+                execution_scope: CodeExecutionScope::Server,
+                created_at: "2026-11-01T00:00:00Z".into(),
+                updated_at: "2026-11-01T00:00:00Z".into(),
+                archived: false,
+            },
+        )
+        .unwrap();
+        let binding = ServiceCodeBinding {
+            id: "binding-1".into(),
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            service_id: "svc-1".into(),
+            source_id: "src-1".into(),
+            role: CodeBindingRole::Primary,
+            entity_kind: CodeEntityKind::Directory,
+            path: "services/search".into(),
+            revision_kind: CodeRevisionKind::Branch,
+            revision: Some("main".into()),
+            created_at: "2026-11-01T00:00:00Z".into(),
+            updated_at: "2026-11-01T00:00:00Z".into(),
+        };
+        core.create_code_binding(&context, binding.clone()).unwrap();
+        assert_eq!(core.create_code_binding(&context, binding), Err(CoreError::DuplicateCodeBinding));
+        let invalid = ServiceCodeBinding {
+            id: "binding-2".into(),
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            service_id: "svc-1".into(),
+            source_id: "src-1".into(),
+            role: CodeBindingRole::Additional,
+            entity_kind: CodeEntityKind::Directory,
+            path: "../escape".into(),
+            revision_kind: CodeRevisionKind::DefaultBranch,
+            revision: None,
+            created_at: "2026-11-01T00:00:00Z".into(),
+            updated_at: "2026-11-01T00:00:00Z".into(),
+        };
+        assert_eq!(core.create_code_binding(&context, invalid), Err(CoreError::InvalidCodeBinding));
     }
 
     #[test]

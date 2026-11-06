@@ -32,6 +32,8 @@ export type Service = {
   etag?: string;
   archived?: boolean;
 };
+export type CodeSource = import("./api").CodeSourceResponse;
+export type ServiceCodeBinding = import("./api").ServiceCodeBindingResponse;
 export type Workspace = { id: string; name: string; tenantName: string };
 export type Catalog = {
   workspace: Workspace;

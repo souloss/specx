@@ -4,9 +4,12 @@
 //! without a running service. The repository shape and scoped queries are the
 //! same contract a PostgreSQL adapter must implement for the production API.
 
-use crate::{Core, Id, Service, ServiceGroup, Specification, SpecificationKind, Tag, Workspace, WorkspaceContext};
+use crate::{
+    CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Core, Id,
+    Service, ServiceCodeBinding, ServiceGroup, Specification, SpecificationKind, Tag, Workspace, WorkspaceContext,
+};
 
-pub const LATEST_SCHEMA_VERSION: i64 = 11;
+pub const LATEST_SCHEMA_VERSION: i64 = 12;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, backup::Backup, params};
 use sha2::{Digest, Sha256};
@@ -171,6 +174,23 @@ impl SqliteStore {
                archived INTEGER NOT NULL DEFAULT 0,
                UNIQUE (tenant_id, workspace_id, slug)
              );
+             CREATE TABLE IF NOT EXISTS code_sources (
+               id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+               source_type TEXT NOT NULL, provider TEXT NOT NULL, display_name TEXT NOT NULL,
+               canonical_key TEXT NOT NULL, root_locator TEXT NOT NULL, execution_scope TEXT NOT NULL,
+               created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
+               UNIQUE (tenant_id, workspace_id, canonical_key)
+             );
+             CREATE INDEX IF NOT EXISTS code_sources_scope ON code_sources(tenant_id, workspace_id, display_name);
+             CREATE TABLE IF NOT EXISTS service_code_bindings (
+               id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+               service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+               source_id TEXT NOT NULL REFERENCES code_sources(id) ON DELETE RESTRICT,
+               role TEXT NOT NULL, entity_kind TEXT NOT NULL, path TEXT NOT NULL DEFAULT '',
+               revision_kind TEXT NOT NULL, revision TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+               UNIQUE (tenant_id, workspace_id, service_id, source_id, entity_kind, path)
+             );
+             CREATE INDEX IF NOT EXISTS service_code_bindings_service ON service_code_bindings(tenant_id, workspace_id, service_id);
              CREATE INDEX IF NOT EXISTS services_scope ON services(tenant_id, workspace_id, name);
              CREATE TABLE IF NOT EXISTS service_tags (
                tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
@@ -314,6 +334,8 @@ impl SqliteStore {
         )?;
         transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (11, datetime('now'))", [])?;
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (12, datetime('now'))", [])?;
         transaction.commit().map_err(PersistenceError::from)?;
         Ok(())
     }
@@ -806,6 +828,14 @@ impl SqliteStore {
             params![context.tenant_id, workspace_id],
         )?;
         transaction.execute(
+            "DELETE FROM service_code_bindings WHERE tenant_id = ?1 AND workspace_id = ?2",
+            params![context.tenant_id, workspace_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM code_sources WHERE tenant_id = ?1 AND workspace_id = ?2",
+            params![context.tenant_id, workspace_id],
+        )?;
+        transaction.execute(
             "DELETE FROM services WHERE tenant_id = ?1 AND workspace_id = ?2",
             params![context.tenant_id, workspace_id],
         )?;
@@ -877,6 +907,36 @@ impl SqliteStore {
         transaction.execute(
             "DELETE FROM services WHERE tenant_id = ?1 AND workspace_id = ?2 AND id = ?3",
             params![context.tenant_id, context.workspace_id, service_id],
+        )?;
+        insert_audit_event(&transaction, audit)?;
+        transaction.commit().map_err(PersistenceError::from)
+    }
+
+    pub fn delete_code_source(
+        &self,
+        context: &WorkspaceContext,
+        source_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM code_sources WHERE tenant_id=?1 AND workspace_id=?2 AND id=?3",
+            params![context.tenant_id, context.workspace_id, source_id],
+        )?;
+        insert_audit_event(&transaction, audit)?;
+        transaction.commit().map_err(PersistenceError::from)
+    }
+
+    pub fn delete_code_binding(
+        &self,
+        context: &WorkspaceContext,
+        binding_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM service_code_bindings WHERE tenant_id=?1 AND workspace_id=?2 AND id=?3",
+            params![context.tenant_id, context.workspace_id, binding_id],
         )?;
         insert_audit_event(&transaction, audit)?;
         transaction.commit().map_err(PersistenceError::from)
@@ -1284,6 +1344,38 @@ impl SqliteStore {
                 )?;
             }
         }
+        for source in core
+            .code_sources
+            .values()
+            .filter(|source| source.tenant_id == context.tenant_id && source.workspace_id == context.workspace_id)
+        {
+            let changed = transaction.execute(
+                "INSERT INTO code_sources(id,tenant_id,workspace_id,source_type,provider,display_name,canonical_key,root_locator,execution_scope,created_at,updated_at,archived)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+                 ON CONFLICT(id) DO UPDATE SET source_type=excluded.source_type,provider=excluded.provider,display_name=excluded.display_name,
+                   canonical_key=excluded.canonical_key,root_locator=excluded.root_locator,execution_scope=excluded.execution_scope,
+                   created_at=excluded.created_at,updated_at=excluded.updated_at,archived=excluded.archived
+                 WHERE code_sources.tenant_id=excluded.tenant_id AND code_sources.workspace_id=excluded.workspace_id",
+                params![source.id, source.tenant_id, source.workspace_id, source_type_name(source.source_type), source.provider, source.display_name, source.canonical_key, source.root_locator, execution_scope_name(source.execution_scope), source.created_at, source.updated_at, source.archived],
+            )?;
+            ensure_upsert_scope(changed, "code source")?;
+        }
+        for binding in core
+            .code_bindings
+            .values()
+            .filter(|binding| binding.tenant_id == context.tenant_id && binding.workspace_id == context.workspace_id)
+        {
+            let changed = transaction.execute(
+                "INSERT INTO service_code_bindings(id,tenant_id,workspace_id,service_id,source_id,role,entity_kind,path,revision_kind,revision,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+                 ON CONFLICT(id) DO UPDATE SET service_id=excluded.service_id,source_id=excluded.source_id,role=excluded.role,
+                   entity_kind=excluded.entity_kind,path=excluded.path,revision_kind=excluded.revision_kind,revision=excluded.revision,
+                   created_at=excluded.created_at,updated_at=excluded.updated_at
+                 WHERE service_code_bindings.tenant_id=excluded.tenant_id AND service_code_bindings.workspace_id=excluded.workspace_id",
+                params![binding.id, binding.tenant_id, binding.workspace_id, binding.service_id, binding.source_id, binding_role_name(binding.role), entity_kind_name(binding.entity_kind), binding.path, revision_kind_name(binding.revision_kind), binding.revision, binding.created_at, binding.updated_at],
+            )?;
+            ensure_upsert_scope(changed, "code binding")?;
+        }
         for specification in core.specifications.values().filter(|specification| {
             specification.tenant_id == context.tenant_id && specification.workspace_id == context.workspace_id
         }) {
@@ -1510,6 +1602,116 @@ impl SqliteStore {
         Ok(true)
     }
 
+    pub fn update_code_source_if_current_with_audit(
+        &self,
+        context: &WorkspaceContext,
+        expected: &CodeSource,
+        updated: &CodeSource,
+        audit: Option<&AuditEvent>,
+    ) -> Result<bool, PersistenceError> {
+        if expected.id != updated.id
+            || expected.tenant_id != context.tenant_id
+            || expected.workspace_id != context.workspace_id
+            || updated.tenant_id != context.tenant_id
+            || updated.workspace_id != context.workspace_id
+        {
+            return Err(PersistenceError("code source update scope does not match".into()));
+        }
+
+        let transaction = self.connection.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE code_sources SET source_type=?1,provider=?2,display_name=?3,canonical_key=?4,
+               root_locator=?5,execution_scope=?6,updated_at=?7,archived=?8
+             WHERE id=?9 AND tenant_id=?10 AND workspace_id=?11 AND source_type=?12 AND provider=?13
+               AND display_name=?14 AND canonical_key=?15 AND root_locator=?16 AND execution_scope=?17
+               AND updated_at=?18 AND archived=?19",
+            params![
+                source_type_name(updated.source_type),
+                updated.provider,
+                updated.display_name,
+                updated.canonical_key,
+                updated.root_locator,
+                execution_scope_name(updated.execution_scope),
+                updated.updated_at,
+                updated.archived,
+                expected.id,
+                context.tenant_id,
+                context.workspace_id,
+                source_type_name(expected.source_type),
+                expected.provider,
+                expected.display_name,
+                expected.canonical_key,
+                expected.root_locator,
+                execution_scope_name(expected.execution_scope),
+                expected.updated_at,
+                expected.archived,
+            ],
+        )?;
+        if changed != 1 {
+            transaction.commit().map_err(PersistenceError::from)?;
+            return Ok(false);
+        }
+        if let Some(event) = audit {
+            insert_audit_event(&transaction, event)?;
+        }
+        transaction.commit().map_err(PersistenceError::from)?;
+        Ok(true)
+    }
+
+    pub fn update_code_binding_if_current_with_audit(
+        &self,
+        context: &WorkspaceContext,
+        expected: &ServiceCodeBinding,
+        updated: &ServiceCodeBinding,
+        audit: Option<&AuditEvent>,
+    ) -> Result<bool, PersistenceError> {
+        if expected.id != updated.id
+            || expected.tenant_id != context.tenant_id
+            || expected.workspace_id != context.workspace_id
+            || updated.tenant_id != context.tenant_id
+            || updated.workspace_id != context.workspace_id
+        {
+            return Err(PersistenceError("code binding update scope does not match".into()));
+        }
+
+        let transaction = self.connection.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE service_code_bindings SET role=?1,entity_kind=?2,path=?3,revision_kind=?4,
+               revision=?5,updated_at=?6
+             WHERE id=?7 AND tenant_id=?8 AND workspace_id=?9 AND service_id=?10 AND source_id=?11
+               AND role=?12 AND entity_kind=?13 AND path=?14 AND revision_kind=?15 AND revision IS ?16
+               AND updated_at=?17",
+            params![
+                binding_role_name(updated.role),
+                entity_kind_name(updated.entity_kind),
+                updated.path,
+                revision_kind_name(updated.revision_kind),
+                updated.revision,
+                updated.updated_at,
+                expected.id,
+                context.tenant_id,
+                context.workspace_id,
+                expected.service_id,
+                expected.source_id,
+                binding_role_name(expected.role),
+                entity_kind_name(expected.entity_kind),
+                expected.path,
+                revision_kind_name(expected.revision_kind),
+                expected.revision,
+                expected.updated_at,
+            ],
+        )?;
+        if changed != 1 {
+            transaction.commit().map_err(PersistenceError::from)?;
+            return Ok(false);
+        }
+        if let Some(event) = audit {
+            insert_audit_event(&transaction, event)?;
+        }
+        transaction.commit().map_err(PersistenceError::from)?;
+        Ok(true)
+    }
+
     pub fn load_core(&self, context: &WorkspaceContext) -> Result<Core, PersistenceError> {
         let mut core = Core::default();
         let mut groups = self.connection.prepare("SELECT id, tenant_id, workspace_id, parent_id, name, position FROM service_groups WHERE tenant_id = ?1 AND workspace_id = ?2")?;
@@ -1568,6 +1770,46 @@ impl SqliteStore {
         })? {
             let specification = row?;
             core.specifications.insert(specification.id.clone(), specification);
+        }
+        let mut sources = self.connection.prepare("SELECT id,tenant_id,workspace_id,source_type,provider,display_name,canonical_key,root_locator,execution_scope,created_at,updated_at,archived FROM code_sources WHERE tenant_id=?1 AND workspace_id=?2")?;
+        for row in sources.query_map(params![context.tenant_id, context.workspace_id], |row| {
+            Ok(CodeSource {
+                id: row.get(0)?,
+                tenant_id: row.get(1)?,
+                workspace_id: row.get(2)?,
+                source_type: parse_source_type(&row.get::<_, String>(3)?)?,
+                provider: row.get(4)?,
+                display_name: row.get(5)?,
+                canonical_key: row.get(6)?,
+                root_locator: row.get(7)?,
+                execution_scope: parse_execution_scope(&row.get::<_, String>(8)?)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+                archived: row.get(11)?,
+            })
+        })? {
+            let source = row?;
+            core.code_sources.insert(source.id.clone(), source);
+        }
+        let mut bindings = self.connection.prepare("SELECT id,tenant_id,workspace_id,service_id,source_id,role,entity_kind,path,revision_kind,revision,created_at,updated_at FROM service_code_bindings WHERE tenant_id=?1 AND workspace_id=?2")?;
+        for row in bindings.query_map(params![context.tenant_id, context.workspace_id], |row| {
+            Ok(ServiceCodeBinding {
+                id: row.get(0)?,
+                tenant_id: row.get(1)?,
+                workspace_id: row.get(2)?,
+                service_id: row.get(3)?,
+                source_id: row.get(4)?,
+                role: parse_binding_role(&row.get::<_, String>(5)?)?,
+                entity_kind: parse_entity_kind(&row.get::<_, String>(6)?)?,
+                path: row.get(7)?,
+                revision_kind: parse_revision_kind(&row.get::<_, String>(8)?)?,
+                revision: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })? {
+            let binding = row?;
+            core.code_bindings.insert(binding.id.clone(), binding);
         }
         Ok(core)
     }
@@ -1716,6 +1958,82 @@ fn ensure_upsert_scope(changed: usize, entity: &str) -> Result<(), PersistenceEr
 fn kind_name(kind: SpecificationKind) -> &'static str {
     match kind {
         SpecificationKind::Markdown => "markdown",
+    }
+}
+
+fn source_type_name(value: CodeSourceType) -> &'static str {
+    match value {
+        CodeSourceType::Git => "git",
+        CodeSourceType::LocalFilesystem => "local_filesystem",
+    }
+}
+fn parse_source_type(value: &str) -> Result<CodeSourceType, rusqlite::Error> {
+    match value {
+        "git" => Ok(CodeSourceType::Git),
+        "local_filesystem" => Ok(CodeSourceType::LocalFilesystem),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+fn execution_scope_name(value: CodeExecutionScope) -> &'static str {
+    match value {
+        CodeExecutionScope::Server => "server",
+        CodeExecutionScope::DesktopHost => "desktop_host",
+    }
+}
+fn parse_execution_scope(value: &str) -> Result<CodeExecutionScope, rusqlite::Error> {
+    match value {
+        "server" => Ok(CodeExecutionScope::Server),
+        "desktop_host" => Ok(CodeExecutionScope::DesktopHost),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+fn binding_role_name(value: CodeBindingRole) -> &'static str {
+    match value {
+        CodeBindingRole::Primary => "primary",
+        CodeBindingRole::Additional => "additional",
+    }
+}
+fn parse_binding_role(value: &str) -> Result<CodeBindingRole, rusqlite::Error> {
+    match value {
+        "primary" => Ok(CodeBindingRole::Primary),
+        "additional" => Ok(CodeBindingRole::Additional),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+fn entity_kind_name(value: CodeEntityKind) -> &'static str {
+    match value {
+        CodeEntityKind::RepositoryRoot => "repository_root",
+        CodeEntityKind::Directory => "directory",
+        CodeEntityKind::File => "file",
+        CodeEntityKind::Pattern => "pattern",
+    }
+}
+fn parse_entity_kind(value: &str) -> Result<CodeEntityKind, rusqlite::Error> {
+    match value {
+        "repository_root" => Ok(CodeEntityKind::RepositoryRoot),
+        "directory" => Ok(CodeEntityKind::Directory),
+        "file" => Ok(CodeEntityKind::File),
+        "pattern" => Ok(CodeEntityKind::Pattern),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+fn revision_kind_name(value: CodeRevisionKind) -> &'static str {
+    match value {
+        CodeRevisionKind::DefaultBranch => "default_branch",
+        CodeRevisionKind::Branch => "branch",
+        CodeRevisionKind::Tag => "tag",
+        CodeRevisionKind::Commit => "commit",
+        CodeRevisionKind::WorkingTree => "working_tree",
+    }
+}
+fn parse_revision_kind(value: &str) -> Result<CodeRevisionKind, rusqlite::Error> {
+    match value {
+        "default_branch" => Ok(CodeRevisionKind::DefaultBranch),
+        "branch" => Ok(CodeRevisionKind::Branch),
+        "tag" => Ok(CodeRevisionKind::Tag),
+        "commit" => Ok(CodeRevisionKind::Commit),
+        "working_tree" => Ok(CodeRevisionKind::WorkingTree),
+        _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
 
@@ -1957,6 +2275,112 @@ mod tests {
         assert_eq!(persisted.name, "First writer");
         assert_eq!(persisted.description, "committed");
         assert_eq!(store.audit_event_count(&context).unwrap(), 1);
+    }
+
+    #[test]
+    fn code_source_and_binding_compare_and_swap_allow_only_one_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("code-cas.sqlite");
+        let context = context("workspace-1");
+        let store = SqliteStore::open(&path).unwrap();
+        let mut core = Core::default();
+        core.create_service(
+            &context,
+            Service {
+                id: "svc-code".into(),
+                tenant_id: context.tenant_id.clone(),
+                workspace_id: context.workspace_id.clone(),
+                group_id: None,
+                name: "Payments".into(),
+                slug: "payments".into(),
+                description: String::new(),
+                tag_ids: vec![],
+                updated_at: "2026-10-24T00:00:00Z".into(),
+                archived: false,
+            },
+        )
+        .unwrap();
+        core.create_code_source(
+            &context,
+            CodeSource {
+                id: "src-code".into(),
+                tenant_id: context.tenant_id.clone(),
+                workspace_id: context.workspace_id.clone(),
+                source_type: CodeSourceType::Git,
+                provider: "github".into(),
+                display_name: "acme/payments".into(),
+                canonical_key: "github:acme/payments".into(),
+                root_locator: "https://github.com/acme/payments.git".into(),
+                execution_scope: CodeExecutionScope::Server,
+                created_at: "2026-10-24T00:00:00Z".into(),
+                updated_at: "2026-10-24T00:00:00Z".into(),
+                archived: false,
+            },
+        )
+        .unwrap();
+        core.create_code_binding(
+            &context,
+            ServiceCodeBinding {
+                id: "binding-code".into(),
+                tenant_id: context.tenant_id.clone(),
+                workspace_id: context.workspace_id.clone(),
+                service_id: "svc-code".into(),
+                source_id: "src-code".into(),
+                role: CodeBindingRole::Primary,
+                entity_kind: CodeEntityKind::Directory,
+                path: "services/payments".into(),
+                revision_kind: CodeRevisionKind::Branch,
+                revision: Some("main".into()),
+                created_at: "2026-10-24T00:00:00Z".into(),
+                updated_at: "2026-10-24T00:00:00Z".into(),
+            },
+        )
+        .unwrap();
+        store.persist_core(&core, &context).unwrap();
+
+        let peer = SqliteStore::open(&path).unwrap();
+        let first = store.load_core(&context).unwrap();
+        let second = peer.load_core(&context).unwrap();
+        let expected_source = first.list_code_sources(&context)[0].clone();
+        let peer_expected_source = second.list_code_sources(&context)[0].clone();
+        let mut updated_source = expected_source.clone();
+        updated_source.provider = "gitlab".into();
+        updated_source.updated_at = "2026-10-25T00:00:00Z".into();
+        let mut stale_source = peer_expected_source.clone();
+        stale_source.provider = "bitbucket".into();
+        stale_source.updated_at = "2026-10-25T00:00:01Z".into();
+
+        assert!(
+            store.update_code_source_if_current_with_audit(&context, &expected_source, &updated_source, None).unwrap()
+        );
+        assert!(
+            !peer
+                .update_code_source_if_current_with_audit(&context, &peer_expected_source, &stale_source, None)
+                .unwrap()
+        );
+
+        let expected_binding = first.list_service_code_bindings(&context, "svc-code")[0].clone();
+        let peer_expected_binding = second.list_service_code_bindings(&context, "svc-code")[0].clone();
+        let mut updated_binding = expected_binding.clone();
+        updated_binding.path = "services/payments/api".into();
+        updated_binding.updated_at = "2026-10-25T00:01:00Z".into();
+        let mut stale_binding = peer_expected_binding.clone();
+        stale_binding.path = "services/payments/stale".into();
+        stale_binding.updated_at = "2026-10-25T00:01:01Z".into();
+
+        assert!(
+            store
+                .update_code_binding_if_current_with_audit(&context, &expected_binding, &updated_binding, None)
+                .unwrap()
+        );
+        assert!(
+            !peer
+                .update_code_binding_if_current_with_audit(&context, &peer_expected_binding, &stale_binding, None)
+                .unwrap()
+        );
+        let persisted = store.load_core(&context).unwrap();
+        assert_eq!(persisted.list_code_sources(&context)[0].provider, "gitlab");
+        assert_eq!(persisted.list_service_code_bindings(&context, "svc-code")[0].path, "services/payments/api");
     }
 
     #[test]

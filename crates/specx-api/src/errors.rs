@@ -79,6 +79,10 @@ error_catalog! {
     InvalidGroupOrder => (422, "invalid_group_order", "apiError.invalidGroupOrder"),
     DuplicateTag => (409, "duplicate_tag", "apiError.duplicateTag"),
     DuplicateSlug => (409, "duplicate_slug", "apiError.duplicateSlug"),
+    DuplicateCodeSource => (409, "duplicate_code_source", "apiError.duplicateCodeSource"),
+    DuplicateCodeBinding => (409, "duplicate_code_binding", "apiError.duplicateCodeBinding"),
+    InvalidCodeSource => (422, "invalid_code_source", "apiError.invalidCodeSource"),
+    InvalidCodeBinding => (422, "invalid_code_binding", "apiError.invalidCodeBinding"),
     HasDependents => (409, "has_dependents", "apiError.hasDependents"),
     Internal => (500, "internal_error", "apiError.internal"),
     InvalidRequest => (400, "invalid_request", "apiError.invalidRequest"),
@@ -100,6 +104,10 @@ impl From<CoreError> for ErrorKind {
             CoreError::InvalidGroupOrder => Self::InvalidGroupOrder,
             CoreError::DuplicateTag => Self::DuplicateTag,
             CoreError::DuplicateSlug => Self::DuplicateSlug,
+            CoreError::DuplicateCodeSource => Self::DuplicateCodeSource,
+            CoreError::DuplicateCodeBinding => Self::DuplicateCodeBinding,
+            CoreError::InvalidCodeSource => Self::InvalidCodeSource,
+            CoreError::InvalidCodeBinding => Self::InvalidCodeBinding,
             CoreError::HasDependents(_) => Self::HasDependents,
         }
     }
