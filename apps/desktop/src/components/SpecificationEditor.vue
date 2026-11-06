@@ -6,7 +6,8 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import MarkdownPreview from "./MarkdownPreview.vue";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { Specification } from "@/types/domain";
-import { translate } from "@/i18n";
+import { formatDate } from "@/lib/core";
+import { i18n, translate } from "@/i18n";
 
 const props = defineProps<{ specification: Specification }>();
 const emit = defineEmits<{ close: []; saved: [] }>();
@@ -18,6 +19,7 @@ const mode = ref<"edit" | "split" | "preview">("split");
 const ready = ref(false);
 const titleInput = ref<HTMLInputElement>();
 const confirmClose = ref(false);
+const locale = computed(() => i18n.global.locale.value as "zh-CN" | "en");
 
 const draft = computed(() => workspace.specificationDraft(props.specification.id));
 const dirty = computed(() => workspace.hasUnsavedSpecification(props.specification.id));
@@ -94,11 +96,22 @@ function discardAndClose() {
 </script>
 
 <template>
-  <section class="flex min-h-0 flex-1 flex-col gap-3">
+  <section class="flex h-full min-h-0 flex-1 flex-col gap-3">
     <header class="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-3">
       <div class="min-w-0 flex-1">
+        <span class="eyebrow">{{ t("specification.editor") }}</span>
         <label class="sr-only" :for="`specification-title-${specification.id}`">{{ t("specification.title") }}</label>
-        <input :id="`specification-title-${specification.id}`" ref="titleInput" v-model="title" class="w-full border-0 bg-transparent px-0 text-xl font-semibold outline-none focus:ring-0" :placeholder="t('specification.title')" />
+        <input
+          :id="`specification-title-${specification.id}`"
+          ref="titleInput"
+          v-model="title"
+          name="title"
+          autocomplete="off"
+          spellcheck="false"
+          class="w-full rounded-sm border-0 bg-transparent px-0 text-xl font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          :placeholder="t('specification.title')"
+          :aria-invalid="!title.trim()"
+        />
         <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>{{ t("specification.currentVersion", { version: specification.version }) }}</span>
           <span aria-hidden="true">·</span>
@@ -110,9 +123,15 @@ function discardAndClose() {
       </div>
       <div class="flex shrink-0 items-center gap-1">
         <div class="flex items-center rounded-md border border-border p-0.5" role="group" :aria-label="t('specification.preview')">
-          <button type="button" class="rounded p-1.5" :class="mode === 'edit' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent'" :aria-label="t('specification.editor')" :aria-pressed="mode === 'edit'" @click="mode = 'edit'"><FileEdit class="h-3.5 w-3.5" /></button>
-          <button type="button" class="rounded p-1.5" :class="mode === 'split' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent'" :aria-label="t('specification.splitView')" :aria-pressed="mode === 'split'" @click="mode = 'split'"><Split class="h-3.5 w-3.5" /></button>
-          <button type="button" class="rounded p-1.5" :class="mode === 'preview' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent'" :aria-label="t('specification.preview')" :aria-pressed="mode === 'preview'" @click="mode = 'preview'"><Eye class="h-3.5 w-3.5" /></button>
+          <button type="button" class="flex items-center gap-1 rounded px-2 py-1.5 text-xs" :class="mode === 'edit' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent'" :aria-label="t('specification.editor')" :aria-pressed="mode === 'edit'" @click="mode = 'edit'">
+            <FileEdit class="h-3.5 w-3.5" aria-hidden="true" /><span class="hidden sm:inline">{{ t("specification.editor") }}</span>
+          </button>
+          <button type="button" class="flex items-center gap-1 rounded px-2 py-1.5 text-xs" :class="mode === 'split' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent'" :aria-label="t('specification.splitView')" :aria-pressed="mode === 'split'" @click="mode = 'split'">
+            <Split class="h-3.5 w-3.5" aria-hidden="true" /><span class="hidden sm:inline">{{ t("specification.splitView") }}</span>
+          </button>
+          <button type="button" class="flex items-center gap-1 rounded px-2 py-1.5 text-xs" :class="mode === 'preview' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent'" :aria-label="t('specification.preview')" :aria-pressed="mode === 'preview'" @click="mode = 'preview'">
+            <Eye class="h-3.5 w-3.5" aria-hidden="true" /><span class="hidden sm:inline">{{ t("specification.preview") }}</span>
+          </button>
         </div>
         <Button size="sm" :disabled="!canSave" @click="save"><Save class="h-3.5 w-3.5" />{{ status === "saving" ? t("common.saving") : t("common.save") }}</Button>
         <Button variant="ghost" size="icon-sm" :aria-label="t('common.close')" @click="requestClose"><X class="h-4 w-4" /></Button>
@@ -141,6 +160,8 @@ function discardAndClose() {
       <textarea
         v-if="mode !== 'preview'"
         v-model="content"
+        name="content"
+        autocomplete="off"
         class="min-h-[360px] w-full resize-none rounded-md border border-border bg-muted/10 p-4 font-mono text-sm leading-relaxed outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
         :aria-label="t('specification.content')"
         spellcheck="false"
@@ -149,11 +170,11 @@ function discardAndClose() {
         <MarkdownPreview :content="content" />
       </div>
     </div>
-    <footer class="flex items-center justify-between text-xs text-muted-foreground">
+    <footer class="flex items-center justify-between text-xs text-muted-foreground" role="status" aria-live="polite">
       <span v-if="status === 'saved'">{{ t("common.saved") }}</span>
       <span v-else-if="status === 'saving'">{{ t("common.saving") }}</span>
       <span v-else>{{ t("specification.unsavedChanges") }}</span>
-      <span>{{ t("service.updatedAt", { date: specification.updatedAt }) }}</span>
+      <span>{{ t("service.updatedAt", { date: formatDate(specification.updatedAt, locale) }) }}</span>
     </footer>
   </section>
   <Dialog :open="confirmClose" @update:open="(value) => !value && (confirmClose = false)">

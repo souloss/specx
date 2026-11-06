@@ -26,10 +26,9 @@ const hasDraft = computed(() => workspace.hasUnsavedSpecification(props.specific
 watch(open, async (value) => {
   if (!value) return;
   error.value = "";
-  selectedVersion.value = props.specification.version;
   try {
-    await workspace.loadSpecificationRevisions(props.specification.id);
-    if (!selectedVersion.value && revisions.value[0]) selectedVersion.value = revisions.value[0].version;
+    const loaded = await workspace.loadSpecificationRevisions(props.specification.id);
+    selectedVersion.value = loaded.find((revision) => revision.version === props.specification.version)?.version ?? loaded[0]?.version ?? null;
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : t("specification.historyLoadFailed");
   }
@@ -59,7 +58,7 @@ async function restore() {
         ><DialogTitle class="flex items-center gap-2"><Clock3 class="h-4 w-4" />{{ t("specification.revisionHistory") }}</DialogTitle></DialogHeader
       >
       <div class="grid min-h-0 gap-4 sm:grid-cols-[220px_minmax(0,1fr)]">
-        <nav class="min-h-0 overflow-y-auto rounded-md border border-border p-1" :aria-label="t('specification.revisionHistory')">
+        <nav class="min-h-0 overflow-y-auto overscroll-contain rounded-md border border-border p-1" :aria-label="t('specification.revisionHistory')">
           <p v-if="loading" class="p-3 text-xs text-muted-foreground">{{ t("common.loading") }}</p>
           <p v-else-if="!revisions.length" class="p-3 text-xs text-muted-foreground">{{ t("specification.historyEmpty") }}</p>
           <button
@@ -74,10 +73,10 @@ async function restore() {
               ><span>{{ t("specification.revision", { version: revision.version }) }}</span
               ><span v-if="revision.version === specification.version" class="text-[10px]">{{ t("specification.current") }}</span></span
             >
-            <span>{{ formatDate(revision.createdAt, locale) }}</span>
+            <span>{{ t("specification.revisionBy", { actor: revision.createdBy, date: formatDate(revision.createdAt, locale) }) }}</span>
           </button>
         </nav>
-        <div class="min-h-0 overflow-y-auto rounded-md border border-border p-4">
+        <div class="min-h-0 overflow-y-auto overscroll-contain rounded-md border border-border p-4">
           <div v-if="selected" class="space-y-3">
             <div class="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
               <div>

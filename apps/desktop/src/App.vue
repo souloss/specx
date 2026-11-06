@@ -101,7 +101,7 @@ async function resolvePendingClose(action: "save" | "discard" | "cancel") {
       <main class="flex min-w-0 flex-1 flex-col overflow-hidden bg-background" :class="{ 'specx-panel': settings.appLayout === 'separated' }">
         <AppTabBar v-if="workspace.tabs.length || settings.showSettingsPage" />
         <SettingsPage v-if="settings.showSettingsPage" />
-        <div v-else-if="workspace.activeTab && workspace.activeServiceId" class="min-h-0 flex-1 overflow-auto p-6 lg:p-8">
+        <div v-else-if="workspace.activeTab && workspace.activeServiceId" class="min-h-0 flex-1 overflow-hidden p-4 sm:p-6 lg:p-8">
           <ServicePanel :catalog="workspace.catalog" :service-id="workspace.activeServiceId" :tab="workspace.activeTab" @open-specification="workspace.openSpecification" @new-specification="showSpecification = true" />
         </div>
         <div v-else class="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 p-8">

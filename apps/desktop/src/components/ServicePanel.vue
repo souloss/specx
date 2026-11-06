@@ -58,8 +58,8 @@ async function removeSpecification() {
     <h2>{{ t("service.unavailable") }}</h2>
     <p>{{ t("service.unavailableDescription") }}</p>
   </div>
-  <div v-else-if="activeSpecification" class="spec-panel flex min-h-0 flex-col">
-    <header class="spec-toolbar">
+  <div v-else-if="activeSpecification" class="spec-panel h-full min-h-0 overflow-auto pr-1">
+    <header v-if="!editing" class="spec-toolbar">
       <div>
         <span class="eyebrow">{{ t("service.specificationHeading") }}</span>
         <h2>{{ activeSpecification.title }}</h2>
@@ -68,7 +68,7 @@ async function removeSpecification() {
       <div v-if="!editing" class="flex flex-wrap items-center gap-2">
         <Button size="sm" @click="editing = true"><Edit3 class="h-3.5 w-3.5" />{{ t("service.editSpecification") }}</Button>
         <Button size="sm" variant="outline" @click="historyOpen = true"><History class="h-3.5 w-3.5" />{{ t("service.specificationHistory") }}</Button>
-        <Button size="sm" variant="destructive" @click="deleteOpen = true"><Trash2 class="h-3.5 w-3.5" />{{ t("service.deleteSpecification") }}</Button>
+        <Button size="sm" variant="ghost" class="text-destructive hover:bg-destructive/10 hover:text-destructive" @click="deleteOpen = true"><Trash2 class="h-3.5 w-3.5" />{{ t("service.deleteSpecification") }}</Button>
       </div>
     </header>
     <SpecificationEditor v-if="editing" :specification="activeSpecification" @close="editing = false" />
@@ -96,7 +96,7 @@ async function removeSpecification() {
       </DialogContent>
     </Dialog>
   </div>
-  <div v-else class="overview-panel">
+  <div v-else class="overview-panel h-full overflow-auto pr-1">
     <header class="overview-hero">
       <div>
         <span class="eyebrow">{{ t("service.overview") }}</span>
