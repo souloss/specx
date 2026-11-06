@@ -4,6 +4,41 @@
   },
   "releases": [
     {
+      "tag": "v0.1.0",
+      "name": "specX 0.1.0",
+      "date": "2026-11-06",
+      "sections": [
+        {
+          "type": "added",
+          "title": "Markdown specification workflow",
+          "items": [
+            {
+              "title": "Create, edit and preview Markdown specifications",
+              "desc": "Create Markdown specifications under a service and maintain them with edit, split preview and preview-only modes."
+            },
+            {
+              "title": "Specification history and restore",
+              "desc": "Keep revision history when saving specifications, inspect previous content and restore a revision into the current version."
+            }
+          ]
+        },
+        {
+          "type": "improved",
+          "title": "Editing experience",
+          "items": [
+            {
+              "title": "Unsaved change protection and conflict feedback",
+              "desc": "Protect unsaved content when leaving the editor and preserve the local draft when a save conflicts."
+            },
+            {
+              "title": "Markdown presentation details",
+              "desc": "Improve headings, lists, quotes, tables, code blocks, task lists and reading layout on narrow windows."
+            }
+          ]
+        }
+      ]
+    },
+    {
       "tag": "v0.0.2",
       "name": "specX 0.0.2",
       "date": "2026-11-06",
