@@ -4,6 +4,45 @@
   },
   "releases": [
     {
+      "tag": "v0.0.2",
+      "name": "specX 0.0.2",
+      "date": "2026-11-06",
+      "sections": [
+        {
+          "type": "improved",
+          "title": "Foundation and desktop experience",
+          "items": [
+            {
+              "title": "Unified navigation and window controls",
+              "desc": "The desktop app uses a borderless layout with theme, settings, minimize, maximize, fullscreen and close actions in one top navigation bar."
+            },
+            {
+              "title": "Bilingual UI and shortcut settings",
+              "desc": "Switch between Simplified Chinese and English; search shortcuts by category, edit them, disable them or reset them."
+            },
+            {
+              "title": "Guided specification creation",
+              "desc": "The new specification flow supports search, category filters, grid or list views, and type-specific multi-step creation."
+            }
+          ]
+        },
+        {
+          "type": "fixed",
+          "title": "Reliability",
+          "items": [
+            {
+              "title": "Tooltips no longer block actions",
+              "desc": "Tooltips appear below their buttons after a short delay, so settings, sign-out and sidebar controls remain clickable."
+            },
+            {
+              "title": "Creation feedback and migration protection",
+              "desc": "Group and service creation now provide immediate state, idempotent retries and recovery; Web and desktop hosts keep business writes gated until migrations are ready."
+            }
+          ]
+        }
+      ]
+    },
+    {
       "tag": "v0.0.1",
       "name": "specX 0.0.1",
       "date": "2026-11-04",
