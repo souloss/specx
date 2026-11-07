@@ -33,6 +33,7 @@
     "/specifications/{specification_id}/revisions": {"get": ["200", "400", "401", "403", "404", "429", "500"]},
     "/specifications/{specification_id}/revisions/{version}": {"get": ["200", "400", "401", "403", "404", "429", "500"]},
     "/specifications/{specification_id}/revisions/{version}/restore": {"post": ["200", "400", "401", "403", "404", "409", "412", "428", "429", "500"]},
+    "/specifications/{specification_id}/sync-status": {"get": ["200", "404"]},
     "/specifications/{specification_id}/sync": {"post": ["200", "404", "409", "502"]},
     "/tags": {"get": ["200", "400", "401", "403", "429"], "post": ["200", "400", "401", "403", "409", "413", "415", "422", "429", "500"]},
     "/tags/{tag_id}": {"delete": ["204", "400", "401", "403", "404", "409"], "put": ["200", "400", "401", "403", "404", "413", "415", "422"]},
@@ -62,6 +63,7 @@
     ,"/specifications/{specification_id}/revisions": {"get": ["limit", "offset", "specification_id"]}
     ,"/specifications/{specification_id}/revisions/{version}": {"get": ["specification_id", "version"]}
     ,"/specifications/{specification_id}/revisions/{version}/restore": {"post": ["If-Match", "specification_id", "version"]}
+    ,"/specifications/{specification_id}/sync-status": {"get": ["specification_id"]}
     ,"/specifications/{specification_id}/sync": {"post": ["specification_id"]}
   },
   "responseHeaders": {

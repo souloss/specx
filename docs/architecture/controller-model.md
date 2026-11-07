@@ -128,7 +128,7 @@ Provider 不一定需要把完整仓库复制进 SpecX。它可以返回带 `con
 
 ## 5. Markdown 文档同步控制器
 
-第一版已经提供一个受 API 调用的同步适配器：它读取 `SpecificationCodeBinding` 的仓库 URL、ref 和 Markdown 路径，通过内置 Git Provider 获取文件，解析提交和 tree manifest，规范化换行并计算 `sha256:` 内容摘要，再以 Core 的 ETag CAS 写入规范正文和修订。`POST /specifications/{specificationId}/sync` 返回解析出的 commit、manifest hash、内容摘要、Provider 版本、同步时间和 `snapshotId`；重复内容不会追加修订，仓库/来源/提交相同的快照也不会重复创建。
+第一版已经提供一个受 API 调用的同步适配器：它读取 `SpecificationCodeBinding` 的仓库 URL、ref 和 Markdown 路径，通过内置 Git Provider 获取文件，解析提交和 tree manifest，规范化换行并计算 `sha256:` 内容摘要，再以 Core 的 ETag CAS 写入规范正文和修订。`POST /specifications/{specificationId}/sync` 返回解析出的 commit、manifest hash、内容摘要、Provider 版本、同步时间和 `snapshotId`；`GET /specifications/{specificationId}/sync-status` 可在页面重载后恢复最近一次持久化的同步证据。重复内容不会追加修订，仓库/来源/提交相同的快照也不会重复创建。
 
 该适配器是目标快照链路的可替换实现，暂时由 API 的受控同步调用承载。当前 `RepositorySnapshot` 已持久化提交、manifest、Provider 和时间证据，但内容根仍由 Provider 临时 checkout 管理；持久内容对象、Webhook/Poller 或跨进程任务恢复接入后，接口输入应切换为上游快照，控制器主体和 Core 写回语义保持不变。
 

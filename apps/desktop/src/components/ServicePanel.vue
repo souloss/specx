@@ -47,7 +47,8 @@ watch(
     sourceMetadataLoading.value = Boolean(specificationId);
     if (!specificationId) return;
     try {
-      await workspace.loadSpecificationCodeBinding(specificationId);
+      const binding = await workspace.loadSpecificationCodeBinding(specificationId);
+      if (binding?.path) await workspace.loadSpecificationSyncStatus(specificationId);
     } catch {
       // The detail view remains usable when optional source metadata is unavailable.
     } finally {

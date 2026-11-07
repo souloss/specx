@@ -189,6 +189,9 @@ export const specxApi = {
   syncSpecification(workspaceId: string, specificationId: string) {
     return request<SpecificationSyncResponse>(`/api/specx/specifications/${encodeURIComponent(specificationId)}/sync`, { method: "POST" }, workspaceId);
   },
+  getSpecificationSyncStatus(workspaceId: string, specificationId: string) {
+    return request<SpecificationSyncResponse>(`/api/specx/specifications/${encodeURIComponent(specificationId)}/sync-status`, {}, workspaceId);
+  },
   createTag(workspaceId: string, tag: { id: string; name: string; color: string }) {
     return request<unknown>("/api/specx/tags", { method: "POST", headers: { "idempotency-key": idempotencyKey("tag") }, body: tag }, workspaceId);
   },

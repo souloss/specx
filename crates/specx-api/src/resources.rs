@@ -44,6 +44,7 @@ where
                 .put(set_specification_code_binding)
                 .delete(delete_specification_code_binding),
         )
+        .route("/specifications/{specification_id}/sync-status", get(get_specification_sync_status))
         .route("/specifications/{specification_id}/sync", post(sync_specification))
         .route("/specifications/{specification_id}", put(update_specification).delete(delete_specification))
         .route("/backups", get(list_backups).post(create_backup))
@@ -862,6 +863,55 @@ pub struct SpecificationSyncResponse {
     pub changed: bool,
     pub synced_at: String,
     pub provider_version: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/specifications/{specification_id}/sync-status",
+    params(("specification_id" = String, Path)),
+    responses(
+        (status = 200, description = "Latest persisted repository synchronization evidence", body = SpecificationSyncResponse),
+        (status = 404, body = ErrorResponse)
+    ),
+    tag = "code"
+)]
+async fn get_specification_sync_status(
+    State(state): State<ApiState>,
+    Path(specification_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<Json<SpecificationSyncResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    let specification = core
+        .list_specifications(&context)
+        .into_iter()
+        .find(|specification| specification.id == specification_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("specification"))?;
+    let binding = core
+        .specification_code_binding(&context, &specification_id)
+        .filter(|binding| !binding.path.is_empty())
+        .ok_or(CoreError::NotFound("specification_code_binding"))?;
+    let relation = core
+        .service_repository(&context, &specification.service_id)
+        .ok_or(CoreError::NotFound("service_repository"))?;
+    let snapshot = core
+        .list_repository_snapshots(&context, &relation.repository_id)
+        .into_iter()
+        .find(|snapshot| snapshot.source_ref == binding.ref_name)
+        .ok_or(CoreError::NotFound("repository_snapshot"))?;
+    let content_hash = specification.content_hash.clone();
+    Ok(Json(SpecificationSyncResponse {
+        specification: specification.into(),
+        snapshot_id: snapshot.id.clone(),
+        manifest_hash: snapshot.manifest_hash.clone(),
+        resolved_commit: snapshot.resolved_commit.clone(),
+        content_hash,
+        changed: false,
+        synced_at: snapshot.fetched_at.clone(),
+        provider_version: snapshot.provider_version.clone(),
+    }))
 }
 
 impl From<Specification> for SpecificationResponse {
@@ -3487,7 +3537,7 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
 #[openapi(
     info(title = "specX API", version = "1.0.0", description = "Service catalog and specification API."),
     servers((url = "/api/specx")),
-    paths(health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, get_specification_code_binding, set_specification_code_binding, delete_specification_code_binding, sync_specification, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, list_code_sources, create_code_source, update_code_source, delete_code_source, get_service_repository, link_service_repository, unlink_service_repository, list_service_code_bindings, create_code_binding, update_code_binding, delete_code_binding, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
+    paths(health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, get_specification_code_binding, set_specification_code_binding, delete_specification_code_binding, get_specification_sync_status, sync_specification, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, list_code_sources, create_code_source, update_code_source, delete_code_source, get_service_repository, link_service_repository, unlink_service_repository, list_service_code_bindings, create_code_binding, update_code_binding, delete_code_binding, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
     components(schemas(
         HealthResponse,
         ReadyResponse,

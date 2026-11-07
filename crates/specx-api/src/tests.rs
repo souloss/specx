@@ -457,6 +457,20 @@ async fn repository_managed_specifications_sync_from_git_and_dedupe_unchanged_co
     assert!(body["manifestHash"].as_str().is_some_and(|value| value.starts_with("sha256:")));
     let first_commit = body["resolvedCommit"].as_str().unwrap().to_owned();
 
+    let status = app
+        .clone()
+        .oneshot(
+            headers(axum::http::Request::get("/specifications/spec-sync/sync-status")).body(Body::empty()).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let status_body: serde_json::Value =
+        serde_json::from_slice(&status.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(status_body["resolvedCommit"], first_commit);
+    assert_eq!(status_body["manifestHash"], body["manifestHash"]);
+    assert_eq!(status_body["changed"], false);
+
     let response = app.clone().oneshot(sync_request()).await.unwrap();
     let body: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();

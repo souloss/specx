@@ -285,6 +285,22 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     }
   }
 
+  async function loadSpecificationSyncStatus(specificationId: string) {
+    const workspaceId = catalog.value?.workspace.id;
+    if (!workspaceId) return null;
+    try {
+      const loaded = await specxApi.getSpecificationSyncStatus(workspaceId, specificationId);
+      specificationSyncs.value = { ...specificationSyncs.value, [specificationId]: loaded };
+      return loaded;
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 404) {
+        clearSpecificationSync(specificationId);
+        return null;
+      }
+      throw cause;
+    }
+  }
+
   function specificationCodeBindingFor(specificationId: string) {
     return specificationCodeBindings.value[specificationId] ?? null;
   }
@@ -548,6 +564,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     unlinkServiceRepository,
     specificationCodeBindings,
     loadSpecificationCodeBinding,
+    loadSpecificationSyncStatus,
     specificationCodeBindingFor,
     specificationSyncs,
     specificationSyncFor,
