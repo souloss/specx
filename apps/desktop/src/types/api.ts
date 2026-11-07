@@ -115,6 +115,14 @@ export type SpecificationSyncResponse = {
   syncedAt: string;
   providerVersion: string;
 };
+export type RepositoryFileResponse = { path: string; byteLength: number; contentHash: string };
+export type RepositoryDiscoveryResponse = {
+  snapshotId: string;
+  resolvedCommit: string;
+  manifestHash: string;
+  providerVersion: string;
+  files: RepositoryFileResponse[];
+};
 
 export type DesktopApiRequest = {
   method: string;

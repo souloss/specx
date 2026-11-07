@@ -83,6 +83,9 @@ pub(crate) async fn request_context(
     mut request: Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Response {
+    if request.uri().path().starts_with("/api/specx/webhooks/repositories/") {
+        return next.run(request).await;
+    }
     let token = cookie(request.headers().get("cookie").and_then(|value| value.to_str().ok()), "specx_session");
     if let Some(token) = token.filter(|value| value == &session_token(&host, &*host.password)) {
         let actor = format!("specx-session-{}", &token[..16]);

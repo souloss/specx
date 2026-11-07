@@ -1,5 +1,11 @@
 use super::*;
-use specx_controller::{CommandGitProvider, MarkdownDocumentController, MarkdownDocumentRequest};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+use axum::body::Bytes;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use hmac::Mac;
+use specx_controller::{
+    CommandGitProvider, ContentStore, GitCredential, RepositoryController, RepositoryReconcileRequest,
+};
 
 pub fn router<S>(state: ApiState) -> Router<S>
 where
@@ -46,6 +52,13 @@ where
         )
         .route("/specifications/{specification_id}/sync-status", get(get_specification_sync_status))
         .route("/specifications/{specification_id}/sync", post(sync_specification))
+        .route("/repositories/{repository_id}/files", get(discover_repository_files))
+        .route("/repositories/{repository_id}/reconcile", post(enqueue_repository_reconcile))
+        .route("/controller-tasks/{task_id}", get(get_controller_task))
+        .route("/webhooks/repositories/{repository_id}", post(repository_webhook))
+        .route("/secrets", get(list_secrets).post(create_secret))
+        .route("/secrets/{secret_id}", put(update_secret).delete(delete_secret))
+        .route("/integrations", get(list_integrations).post(create_integration))
         .route("/specifications/{specification_id}", put(update_specification).delete(delete_specification))
         .route("/backups", get(list_backups).post(create_backup))
         .route("/backups/{file_name}/restore", post(restore_backup))
@@ -865,6 +878,131 @@ pub struct SpecificationSyncResponse {
     pub provider_version: String,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RepositoryDiscoveryQuery {
+    #[schema(value_type = String)]
+    ref_kind: SpecificationRefKind,
+    ref_name: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryFileResponse {
+    path: String,
+    byte_length: u64,
+    content_hash: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryDiscoveryResponse {
+    snapshot_id: Id,
+    resolved_commit: String,
+    manifest_hash: String,
+    provider_version: String,
+    files: Vec<RepositoryFileResponse>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ControllerTaskResponse {
+    id: Id,
+    controller_id: String,
+    resource_kind: String,
+    resource_id: String,
+    status: String,
+    attempts: i64,
+    next_run_at: String,
+    lease_until: Option<String>,
+    last_error: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl From<ControllerTask> for ControllerTaskResponse {
+    fn from(task: ControllerTask) -> Self {
+        Self {
+            id: task.id,
+            controller_id: task.controller_id,
+            resource_kind: task.resource_kind,
+            resource_id: task.resource_id,
+            status: task.status,
+            attempts: task.attempts,
+            next_run_at: task.next_run_at,
+            lease_until: task.lease_until,
+            last_error: task.last_error,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RepositoryWebhookRequest {
+    tenant_id: String,
+    workspace_id: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateSecretRequest {
+    id: Id,
+    name: String,
+    value: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct SecretResponse {
+    id: Id,
+    name: String,
+    key_version: i64,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct SecretPageResponse {
+    items: Vec<SecretResponse>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateSecretRequest {
+    value: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateIntegrationRequest {
+    id: Id,
+    provider: String,
+    display_name: String,
+    secret_id: Option<Id>,
+    permissions: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct IntegrationResponse {
+    id: Id,
+    provider: String,
+    display_name: String,
+    secret_id: Option<Id>,
+    permissions: Vec<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct IntegrationPageResponse {
+    items: Vec<IntegrationResponse>,
+}
+
 #[utoipa::path(
     get,
     path = "/specifications/{specification_id}/sync-status",
@@ -912,6 +1050,425 @@ async fn get_specification_sync_status(
         synced_at: snapshot.fetched_at.clone(),
         provider_version: snapshot.provider_version.clone(),
     }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/repositories/{repository_id}/files",
+    params(
+        ("repository_id" = String, Path),
+        ("refKind" = String, Query),
+        ("refName" = String, Query)
+    ),
+    responses((status = 200, body = RepositoryDiscoveryResponse), (status = 404, body = ErrorResponse), (status = 502, body = ErrorResponse)),
+    tag = "code"
+)]
+async fn discover_repository_files(
+    State(state): State<ApiState>,
+    Path(repository_id): Path<Id>,
+    Query(query): Query<RepositoryDiscoveryQuery>,
+    headers: HeaderMap,
+) -> Result<Json<RepositoryDiscoveryResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let (repository_url, credential) = {
+        let mut inner = state.inner.lock().await;
+        let repository = load_core(&mut inner, &context)?
+            .repository(&context, &repository_id)
+            .ok_or(CoreError::NotFound("repository"))?
+            .clone();
+        let credential = repository_credential(&inner, &context, &repository.provider)?;
+        (repository.canonical_url, credential)
+    };
+    let fetched = fetch_repository_snapshot(repository_url, query.ref_kind, query.ref_name.clone(), credential).await?;
+    let fetched_at = Utc::now().to_rfc3339();
+    let snapshot =
+        persist_repository_snapshot(&state, &context, &repository_id, &query.ref_name, &fetched, &fetched_at).await?;
+    let files = fetched
+        .files
+        .into_iter()
+        .filter(|file| {
+            let path = file.path.to_ascii_lowercase();
+            path.ends_with(".md") || path.ends_with(".markdown")
+        })
+        .map(|file| RepositoryFileResponse {
+            path: file.path,
+            byte_length: file.content.len() as u64,
+            content_hash: file.content_hash,
+        })
+        .collect();
+    Ok(Json(RepositoryDiscoveryResponse {
+        snapshot_id: snapshot.id,
+        resolved_commit: fetched.resolved_commit,
+        manifest_hash: fetched.manifest_hash,
+        provider_version: fetched.provider_version,
+        files,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/repositories/{repository_id}/reconcile",
+    params(("repository_id" = String, Path)),
+    responses((status = 202, body = ControllerTaskResponse), (status = 404, body = ErrorResponse)),
+    tag = "code"
+)]
+async fn enqueue_repository_reconcile(
+    State(state): State<ApiState>,
+    Path(repository_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<ControllerTaskResponse>), ApiError> {
+    let context = request_context(&headers)?;
+    {
+        let mut inner = state.inner.lock().await;
+        load_core(&mut inner, &context)?
+            .repository(&context, &repository_id)
+            .ok_or(CoreError::NotFound("repository"))?;
+    }
+    let task_id = state.enqueue_repository_task(&context, &repository_id).await?;
+    let task = state.controller_task(&task_id).await?.ok_or(ApiError::NotFound)?;
+    Ok((StatusCode::ACCEPTED, Json(task.into())))
+}
+
+#[utoipa::path(
+    get,
+    path = "/controller-tasks/{task_id}",
+    params(("task_id" = String, Path)),
+    responses((status = 200, body = ControllerTaskResponse), (status = 404, body = ErrorResponse)),
+    tag = "controllers"
+)]
+async fn get_controller_task(
+    State(state): State<ApiState>,
+    Path(task_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<Json<ControllerTaskResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let task = state.controller_task(&task_id).await?.ok_or(ApiError::NotFound)?;
+    if task.tenant_id != context.tenant_id || task.workspace_id != context.workspace_id {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(task.into()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/webhooks/repositories/{repository_id}",
+    params(("repository_id" = String, Path), ("X-SpecX-Webhook-Signature" = String, Header)),
+    request_body = RepositoryWebhookRequest,
+    responses((status = 202, body = ControllerTaskResponse), (status = 401, body = ErrorResponse), (status = 404, body = ErrorResponse)),
+    tag = "controllers"
+)]
+async fn repository_webhook(
+    State(state): State<ApiState>,
+    Path(repository_id): Path<Id>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(StatusCode, Json<ControllerTaskResponse>), ApiError> {
+    let signature = headers.get("x-specx-webhook-signature").and_then(|value| value.to_str().ok()).unwrap_or("");
+    if !verify_webhook_signature(state.webhook_secret(), signature, &body) {
+        return Err(ApiError::Unauthorized);
+    }
+    let input: RepositoryWebhookRequest = serde_json::from_slice(&body).map_err(|_| ApiError::InvalidInput)?;
+    let context = WorkspaceContext {
+        tenant_id: input.tenant_id,
+        workspace_id: input.workspace_id,
+        actor_id: "specx-webhook".into(),
+    };
+    {
+        let mut inner = state.inner.lock().await;
+        load_core(&mut inner, &context)?
+            .repository(&context, &repository_id)
+            .ok_or(CoreError::NotFound("repository"))?;
+    }
+    let task_id = state.enqueue_repository_task(&context, &repository_id).await?;
+    let task = state.controller_task(&task_id).await?.ok_or(ApiError::NotFound)?;
+    Ok((StatusCode::ACCEPTED, Json(task.into())))
+}
+
+#[utoipa::path(get, path = "/secrets", responses((status = 200, body = SecretPageResponse)), tag = "integrations")]
+async fn list_secrets(State(state): State<ApiState>, headers: HeaderMap) -> Result<Json<SecretPageResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let inner = state.inner.lock().await;
+    let items =
+        inner.store.list_secrets(&context.tenant_id, &context.workspace_id)?.into_iter().map(secret_response).collect();
+    Ok(Json(SecretPageResponse { items }))
+}
+
+#[utoipa::path(post, path = "/secrets", request_body = CreateSecretRequest, responses((status = 200, body = SecretResponse), (status = 422, body = ErrorResponse), (status = 503, body = ErrorResponse)), tag = "integrations")]
+async fn create_secret(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateSecretRequest>,
+) -> Result<Json<SecretResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    validate_secret_input(&input.name, &input.value)?;
+    let now = Utc::now().to_rfc3339();
+    let encrypted_value = encrypt_secret(&input.value)?;
+    let secret = SecretRecord {
+        id: input.id,
+        tenant_id: context.tenant_id.clone(),
+        workspace_id: context.workspace_id.clone(),
+        name: input.name.trim().to_owned(),
+        encrypted_value,
+        key_version: 1,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    let inner = state.inner.lock().await;
+    inner.store.upsert_secret(&secret)?;
+    Ok(Json(secret_response(secret)))
+}
+
+#[utoipa::path(put, path = "/secrets/{secret_id}", params(("secret_id" = String, Path)), request_body = UpdateSecretRequest, responses((status = 200, body = SecretResponse), (status = 404, body = ErrorResponse), (status = 422, body = ErrorResponse), (status = 503, body = ErrorResponse)), tag = "integrations")]
+async fn update_secret(
+    State(state): State<ApiState>,
+    Path(secret_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateSecretRequest>,
+) -> Result<Json<SecretResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    validate_secret_input("valid", &input.value)?;
+    let encrypted_value = encrypt_secret(&input.value)?;
+    let inner = state.inner.lock().await;
+    let existing =
+        inner.store.secret_by_id(&context.tenant_id, &context.workspace_id, &secret_id)?.ok_or(ApiError::NotFound)?;
+    let updated = SecretRecord { encrypted_value, updated_at: Utc::now().to_rfc3339(), ..existing };
+    inner.store.upsert_secret(&updated)?;
+    Ok(Json(secret_response(updated)))
+}
+
+#[utoipa::path(delete, path = "/secrets/{secret_id}", params(("secret_id" = String, Path)), responses((status = 204), (status = 404, body = ErrorResponse)), tag = "integrations")]
+async fn delete_secret(
+    State(state): State<ApiState>,
+    Path(secret_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let inner = state.inner.lock().await;
+    if !inner.store.delete_secret(&context.tenant_id, &context.workspace_id, &secret_id)? {
+        return Err(ApiError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(get, path = "/integrations", responses((status = 200, body = IntegrationPageResponse)), tag = "integrations")]
+async fn list_integrations(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<IntegrationPageResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let inner = state.inner.lock().await;
+    let items = inner
+        .store
+        .list_integrations(&context.tenant_id, &context.workspace_id)?
+        .into_iter()
+        .map(integration_response)
+        .collect();
+    Ok(Json(IntegrationPageResponse { items }))
+}
+
+#[utoipa::path(post, path = "/integrations", request_body = CreateIntegrationRequest, responses((status = 200, body = IntegrationResponse), (status = 404, body = ErrorResponse), (status = 422, body = ErrorResponse)), tag = "integrations")]
+async fn create_integration(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateIntegrationRequest>,
+) -> Result<Json<IntegrationResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    if input.provider.trim().is_empty() || input.display_name.trim().is_empty() || input.permissions.len() > 32 {
+        return Err(ApiError::InvalidInput);
+    }
+    let inner = state.inner.lock().await;
+    if let Some(secret_id) = &input.secret_id {
+        inner.store.secret_by_id(&context.tenant_id, &context.workspace_id, secret_id)?.ok_or(ApiError::NotFound)?;
+    }
+    let now = Utc::now().to_rfc3339();
+    let integration = IntegrationRecord {
+        id: input.id,
+        tenant_id: context.tenant_id,
+        workspace_id: context.workspace_id,
+        provider: input.provider.trim().to_ascii_lowercase(),
+        display_name: input.display_name.trim().to_owned(),
+        secret_id: input.secret_id,
+        permissions: serde_json::to_string(&input.permissions).map_err(|_| ApiError::InvalidInput)?,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    inner.store.upsert_integration(&integration)?;
+    Ok(Json(integration_response(integration)))
+}
+
+fn secret_response(secret: SecretRecord) -> SecretResponse {
+    SecretResponse {
+        id: secret.id,
+        name: secret.name,
+        key_version: secret.key_version,
+        created_at: secret.created_at,
+        updated_at: secret.updated_at,
+    }
+}
+
+fn integration_response(integration: IntegrationRecord) -> IntegrationResponse {
+    let permissions = serde_json::from_str(&integration.permissions).unwrap_or_default();
+    IntegrationResponse {
+        id: integration.id,
+        provider: integration.provider,
+        display_name: integration.display_name,
+        secret_id: integration.secret_id,
+        permissions,
+        created_at: integration.created_at,
+        updated_at: integration.updated_at,
+    }
+}
+
+fn validate_secret_input(name: &str, value: &str) -> Result<(), ApiError> {
+    if name.trim().is_empty()
+        || name.len() > 120
+        || value.is_empty()
+        || value.len() > 64 * 1024
+        || value.chars().any(char::is_control)
+    {
+        return Err(ApiError::InvalidInput);
+    }
+    Ok(())
+}
+
+fn secret_cipher() -> Result<Aes256Gcm, ApiError> {
+    let configured = std::env::var("SPECX_SECRET_KEY").map_err(|_| ApiError::InvalidInput)?;
+    let key = Sha256::digest(configured.as_bytes());
+    Aes256Gcm::new_from_slice(&key).map_err(|_| ApiError::InvalidInput)
+}
+
+fn encrypt_secret(value: &str) -> Result<String, ApiError> {
+    let cipher = secret_cipher()?;
+    let nonce_bytes = uuid::Uuid::new_v4().as_bytes()[..12].to_vec();
+    let encrypted =
+        cipher.encrypt(Nonce::from_slice(&nonce_bytes), value.as_bytes()).map_err(|_| ApiError::InvalidInput)?;
+    Ok(format!("{}:{}", BASE64.encode(nonce_bytes), BASE64.encode(encrypted)))
+}
+
+fn decrypt_secret(value: &str) -> Result<String, ApiError> {
+    let (nonce, payload) = value.split_once(':').ok_or(ApiError::InvalidInput)?;
+    let nonce = BASE64.decode(nonce).map_err(|_| ApiError::InvalidInput)?;
+    if nonce.len() != 12 {
+        return Err(ApiError::InvalidInput);
+    }
+    let payload = BASE64.decode(payload).map_err(|_| ApiError::InvalidInput)?;
+    let cipher = secret_cipher()?;
+    let bytes = cipher.decrypt(Nonce::from_slice(&nonce), payload.as_ref()).map_err(|_| ApiError::InvalidInput)?;
+    String::from_utf8(bytes).map_err(|_| ApiError::InvalidInput)
+}
+
+fn repository_credential(
+    inner: &ApiInner,
+    context: &WorkspaceContext,
+    provider: &str,
+) -> Result<Option<GitCredential>, ApiError> {
+    let integrations = inner.store.list_integrations(&context.tenant_id, &context.workspace_id)?;
+    let Some(integration) = integrations.into_iter().find(|integration| integration.provider == provider) else {
+        return Ok(None);
+    };
+    let Some(secret_id) = integration.secret_id else { return Ok(None) };
+    let permissions: Vec<String> =
+        serde_json::from_str(&integration.permissions).map_err(|_| ApiError::InvalidInput)?;
+    if !permissions.iter().any(|permission| permission == "repository:read" || permission == "contents:read") {
+        return Ok(None);
+    }
+    let secret =
+        inner.store.secret_by_id(&context.tenant_id, &context.workspace_id, &secret_id)?.ok_or(ApiError::NotFound)?;
+    let token = decrypt_secret(&secret.encrypted_value)?;
+    Ok(Some(GitCredential { username: None, bearer_token: Some(token) }))
+}
+
+fn verify_webhook_signature(secret: Option<&str>, signature: &str, body: &[u8]) -> bool {
+    let Some(secret) = secret else { return false };
+    let Some(expected) = signature.strip_prefix("sha256=") else { return false };
+    let Ok(mut mac) = <hmac::Hmac<Sha256> as hmac::Mac>::new_from_slice(secret.as_bytes()) else { return false };
+    mac.update(body);
+    let expected_bytes = match hex::decode(expected) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+    mac.verify_slice(&expected_bytes).is_ok()
+}
+
+pub(crate) async fn process_controller_task(state: &ApiState, task: &ControllerTask) -> Result<(), ApiError> {
+    if task.controller_id != "repository-controller" || task.resource_kind != "Repository" {
+        return Err(ApiError::InvalidInput);
+    }
+    let context = WorkspaceContext {
+        tenant_id: task.tenant_id.clone(),
+        workspace_id: task.workspace_id.clone(),
+        actor_id: "specx-controller".into(),
+    };
+    let targets = {
+        let mut inner = state.inner.lock().await;
+        let core = load_core(&mut inner, &context)?;
+        let repository = core.repository(&context, &task.resource_id).ok_or(CoreError::NotFound("repository"))?.clone();
+        core.list_specifications(&context)
+            .into_iter()
+            .filter_map(|specification| {
+                let binding = core.specification_code_binding(&context, &specification.id)?;
+                let relation = core.service_repository(&context, &specification.service_id)?;
+                (relation.repository_id == repository.id && !binding.path.is_empty()).then(|| {
+                    (
+                        specification.id.clone(),
+                        binding.path.clone(),
+                        binding.ref_kind,
+                        binding.ref_name.clone(),
+                        repository.canonical_url.clone(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut refs = std::collections::BTreeMap::<(SpecificationRefKind, String), String>::new();
+    for (_, _, ref_kind, ref_name, url) in &targets {
+        refs.entry((*ref_kind, ref_name.clone())).or_insert_with(|| url.clone());
+    }
+    for ((ref_kind, ref_name), repository_url) in refs {
+        let credential = {
+            let mut inner = state.inner.lock().await;
+            let core = load_core(&mut inner, &context)?;
+            let repository = core.repository(&context, &task.resource_id).ok_or(CoreError::NotFound("repository"))?;
+            repository_credential(&inner, &context, &repository.provider)?
+        };
+        let fetched = fetch_repository_snapshot(repository_url, ref_kind, ref_name.clone(), credential).await?;
+        let synced_at = Utc::now().to_rfc3339();
+        let snapshot =
+            persist_repository_snapshot(state, &context, &task.resource_id, &ref_name, &fetched, &synced_at).await?;
+        for (specification_id, path, binding_ref_kind, binding_ref_name, _) in
+            targets.iter().filter(|target| target.2 == ref_kind && target.3 == ref_name)
+        {
+            let content = {
+                let inner = state.inner.lock().await;
+                read_repository_snapshot_file(state, &inner, &snapshot.id, path)?
+            };
+            let mut inner = state.inner.lock().await;
+            let mut core = load_core(&mut inner, &context)?;
+            let current = core
+                .list_specifications(&context)
+                .into_iter()
+                .find(|value| value.id == *specification_id)
+                .cloned()
+                .ok_or(CoreError::NotFound("specification"))?;
+            if current.content_hash == format!("sha256:{:x}", Sha256::digest(content.as_bytes())) {
+                continue;
+            }
+            let updated = core.update_managed_specification_content(&context, specification_id, content)?;
+            if !inner.store.update_specification_if_current_with_audit_and_snapshot(
+                &context,
+                &current,
+                &updated,
+                None,
+                Some(&snapshot),
+            )? {
+                return Err(ApiError::PreconditionFailed);
+            }
+            inner.seed_core = None;
+            let _ = binding_ref_kind;
+            let _ = binding_ref_name;
+        }
+    }
+    Ok(())
 }
 
 impl From<Specification> for SpecificationResponse {
@@ -2688,6 +3245,7 @@ async fn set_specification_code_binding(
     let relation = core
         .service_repository(&context, &specification.service_id)
         .ok_or(CoreError::NotFound("service_repository"))?;
+    let repository_id = relation.repository_id.clone();
     let existing = core.specification_code_binding(&context, &specification_id).cloned();
     if let Some(existing) = &existing {
         let current = specification_code_binding_response(&core, &context, existing)?.etag;
@@ -2741,10 +3299,42 @@ async fn set_specification_code_binding(
     if !persisted {
         return Err(ApiError::PreconditionFailed);
     }
+    if !binding.path.is_empty() && binding.ref_kind == SpecificationRefKind::Branch {
+        upsert_repository_schedule(&inner.store, &context, &repository_id, binding.ref_kind, &binding.ref_name)?;
+    }
     inner.seed_core = None;
     let response = specification_code_binding_response(&core, &context, &binding)?;
     let etag = response.etag.clone();
     Ok(response_with_etag(response, etag))
+}
+
+fn upsert_repository_schedule(
+    store: &StoreBackend,
+    context: &WorkspaceContext,
+    service_repository_id: &str,
+    ref_kind: SpecificationRefKind,
+    ref_name: &str,
+) -> Result<(), ApiError> {
+    let interval_seconds = std::env::var("SPECX_REPOSITORY_POLL_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(300)
+        .max(30);
+    let now = Utc::now();
+    let schedule = RepositorySyncSchedule {
+        id: uuid::Uuid::new_v4().to_string(),
+        tenant_id: context.tenant_id.clone(),
+        workspace_id: context.workspace_id.clone(),
+        repository_id: service_repository_id.to_owned(),
+        ref_kind: serde_json::to_string(&ref_kind).map_err(|_| ApiError::InvalidInput)?.trim_matches('"').to_owned(),
+        ref_name: ref_name.to_owned(),
+        interval_seconds,
+        enabled: true,
+        next_run_at: (now + chrono::Duration::seconds(interval_seconds)).to_rfc3339(),
+        created_at: now.to_rfc3339(),
+        updated_at: now.to_rfc3339(),
+    };
+    store.upsert_repository_sync_schedule(&schedule).map_err(ApiError::from)
 }
 
 #[utoipa::path(
@@ -2786,6 +3376,99 @@ async fn delete_specification_code_binding(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn fetch_repository_snapshot(
+    repository_url: String,
+    ref_kind: SpecificationRefKind,
+    ref_name: String,
+    credential: Option<GitCredential>,
+) -> Result<specx_controller::RepositorySnapshotResult, ApiError> {
+    let provider_root = std::env::temp_dir().join(format!("specx-repository-controller-{}", uuid::Uuid::new_v4()));
+    tokio::task::spawn_blocking(move || {
+        let provider = CommandGitProvider::new(&provider_root)?.with_credential(credential);
+        let controller = RepositoryController::new(provider);
+        let result =
+            controller.reconcile(&RepositoryReconcileRequest { repository_url, ref_kind, ref_name, credential: None });
+        let _ = std::fs::remove_dir_all(&provider_root);
+        result.map_err(ApiError::from)
+    })
+    .await
+    .map_err(|_| ApiError::RepositorySyncFailed)?
+}
+
+async fn persist_repository_snapshot(
+    state: &ApiState,
+    context: &WorkspaceContext,
+    repository_id: &str,
+    source_ref: &str,
+    fetched: &specx_controller::RepositorySnapshotResult,
+    fetched_at: &str,
+) -> Result<RepositorySnapshot, ApiError> {
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, context)?;
+    let snapshot_id = uuid::Uuid::new_v4().to_string();
+    let snapshot_input = RepositorySnapshot {
+        id: snapshot_id.clone(),
+        tenant_id: context.tenant_id.clone(),
+        workspace_id: context.workspace_id.clone(),
+        repository_id: repository_id.to_owned(),
+        source_ref: source_ref.to_owned(),
+        resolved_commit: fetched.resolved_commit.clone(),
+        manifest_hash: fetched.manifest_hash.clone(),
+        content_root_ref: Some(format!("snapshot:{snapshot_id}")),
+        fetched_at: fetched_at.to_owned(),
+        provider_version: fetched.provider_version.clone(),
+        created_at: fetched_at.to_owned(),
+    };
+    let snapshot = core.record_repository_snapshot(context, snapshot_input)?;
+    inner.store.upsert_repository_snapshot(context, &snapshot)?;
+    for file in &fetched.files {
+        let content =
+            state.content_store.put(&file.content, "text/plain; charset=utf-8", fetched_at).map_err(|error| {
+                tracing::warn!(error = %error, "repository content could not be stored");
+                ApiError::RepositorySyncFailed
+            })?;
+        let content_ref = serde_json::to_string(&content).map_err(|_| ApiError::RepositorySyncFailed)?;
+        inner.store.upsert_repository_snapshot_file(&RepositorySnapshotFile {
+            snapshot_id: snapshot.id.clone(),
+            path: file.path.clone(),
+            content_ref,
+            content_hash: file.content_hash.clone(),
+            byte_length: file.content.len() as i64,
+            media_type: if file.path.to_ascii_lowercase().ends_with(".md")
+                || file.path.to_ascii_lowercase().ends_with(".markdown")
+            {
+                "text/markdown; charset=utf-8".into()
+            } else {
+                "application/octet-stream".into()
+            },
+        })?;
+    }
+    inner.seed_core = None;
+    Ok(snapshot)
+}
+
+fn read_repository_snapshot_file(
+    state: &ApiState,
+    inner: &ApiInner,
+    snapshot_id: &str,
+    path: &str,
+) -> Result<String, ApiError> {
+    let file = inner
+        .store
+        .repository_snapshot_files(snapshot_id)?
+        .into_iter()
+        .find(|file| file.path == path)
+        .ok_or(ApiError::NotFound)?;
+    let content_ref: specx_types::ContentRef =
+        serde_json::from_str(&file.content_ref).map_err(|_| ApiError::RepositorySyncFailed)?;
+    let bytes = state.content_store.get(&content_ref).map_err(|error| {
+        tracing::warn!(error = %error, snapshot_id, path, "repository snapshot content could not be read");
+        ApiError::RepositorySyncFailed
+    })?;
+    let content = String::from_utf8(bytes).map_err(|_| ApiError::RepositorySyncFailed)?;
+    Ok(content.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
 #[utoipa::path(
     post,
     path = "/specifications/{specification_id}/sync",
@@ -2804,7 +3487,7 @@ async fn sync_specification(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let context = request_context(&headers)?;
-    let (expected, binding, repository_id, repository_url) = {
+    let (expected, binding, repository_id, repository_url, credential) = {
         let mut inner = state.inner.lock().await;
         let core = load_core(&mut inner, &context)?;
         let specification = core
@@ -2824,46 +3507,22 @@ async fn sync_specification(
             .service_repository(&context, &specification.service_id)
             .ok_or(CoreError::NotFound("service_repository"))?;
         let repository = core.repository(&context, &relation.repository_id).ok_or(CoreError::NotFound("repository"))?;
-        (specification, binding, repository.id.clone(), repository.canonical_url.clone())
+        let credential = repository_credential(&inner, &context, &repository.provider)?;
+        (specification, binding, repository.id.clone(), repository.canonical_url.clone(), credential)
     };
 
-    let provider_root = std::env::temp_dir().join(format!("specx-git-sync-{}", uuid::Uuid::new_v4()));
-    let current_content_hash = (!expected.content_hash.is_empty()).then_some(expected.content_hash.clone());
-    let ref_kind = binding.ref_kind;
-    let ref_name = binding.ref_name.clone();
-    let path = binding.path.clone();
-    let sync = tokio::task::spawn_blocking(move || {
-        let result = CommandGitProvider::new(&provider_root).and_then(|provider| {
-            let controller = MarkdownDocumentController::new(provider);
-            controller.reconcile(&MarkdownDocumentRequest {
-                repository_url,
-                ref_kind,
-                ref_name,
-                path,
-                current_content_hash,
-            })
-        });
-        let _ = std::fs::remove_dir_all(&provider_root);
-        result
-    })
-    .await
-    .map_err(|_| ApiError::RepositorySyncFailed)??;
     let synced_at = Utc::now().to_rfc3339();
-
-    let snapshot_input = RepositorySnapshot {
-        id: uuid::Uuid::new_v4().to_string(),
-        tenant_id: context.tenant_id.clone(),
-        workspace_id: context.workspace_id.clone(),
-        repository_id: repository_id.clone(),
-        source_ref: binding.ref_name.clone(),
-        resolved_commit: sync.resolved_commit.clone(),
-        manifest_hash: sync.manifest_hash.clone(),
-        content_root_ref: None,
-        fetched_at: synced_at.clone(),
-        provider_version: sync.provider_version.clone(),
-        created_at: synced_at.clone(),
+    let fetched =
+        fetch_repository_snapshot(repository_url, binding.ref_kind, binding.ref_name.clone(), credential).await?;
+    let snapshot =
+        persist_repository_snapshot(&state, &context, &repository_id, &binding.ref_name, &fetched, &synced_at).await?;
+    let content = {
+        let inner = state.inner.lock().await;
+        read_repository_snapshot_file(&state, &inner, &snapshot.id, &binding.path)?
     };
-    let (specification, snapshot_id) = if sync.changed {
+    let content_hash = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+    let changed = expected.content_hash != content_hash;
+    let (specification, snapshot_id) = if changed {
         let mut inner = state.inner.lock().await;
         let mut core = load_core(&mut inner, &context)?;
         let current = core
@@ -2875,8 +3534,7 @@ async fn sync_specification(
         if SpecificationResponse::from(current.clone()).etag != SpecificationResponse::from(expected.clone()).etag {
             return Err(ApiError::PreconditionFailed);
         }
-        let updated = core.update_managed_specification_content(&context, &specification_id, sync.content.clone())?;
-        let snapshot = core.record_repository_snapshot(&context, snapshot_input.clone())?;
+        let updated = core.update_managed_specification_content(&context, &specification_id, content.clone())?;
         let audit = audit_event(&context, &headers, "sync", "specification", &specification_id);
         if !inner.store.update_specification_if_current_with_audit_and_snapshot(
             &context,
@@ -2898,12 +3556,7 @@ async fn sync_specification(
             .ok_or(CoreError::NotFound("specification"))?;
         (specification, snapshot.id)
     } else {
-        let mut inner = state.inner.lock().await;
-        let mut core = load_core(&mut inner, &context)?;
-        let snapshot = core.record_repository_snapshot(&context, snapshot_input)?;
-        inner.store.upsert_repository_snapshot(&context, &snapshot)?;
-        inner.seed_core = None;
-        (expected.clone(), snapshot.id)
+        (expected.clone(), snapshot.id.clone())
     };
 
     let specification_response: SpecificationResponse = specification.into();
@@ -2911,12 +3564,12 @@ async fn sync_specification(
     let response = SpecificationSyncResponse {
         specification: specification_response,
         snapshot_id,
-        manifest_hash: sync.manifest_hash,
-        resolved_commit: sync.resolved_commit,
-        content_hash: sync.content_hash,
-        changed: sync.changed,
+        manifest_hash: fetched.manifest_hash,
+        resolved_commit: fetched.resolved_commit,
+        content_hash,
+        changed,
         synced_at,
-        provider_version: sync.provider_version,
+        provider_version: fetched.provider_version,
     };
     Ok(response_with_etag(response, etag))
 }
@@ -3299,6 +3952,19 @@ async fn create_specification(
         .find(|value| value.id == specification_id)
         .cloned()
         .ok_or(CoreError::NotFound("specification"))?;
+    if let Some(binding) = persisted_core.specification_code_binding(&context, &specification_id)
+        && binding.ref_kind == SpecificationRefKind::Branch
+        && !binding.path.is_empty()
+        && let Some(relation) = persisted_core.service_repository(&context, &specification.service_id)
+    {
+        upsert_repository_schedule(
+            &inner.store,
+            &context,
+            &relation.repository_id,
+            binding.ref_kind,
+            &binding.ref_name,
+        )?;
+    }
     let response = SpecificationResponse::from(specification);
     let etag = specification_etag(&response);
     Ok(response_with_etag(response, etag))
@@ -3537,7 +4203,7 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
 #[openapi(
     info(title = "specX API", version = "1.0.0", description = "Service catalog and specification API."),
     servers((url = "/api/specx")),
-    paths(health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, get_specification_code_binding, set_specification_code_binding, delete_specification_code_binding, get_specification_sync_status, sync_specification, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, list_code_sources, create_code_source, update_code_source, delete_code_source, get_service_repository, link_service_repository, unlink_service_repository, list_service_code_bindings, create_code_binding, update_code_binding, delete_code_binding, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
+    paths(health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, get_specification_code_binding, set_specification_code_binding, delete_specification_code_binding, get_specification_sync_status, sync_specification, discover_repository_files, enqueue_repository_reconcile, get_controller_task, repository_webhook, list_secrets, create_secret, update_secret, delete_secret, list_integrations, create_integration, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, list_code_sources, create_code_source, update_code_source, delete_code_source, get_service_repository, link_service_repository, unlink_service_repository, list_service_code_bindings, create_code_binding, update_code_binding, delete_code_binding, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
     components(schemas(
         HealthResponse,
         ReadyResponse,
@@ -3546,6 +4212,18 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
         TagPageResponse,
         SpecificationPageResponse,
         SpecificationSyncResponse,
+        RepositoryDiscoveryQuery,
+        RepositoryFileResponse,
+        RepositoryDiscoveryResponse,
+        ControllerTaskResponse,
+        RepositoryWebhookRequest,
+        CreateSecretRequest,
+        SecretResponse,
+        SecretPageResponse,
+        UpdateSecretRequest,
+        CreateIntegrationRequest,
+        IntegrationResponse,
+        IntegrationPageResponse,
         SpecificationRevisionPageResponse,
         SpecificationRevisionResponse,
         ServicePageResponse,

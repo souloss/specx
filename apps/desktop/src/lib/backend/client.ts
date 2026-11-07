@@ -12,6 +12,7 @@ import type {
   SpecificationRefKind,
   SpecificationResponse,
   SpecificationSyncResponse,
+  RepositoryDiscoveryResponse,
   SpecificationRevisionPageResponse,
   SpecificationRevisionResponse,
   WorkspaceListResponse,
@@ -191,6 +192,10 @@ export const specxApi = {
   },
   getSpecificationSyncStatus(workspaceId: string, specificationId: string) {
     return request<SpecificationSyncResponse>(`/api/specx/specifications/${encodeURIComponent(specificationId)}/sync-status`, {}, workspaceId);
+  },
+  discoverRepositoryFiles(workspaceId: string, repositoryId: string, refKind: SpecificationRefKind, refName: string) {
+    const query = new URLSearchParams({ refKind, refName });
+    return request<RepositoryDiscoveryResponse>(`/api/specx/repositories/${encodeURIComponent(repositoryId)}/files?${query}`, {}, workspaceId);
   },
   createTag(workspaceId: string, tag: { id: string; name: string; color: string }) {
     return request<unknown>("/api/specx/tags", { method: "POST", headers: { "idempotency-key": idempotencyKey("tag") }, body: tag }, workspaceId);

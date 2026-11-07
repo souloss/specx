@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { GitBranch, Save, Trash2 } from "@lucide/vue";
+import { FileSearch, GitBranch, Save, Trash2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogFooter, DialogHeader, DialogScrollContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -21,10 +21,14 @@ const refKind = ref<SpecificationRefKind>("branch");
 const refName = ref("");
 const path = ref("");
 const confirmRemove = ref(false);
+const discovering = ref(false);
+const fileSearch = ref("");
+const discoveredFiles = ref<Array<{ path: string; byteLength: number; contentHash: string }>>([]);
 const binding = computed(() => workspace.specificationCodeBindingFor(props.specificationId));
 const managed = computed(() => Boolean(binding.value?.path));
 const repository = computed(() => workspace.serviceRepositoryFor(props.serviceId));
-const canSave = computed(() => Boolean(repository.value) && Boolean(refName.value.trim()) && !busy.value && !managed.value);
+const canSave = computed(() => Boolean(repository.value) && Boolean(refName.value.trim()) && Boolean(path.value.trim()) && !busy.value && !managed.value);
+const filteredFiles = computed(() => discoveredFiles.value.filter((file) => file.path.toLowerCase().includes(fileSearch.value.trim().toLowerCase())));
 let loadRevision = 0;
 
 const refLabel = (kind: SpecificationRefKind) => t(`specification.refKind${kind[0].toUpperCase() + kind.slice(1)}` as "specification.refKindBranch" | "specification.refKindTag" | "specification.refKindCommit");
@@ -37,6 +41,8 @@ watch(
     loaded.value = false;
     error.value = "";
     confirmRemove.value = false;
+    discoveredFiles.value = [];
+    fileSearch.value = "";
     busy.value = true;
     try {
       await Promise.all([workspace.loadServiceRepository(serviceId), workspace.loadSpecificationCodeBinding(specificationId)]);
@@ -66,6 +72,20 @@ async function save() {
     error.value = cause instanceof Error ? cause.message : t("specification.codeVersionSaveFailed");
   } finally {
     busy.value = false;
+  }
+}
+
+async function discoverFiles() {
+  if (!repository.value || !refName.value.trim() || discovering.value || managed.value) return;
+  discovering.value = true;
+  error.value = "";
+  try {
+    const result = await workspace.discoverRepositoryFiles(repository.value.repository.id, refKind.value, refName.value.trim());
+    discoveredFiles.value = result.files;
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : t("specification.discoveryFailed");
+  } finally {
+    discovering.value = false;
   }
 }
 
@@ -125,9 +145,23 @@ async function remove() {
             </div>
           </div>
           <div class="space-y-2">
-            <Label for="spec-source-path">{{ t("specification.sourcePath") }}</Label>
+            <div class="flex items-center justify-between gap-2">
+              <Label for="spec-source-path">{{ t("specification.sourcePath") }}</Label
+              ><Button variant="outline" size="sm" :disabled="busy || discovering || managed || !refName.trim()" @click="discoverFiles"><FileSearch class="size-3.5" />{{ discovering ? t("specification.discoveringFiles") : t("specification.discoverFiles") }}</Button>
+            </div>
             <Input id="spec-source-path" v-model="path" :placeholder="t('specification.sourcePathPlaceholder')" :disabled="busy || Boolean(binding)" />
             <p class="text-xs text-muted-foreground">{{ t("specification.sourcePathDescription") }}</p>
+            <div v-if="discoveredFiles.length" class="space-y-2 rounded-md border border-border bg-muted/10 p-2">
+              <Input v-model="fileSearch" :placeholder="t('specification.fileSearchPlaceholder')" />
+              <p class="text-xs font-medium text-muted-foreground">{{ t("specification.selectMarkdownFile") }}</p>
+              <div class="max-h-36 space-y-1 overflow-y-auto">
+                <button v-for="file in filteredFiles" :key="file.path" type="button" class="flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :class="path === file.path ? 'bg-primary/10 text-primary' : ''" @click="path = file.path">
+                  <span class="truncate">{{ file.path }}</span
+                  ><span class="ml-2 shrink-0 text-muted-foreground">{{ file.byteLength }} B</span>
+                </button>
+                <p v-if="!filteredFiles.length" class="px-2 py-2 text-xs text-muted-foreground">{{ t("specification.noMarkdownFiles") }}</p>
+              </div>
+            </div>
           </div>
           <p v-if="binding" class="text-xs text-muted-foreground">{{ t("specification.codeVersionBound", { kind: refLabel(binding.refKind), name: binding.refName }) }}</p>
           <p v-if="managed" class="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">{{ t("specification.managedReadOnlyDescription") }}</p>

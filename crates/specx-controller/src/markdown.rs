@@ -40,6 +40,7 @@ where
             ref_kind: request.ref_kind,
             ref_name: request.ref_name.clone(),
             path: request.path.clone(),
+            credential: None,
         })?;
         let content = normalize_line_endings(&snapshot.content);
         let digest = Sha256::digest(content.as_bytes());

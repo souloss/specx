@@ -29,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         api = api.with_public_origin(&origin)?;
     }
     api = api.with_backup_storage_from_env().await?;
+    api = api.with_webhook_secret(env::var("SPECX_WEBHOOK_SECRET").ok());
 
     let password = env::var("SPECX_PASSWORD").map_err(|_| "SPECX_PASSWORD must be set")?;
     if password.len() < 12 {
@@ -40,7 +41,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let static_index = paths.static_dir.join("index.html");
+    let worker_api = api.clone();
     let api_router = specx_api::router::<auth::HostState>(api);
+    let worker_interval = env::var("SPECX_CONTROLLER_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(5)
+        .max(1);
+    tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(worker_interval);
+        loop {
+            if let Err(error) = worker_api.run_repository_poller_once(100).await {
+                tracing::warn!(%error, "repository poller iteration failed");
+            }
+            if let Err(error) = worker_api.run_controller_once(16).await {
+                tracing::warn!(%error, "controller worker iteration failed");
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
     let app = Router::new()
         .merge(auth::router())
         .nest("/api/specx", api_router)

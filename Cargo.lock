@@ -2208,9 +2208,13 @@ dependencies = [
 name = "specx-api"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "aws-sdk-s3",
  "axum",
+ "base64 0.22.1",
  "chrono",
+ "hex",
+ "hmac 0.12.1",
  "http 1.5.0",
  "http-body-util",
  "serde",
@@ -2218,6 +2222,7 @@ dependencies = [
  "sha2 0.10.9",
  "specx-controller",
  "specx-core",
+ "specx-types",
  "tempfile",
  "tokio",
  "tower",

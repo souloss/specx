@@ -324,6 +324,11 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     return result;
   }
 
+  async function discoverRepositoryFiles(repositoryId: string, refKind: SpecificationRefKind, refName: string) {
+    if (!catalog.value) throw new Error(translate("apiError.forbidden"));
+    return specxApi.discoverRepositoryFiles(catalog.value.workspace.id, repositoryId, refKind, refName);
+  }
+
   async function setSpecificationCodeBinding(specificationId: string, refKind: SpecificationRefKind, refName: string, path: string) {
     if (!catalog.value) throw new Error(translate("apiError.forbidden"));
     const current = specificationCodeBindingFor(specificationId);
@@ -569,6 +574,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     specificationSyncs,
     specificationSyncFor,
     syncSpecification,
+    discoverRepositoryFiles,
     setSpecificationCodeBinding,
     deleteSpecificationCodeBinding,
     selectService,

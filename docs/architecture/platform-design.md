@@ -4,7 +4,7 @@
 
 本文定义 SpecX 的长期建模方向。它借鉴 Kubernetes 的资源、声明式配置、标签选择器和插件思想，但不把 Kubernetes 的全部控制面、调度器或 YAML 接口照搬进来。本文中标记为“目标”或“后续”的内容不代表当前已经实现；可执行行为仍以代码、OpenAPI 和迁移为准。
 
-当前已落地通用基础：`specx-types` 提供资源引用、状态、条件、事件和内容引用契约，`specx-controller` 提供宿主内控制器运行时、事件按 Kind 分发、代际去重、有限重试、文件 ContentStore、Git Provider 和 Markdown Document Controller。Markdown 控制器已通过规范同步 API 接入；手动同步会持久化去重的 `RepositorySnapshot` 元数据。持久任务队列、Webhook/Poller 自动唤醒、快照内容根托管和独立 Repository Controller 仍属于后续纵向 Story。
+当前已落地通用基础：`specx-types` 提供资源引用、状态、条件、事件和内容引用契约，`specx-controller` 提供宿主内控制器运行时、事件按 Kind 分发、代际去重、有限重试、文件 ContentStore、Git Provider、Repository Controller 和 Markdown Document Controller。API 与 Web Host 已接入持久任务、租约恢复、分支轮询、签名 Webhook、快照文件发现、加密 Secret/Integration 和后台 worker；手动与自动同步共用不可变 RepositorySnapshot 交接。
 
 ## 1. 目标与边界
 

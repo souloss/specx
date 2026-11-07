@@ -17,6 +17,11 @@ The frontend opens on the Vite URL shown in the terminal and proxies `/api` requ
 SPECX_PASSWORD='choose-a-password-at-least-12-chars' pnpm dev:backend
 ```
 
+启用私有仓库凭据和仓库 Webhook 时，另外设置 `SPECX_SECRET_KEY`（用于 AES-GCM
+密钥派生）和 `SPECX_WEBHOOK_SECRET`（用于 `sha256=` HMAC 签名校验）。Web Host
+会在后台周期性运行 Repository Controller；可用 `SPECX_CONTROLLER_INTERVAL_SECONDS`
+调整执行间隔，`SPECX_REPOSITORY_POLL_INTERVAL_SECONDS` 调整分支轮询间隔。
+
 The host stores local data in `SPECX_DATA_DIR/specx.sqlite` by default. Set `SPECX_DATABASE_URL` to select a backend explicitly: use `sqlite:///absolute/path/specx.sqlite` for SQLite or `postgres://user:password@host/specx` for PostgreSQL. Both backends expose the same API and domain operations. The browser uses a server-side password session and reads or writes catalog data through `/api/specx`; only temporary panel state stays in local storage.
 
 To run the native desktop shell, use `pnpm dev:desktop`; `pnpm build:desktop` creates the platform installer. Desktop data defaults to the operating system's application data directory. It accepts the same `SPECX_DATABASE_URL` schemes as the Web host.

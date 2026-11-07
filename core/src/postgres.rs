@@ -9,8 +9,9 @@
 //! connections are pooled and must never block an HTTP executor thread.
 
 use crate::persistence::{
-    AuditEvent, BackupArtifact, IdempotencyRecord, LATEST_SCHEMA_VERSION, PersistenceError, SpecificationRevision,
-    WebSession, WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
+    AuditEvent, BackupArtifact, ControllerTask, IdempotencyRecord, IntegrationRecord, LATEST_SCHEMA_VERSION,
+    PersistenceError, RepositorySnapshotFile, RepositorySyncSchedule, SecretRecord, SpecificationRevision, WebSession,
+    WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
 };
 use crate::{
     CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Core,
@@ -556,6 +557,51 @@ impl PostgresStore {
             .execute("INSERT INTO schema_migrations(version) VALUES (16) ON CONFLICT DO NOTHING", &[])
             .await
             .map_err(pg_error)?;
+        transaction
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS controller_tasks (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   controller_id TEXT NOT NULL, resource_kind TEXT NOT NULL, resource_id TEXT NOT NULL,
+                   generation BIGINT NOT NULL, deduplication_key TEXT NOT NULL,
+                   status TEXT NOT NULL, attempts BIGINT NOT NULL DEFAULT 0, next_run_at TEXT NOT NULL,
+                   lease_until TEXT, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                   UNIQUE (tenant_id, workspace_id, controller_id, deduplication_key)
+                 );
+                 CREATE INDEX IF NOT EXISTS controller_tasks_due ON controller_tasks(status, next_run_at, lease_until);
+                 CREATE TABLE IF NOT EXISTS repository_snapshot_files (
+                   snapshot_id TEXT NOT NULL REFERENCES repository_snapshots(id) ON DELETE CASCADE,
+                   path TEXT NOT NULL, content_ref TEXT NOT NULL, content_hash TEXT NOT NULL,
+                   byte_length BIGINT NOT NULL, media_type TEXT NOT NULL,
+                   PRIMARY KEY (snapshot_id, path)
+                 );
+                 CREATE TABLE IF NOT EXISTS secrets (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   name TEXT NOT NULL, encrypted_value TEXT NOT NULL, key_version BIGINT NOT NULL,
+                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                   UNIQUE (tenant_id, workspace_id, name)
+                 );
+                 CREATE TABLE IF NOT EXISTS integrations (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   provider TEXT NOT NULL, display_name TEXT NOT NULL, secret_id TEXT REFERENCES secrets(id) ON DELETE SET NULL,
+                   permissions TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                   UNIQUE (tenant_id, workspace_id, provider, display_name)
+                 );
+                 CREATE TABLE IF NOT EXISTS repository_sync_schedules (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+                   ref_kind TEXT NOT NULL, ref_name TEXT NOT NULL, interval_seconds BIGINT NOT NULL,
+                   enabled BOOLEAN NOT NULL DEFAULT TRUE, next_run_at TEXT NOT NULL,
+                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                   UNIQUE (tenant_id, workspace_id, repository_id, ref_kind, ref_name)
+                 );
+                 CREATE INDEX IF NOT EXISTS repository_sync_schedules_due ON repository_sync_schedules(enabled, next_run_at);",
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (17) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
         transaction.commit().await.map_err(pg_error)?;
         Ok(())
     }
@@ -1071,10 +1117,10 @@ impl PostgresStore {
         {
             return Err(PersistenceError::new("specification update scope does not match"));
         }
-        if let Some(snapshot) = snapshot {
-            if snapshot.tenant_id != context.tenant_id || snapshot.workspace_id != context.workspace_id {
-                return Err(PersistenceError::new("repository snapshot scope does not match"));
-            }
+        if let Some(snapshot) = snapshot
+            && (snapshot.tenant_id != context.tenant_id || snapshot.workspace_id != context.workspace_id)
+        {
+            return Err(PersistenceError::new("repository snapshot scope does not match"));
         }
 
         let mut client = self.client().await?;
@@ -1169,6 +1215,277 @@ impl PostgresStore {
             .await
             .map_err(pg_error)?;
         Ok(())
+    }
+
+    pub async fn upsert_repository_snapshot_file(&self, file: &RepositorySnapshotFile) -> Result<(), PersistenceError> {
+        let client = self.client().await?;
+        client.execute(
+            "INSERT INTO repository_snapshot_files(snapshot_id,path,content_ref,content_hash,byte_length,media_type)
+             VALUES($1,$2,$3,$4,$5,$6)
+             ON CONFLICT(snapshot_id,path) DO UPDATE SET content_ref=excluded.content_ref,content_hash=excluded.content_hash,byte_length=excluded.byte_length,media_type=excluded.media_type",
+            &[&file.snapshot_id, &file.path, &file.content_ref, &file.content_hash, &file.byte_length, &file.media_type],
+        ).await.map_err(pg_error)?;
+        Ok(())
+    }
+
+    pub async fn repository_snapshot_files(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Vec<RepositorySnapshotFile>, PersistenceError> {
+        let client = self.client().await?;
+        let rows = client.query(
+            "SELECT snapshot_id,path,content_ref,content_hash,byte_length,media_type FROM repository_snapshot_files WHERE snapshot_id=$1 ORDER BY path",
+            &[&snapshot_id],
+        ).await.map_err(pg_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| RepositorySnapshotFile {
+                snapshot_id: row.get(0),
+                path: row.get(1),
+                content_ref: row.get(2),
+                content_hash: row.get(3),
+                byte_length: row.get(4),
+                media_type: row.get(5),
+            })
+            .collect())
+    }
+
+    pub async fn enqueue_controller_task(&self, task: &ControllerTask) -> Result<bool, PersistenceError> {
+        let client = self.client().await?;
+        let changed = client.execute(
+            "INSERT INTO controller_tasks(id,tenant_id,workspace_id,controller_id,resource_kind,resource_id,generation,deduplication_key,status,attempts,next_run_at,lease_until,last_error,created_at,updated_at)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,'pending',0,$9,NULL,NULL,$10,$10)
+             ON CONFLICT(tenant_id,workspace_id,controller_id,deduplication_key) DO UPDATE SET status='pending',next_run_at=excluded.next_run_at,lease_until=NULL,last_error=NULL,updated_at=excluded.updated_at
+             WHERE controller_tasks.status IN ('succeeded','failed')",
+            &[&task.id,&task.tenant_id,&task.workspace_id,&task.controller_id,&task.resource_kind,&task.resource_id,&task.generation,&task.deduplication_key,&task.next_run_at,&task.created_at],
+        ).await.map_err(pg_error)?;
+        Ok(changed == 1)
+    }
+
+    pub async fn claim_due_controller_tasks(
+        &self,
+        now: &str,
+        lease_until: &str,
+        limit: usize,
+    ) -> Result<Vec<ControllerTask>, PersistenceError> {
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(pg_error)?;
+        let rows = transaction.query(
+            "SELECT id,tenant_id,workspace_id,controller_id,resource_kind,resource_id,generation,deduplication_key,status,attempts,next_run_at,lease_until,last_error,created_at,updated_at
+             FROM controller_tasks WHERE (status='pending' AND next_run_at <= $1) OR (status='running' AND lease_until <= $1)
+             ORDER BY next_run_at,id LIMIT $2 FOR UPDATE SKIP LOCKED",
+            &[&now, &(limit as i64)],
+        ).await.map_err(pg_error)?;
+        let mut tasks = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.get(0);
+            transaction.execute("UPDATE controller_tasks SET status='running',attempts=attempts+1,lease_until=$1,updated_at=$2 WHERE id=$3", &[&lease_until,&now,&id]).await.map_err(pg_error)?;
+            tasks.push(ControllerTask {
+                id,
+                tenant_id: row.get(1),
+                workspace_id: row.get(2),
+                controller_id: row.get(3),
+                resource_kind: row.get(4),
+                resource_id: row.get(5),
+                generation: row.get(6),
+                deduplication_key: row.get(7),
+                status: "running".into(),
+                attempts: row.get::<_, i64>(9) + 1,
+                next_run_at: row.get(10),
+                lease_until: Some(lease_until.into()),
+                last_error: row.get(12),
+                created_at: row.get(13),
+                updated_at: now.into(),
+            });
+        }
+        transaction.commit().await.map_err(pg_error)?;
+        Ok(tasks)
+    }
+
+    pub async fn controller_task(&self, task_id: &str) -> Result<Option<ControllerTask>, PersistenceError> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT id,tenant_id,workspace_id,controller_id,resource_kind,resource_id,generation,deduplication_key,status,attempts,next_run_at,lease_until,last_error,created_at,updated_at FROM controller_tasks WHERE id=$1",
+                &[&task_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        Ok(row.map(|row| ControllerTask {
+            id: row.get(0),
+            tenant_id: row.get(1),
+            workspace_id: row.get(2),
+            controller_id: row.get(3),
+            resource_kind: row.get(4),
+            resource_id: row.get(5),
+            generation: row.get(6),
+            deduplication_key: row.get(7),
+            status: row.get(8),
+            attempts: row.get(9),
+            next_run_at: row.get(10),
+            lease_until: row.get(11),
+            last_error: row.get(12),
+            created_at: row.get(13),
+            updated_at: row.get(14),
+        }))
+    }
+
+    pub async fn complete_controller_task(&self, task_id: &str, now: &str) -> Result<bool, PersistenceError> {
+        Ok(self.client().await?.execute("UPDATE controller_tasks SET status='succeeded',lease_until=NULL,last_error=NULL,updated_at=$1 WHERE id=$2 AND status='running'", &[&now,&task_id]).await.map_err(pg_error)? == 1)
+    }
+
+    pub async fn fail_controller_task(
+        &self,
+        task_id: &str,
+        retry: bool,
+        error: &str,
+        next_run_at: &str,
+        now: &str,
+    ) -> Result<bool, PersistenceError> {
+        let status = if retry { "pending" } else { "failed" };
+        Ok(self.client().await?.execute("UPDATE controller_tasks SET status=$1,lease_until=NULL,last_error=$2,next_run_at=$3,updated_at=$4 WHERE id=$5 AND status='running'", &[&status,&error,&next_run_at,&now,&task_id]).await.map_err(pg_error)? == 1)
+    }
+
+    pub async fn upsert_repository_sync_schedule(
+        &self,
+        schedule: &RepositorySyncSchedule,
+    ) -> Result<(), PersistenceError> {
+        let client = self.client().await?;
+        client.execute(
+            "INSERT INTO repository_sync_schedules(id,tenant_id,workspace_id,repository_id,ref_kind,ref_name,interval_seconds,enabled,next_run_at,created_at,updated_at)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
+             ON CONFLICT(tenant_id,workspace_id,repository_id,ref_kind,ref_name) DO UPDATE SET interval_seconds=excluded.interval_seconds,enabled=excluded.enabled,next_run_at=excluded.next_run_at,updated_at=excluded.updated_at",
+            &[&schedule.id,&schedule.tenant_id,&schedule.workspace_id,&schedule.repository_id,&schedule.ref_kind,&schedule.ref_name,&schedule.interval_seconds,&schedule.enabled,&schedule.next_run_at,&schedule.created_at],
+        ).await.map_err(pg_error)?;
+        Ok(())
+    }
+
+    pub async fn due_repository_sync_schedules(
+        &self,
+        now: &str,
+        limit: usize,
+    ) -> Result<Vec<RepositorySyncSchedule>, PersistenceError> {
+        let rows = self.client().await?.query("SELECT id,tenant_id,workspace_id,repository_id,ref_kind,ref_name,interval_seconds,enabled,next_run_at,created_at,updated_at FROM repository_sync_schedules WHERE enabled=TRUE AND next_run_at <= $1 ORDER BY next_run_at,id LIMIT $2", &[&now,&(limit as i64)]).await.map_err(pg_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| RepositorySyncSchedule {
+                id: row.get(0),
+                tenant_id: row.get(1),
+                workspace_id: row.get(2),
+                repository_id: row.get(3),
+                ref_kind: row.get(4),
+                ref_name: row.get(5),
+                interval_seconds: row.get(6),
+                enabled: row.get(7),
+                next_run_at: row.get(8),
+                created_at: row.get(9),
+                updated_at: row.get(10),
+            })
+            .collect())
+    }
+
+    pub async fn advance_repository_sync_schedule(
+        &self,
+        id: &str,
+        next_run_at: &str,
+        now: &str,
+    ) -> Result<bool, PersistenceError> {
+        Ok(self
+            .client()
+            .await?
+            .execute(
+                "UPDATE repository_sync_schedules SET next_run_at=$1,updated_at=$2 WHERE id=$3",
+                &[&next_run_at, &now, &id],
+            )
+            .await
+            .map_err(pg_error)?
+            == 1)
+    }
+
+    pub async fn upsert_secret(&self, secret: &SecretRecord) -> Result<(), PersistenceError> {
+        self.client().await?.execute("INSERT INTO secrets(id,tenant_id,workspace_id,name,encrypted_value,key_version,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id,workspace_id,name) DO UPDATE SET encrypted_value=excluded.encrypted_value,key_version=excluded.key_version,updated_at=excluded.updated_at", &[&secret.id,&secret.tenant_id,&secret.workspace_id,&secret.name,&secret.encrypted_value,&secret.key_version,&secret.created_at,&secret.updated_at]).await.map_err(pg_error)?;
+        Ok(())
+    }
+
+    pub async fn secret_by_id(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        id: &str,
+    ) -> Result<Option<SecretRecord>, PersistenceError> {
+        let row = self.client().await?.query_opt("SELECT id,tenant_id,workspace_id,name,encrypted_value,key_version,created_at,updated_at FROM secrets WHERE tenant_id=$1 AND workspace_id=$2 AND id=$3", &[&tenant_id,&workspace_id,&id]).await.map_err(pg_error)?;
+        Ok(row.map(|row| SecretRecord {
+            id: row.get(0),
+            tenant_id: row.get(1),
+            workspace_id: row.get(2),
+            name: row.get(3),
+            encrypted_value: row.get(4),
+            key_version: row.get(5),
+            created_at: row.get(6),
+            updated_at: row.get(7),
+        }))
+    }
+
+    pub async fn list_secrets(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<SecretRecord>, PersistenceError> {
+        let rows = self.client().await?.query("SELECT id,tenant_id,workspace_id,name,encrypted_value,key_version,created_at,updated_at FROM secrets WHERE tenant_id=$1 AND workspace_id=$2 ORDER BY name,id", &[&tenant_id,&workspace_id]).await.map_err(pg_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| SecretRecord {
+                id: row.get(0),
+                tenant_id: row.get(1),
+                workspace_id: row.get(2),
+                name: row.get(3),
+                encrypted_value: row.get(4),
+                key_version: row.get(5),
+                created_at: row.get(6),
+                updated_at: row.get(7),
+            })
+            .collect())
+    }
+
+    pub async fn delete_secret(&self, tenant_id: &str, workspace_id: &str, id: &str) -> Result<bool, PersistenceError> {
+        Ok(self
+            .client()
+            .await?
+            .execute(
+                "DELETE FROM secrets WHERE tenant_id=$1 AND workspace_id=$2 AND id=$3",
+                &[&tenant_id, &workspace_id, &id],
+            )
+            .await
+            .map_err(pg_error)?
+            == 1)
+    }
+
+    pub async fn upsert_integration(&self, integration: &IntegrationRecord) -> Result<(), PersistenceError> {
+        self.client().await?.execute("INSERT INTO integrations(id,tenant_id,workspace_id,provider,display_name,secret_id,permissions,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(tenant_id,workspace_id,provider,display_name) DO UPDATE SET secret_id=excluded.secret_id,permissions=excluded.permissions,updated_at=excluded.updated_at", &[&integration.id,&integration.tenant_id,&integration.workspace_id,&integration.provider,&integration.display_name,&integration.secret_id,&integration.permissions,&integration.created_at,&integration.updated_at]).await.map_err(pg_error)?;
+        Ok(())
+    }
+
+    pub async fn list_integrations(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<IntegrationRecord>, PersistenceError> {
+        let rows = self.client().await?.query("SELECT id,tenant_id,workspace_id,provider,display_name,secret_id,permissions,created_at,updated_at FROM integrations WHERE tenant_id=$1 AND workspace_id=$2 ORDER BY display_name,id", &[&tenant_id,&workspace_id]).await.map_err(pg_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| IntegrationRecord {
+                id: row.get(0),
+                tenant_id: row.get(1),
+                workspace_id: row.get(2),
+                provider: row.get(3),
+                display_name: row.get(4),
+                secret_id: row.get(5),
+                permissions: row.get(6),
+                created_at: row.get(7),
+                updated_at: row.get(8),
+            })
+            .collect())
     }
 
     pub async fn update_specification_code_binding_if_current_with_audit(

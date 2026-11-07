@@ -23,6 +23,10 @@ For a pre-built image, set `SPECX_IMAGE` to its published image reference and us
 | `SPECX_DATA_DIR` | `/app/data` | Local SQLite data directory. |
 | `SPECX_DATABASE_URL` | unset | Optional backend URL. Use `sqlite:///app/data/specx.sqlite` or a `postgres://` / `postgresql://` URL. |
 | `SPECX_DATABASE_MAX_POOL_SIZE` | `16` | Maximum PostgreSQL connection pool size. |
+| `SPECX_SECRET_KEY` | unset | AES-GCM key material for encrypted private repository credentials. Required before creating a Secret. Keep it stable across restarts. |
+| `SPECX_WEBHOOK_SECRET` | unset | HMAC secret for repository webhook requests. Set it to enable signed `sha256=` webhook delivery. |
+| `SPECX_CONTROLLER_INTERVAL_SECONDS` | `5` | Background controller worker interval. |
+| `SPECX_REPOSITORY_POLL_INTERVAL_SECONDS` | `300` | Minimum branch polling interval after a repository-backed specification is configured. |
 | `SPECX_BACKUP_ROOT` | `/app/backups` | Local backup directory. |
 | `SPECX_PUBLIC_ORIGIN` | `http://localhost:4224` | Public origin used by API write protections behind a reverse proxy. |
 | `SPECX_BIND_ADDR` | `0.0.0.0` | Listener address inside the container. |

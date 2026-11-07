@@ -9,6 +9,8 @@ use std::{
 };
 
 const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REPOSITORY_FILES: usize = 20_000;
+const MAX_REPOSITORY_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitFileRequest {
@@ -16,6 +18,43 @@ pub struct GitFileRequest {
     pub ref_kind: SpecificationRefKind,
     pub ref_name: String,
     pub path: String,
+    pub credential: Option<GitCredential>,
+}
+
+/// Short-lived provider context. The token is passed to Git through an
+/// in-memory configuration environment and is never included in a repository
+/// URL or persisted with a snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitCredential {
+    pub username: Option<String>,
+    pub bearer_token: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitRepositoryRequest {
+    pub repository_url: String,
+    pub ref_kind: SpecificationRefKind,
+    pub ref_name: String,
+    pub credential: Option<GitCredential>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryFile {
+    pub path: String,
+    pub content: Vec<u8>,
+    pub content_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitRepositorySnapshot {
+    pub resolved_commit: String,
+    pub manifest_hash: String,
+    pub files: Vec<RepositoryFile>,
+    pub provider_version: String,
+}
+
+pub trait GitRepositoryProvider: Send + Sync {
+    fn fetch_repository(&self, request: &GitRepositoryRequest) -> Result<GitRepositorySnapshot, GitProviderError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,6 +128,7 @@ impl From<io::Error> for GitProviderError {
 pub struct CommandGitProvider {
     git_binary: String,
     temp_root: PathBuf,
+    credential: Option<GitCredential>,
 }
 
 impl CommandGitProvider {
@@ -98,7 +138,12 @@ impl CommandGitProvider {
         if Command::new(&git_binary).arg("--version").output().is_err() {
             return Err(GitProviderError::GitUnavailable);
         }
-        Ok(Self { git_binary, temp_root: temp_root.as_ref().to_path_buf() })
+        Ok(Self { git_binary, temp_root: temp_root.as_ref().to_path_buf(), credential: None })
+    }
+
+    pub fn with_credential(mut self, credential: Option<GitCredential>) -> Self {
+        self.credential = credential;
+        self
     }
 
     fn checkout_path(&self, request: &GitFileRequest) -> PathBuf {
@@ -115,6 +160,13 @@ impl CommandGitProvider {
         operation: &'static str,
     ) -> Result<Vec<u8>, GitProviderError> {
         let mut command = Command::new(&self.git_binary);
+        if let Some(credential) = &self.credential
+            && let Some(token) = credential.bearer_token.as_deref().filter(|value| !value.trim().is_empty())
+        {
+            command.env("GIT_CONFIG_COUNT", "1");
+            command.env("GIT_CONFIG_KEY_0", "http.extraheader");
+            command.env("GIT_CONFIG_VALUE_0", format!("Authorization: Bearer {token}"));
+        }
         if let Some(directory) = directory {
             command.arg("-C").arg(directory);
         }
@@ -218,6 +270,106 @@ impl GitProvider for CommandGitProvider {
     }
 }
 
+impl GitRepositoryProvider for CommandGitProvider {
+    fn fetch_repository(&self, request: &GitRepositoryRequest) -> Result<GitRepositorySnapshot, GitProviderError> {
+        if request.repository_url.trim().is_empty() || request.ref_name.trim().is_empty() {
+            return Err(GitProviderError::InvalidRequest);
+        }
+        let checkout = self.checkout_path(&GitFileRequest {
+            repository_url: request.repository_url.clone(),
+            ref_kind: request.ref_kind,
+            ref_name: request.ref_name.clone(),
+            path: "snapshot.md".into(),
+            credential: request.credential.clone(),
+        });
+        let result = self.resolve_repository(request, &checkout).and_then(|(commit, manifest, tree_ref)| {
+            let paths = self.run_git(Some(&checkout), &["ls-tree", "-r", "--name-only", &tree_ref], "resolve")?;
+            let mut files = Vec::new();
+            let mut total_bytes = 0usize;
+            for path in String::from_utf8(paths).map_err(|_| GitProviderError::InvalidUtf8)?.lines() {
+                if path.trim().is_empty() {
+                    continue;
+                }
+                if files.len() >= MAX_REPOSITORY_FILES {
+                    return Err(GitProviderError::CommandFailed {
+                        operation: "read_file",
+                        detail: "repository contains too many files".into(),
+                    });
+                }
+                let bytes = self.run_git(Some(&checkout), &["show", &format!("{tree_ref}:{path}")], "read_file")?;
+                if bytes.len() > MAX_DOCUMENT_BYTES || total_bytes.saturating_add(bytes.len()) > MAX_REPOSITORY_BYTES {
+                    return Err(GitProviderError::DocumentTooLarge);
+                }
+                total_bytes = total_bytes.saturating_add(bytes.len());
+                let digest = Sha256::digest(&bytes);
+                files.push(RepositoryFile {
+                    path: path.to_owned(),
+                    content: bytes,
+                    content_hash: format!("sha256:{digest:x}"),
+                });
+            }
+            Ok(GitRepositorySnapshot {
+                resolved_commit: commit,
+                manifest_hash: manifest_hash(&manifest),
+                files,
+                provider_version: "git-cli".into(),
+            })
+        });
+        let _ = fs::remove_dir_all(&checkout);
+        result
+    }
+}
+
+impl CommandGitProvider {
+    fn resolve_repository(
+        &self,
+        request: &GitRepositoryRequest,
+        checkout: &Path,
+    ) -> Result<(String, Vec<u8>, String), GitProviderError> {
+        match request.ref_kind {
+            SpecificationRefKind::Branch | SpecificationRefKind::Tag => {
+                self.run_git(
+                    None,
+                    &[
+                        "clone",
+                        "--quiet",
+                        "--depth",
+                        "1",
+                        "--no-checkout",
+                        "--branch",
+                        &request.ref_name,
+                        &request.repository_url,
+                        checkout.to_str().ok_or(GitProviderError::InvalidRequest)?,
+                    ],
+                    "clone",
+                )?;
+                let commit = self.run_git(Some(checkout), &["rev-parse", "HEAD"], "resolve")?;
+                let commit = String::from_utf8(commit).map_err(|_| GitProviderError::InvalidUtf8)?.trim().to_owned();
+                let manifest = self.run_git(Some(checkout), &["ls-tree", "-r", "--full-tree", "HEAD"], "resolve")?;
+                Ok((commit, manifest, "HEAD".into()))
+            }
+            SpecificationRefKind::Commit => {
+                self.run_git(
+                    None,
+                    &["init", "--quiet", checkout.to_str().ok_or(GitProviderError::InvalidRequest)?],
+                    "clone",
+                )?;
+                self.run_git(Some(checkout), &["remote", "add", "origin", &request.repository_url], "clone")?;
+                self.run_git(
+                    Some(checkout),
+                    &["fetch", "--quiet", "--depth", "1", "origin", &request.ref_name],
+                    "fetch",
+                )?;
+                let commit = self.run_git(Some(checkout), &["rev-parse", "FETCH_HEAD^{commit}"], "resolve")?;
+                let commit = String::from_utf8(commit).map_err(|_| GitProviderError::InvalidUtf8)?.trim().to_owned();
+                let manifest =
+                    self.run_git(Some(checkout), &["ls-tree", "-r", "--full-tree", "FETCH_HEAD"], "resolve")?;
+                Ok((commit, manifest, "FETCH_HEAD".into()))
+            }
+        }
+    }
+}
+
 fn manifest_hash(manifest: &[u8]) -> String {
     let digest = Sha256::digest(manifest);
     format!("sha256:{digest:x}")
@@ -274,6 +426,7 @@ mod tests {
                 ref_kind: SpecificationRefKind::Branch,
                 ref_name: "master".into(),
                 path: "docs/spec.md".into(),
+                credential: None,
             })
             .or_else(|error| {
                 if error.code() == "repository_fetch_failed" {
@@ -284,6 +437,7 @@ mod tests {
                             ref_kind: SpecificationRefKind::Branch,
                             ref_name: "main".into(),
                             path: "docs/spec.md".into(),
+                            credential: None,
                         }
                     })
                 } else {

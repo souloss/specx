@@ -27,10 +27,11 @@ use backup_storage::{BackupObject, BackupStorage};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use specx_controller::GitProviderError;
+use specx_controller::{FileContentStore, GitProviderError};
 use specx_core::persistence::{
-    AuditEvent, BackupArtifact, IdempotencyRecord, LATEST_SCHEMA_VERSION, PersistenceError, SpecificationRevision,
-    SqliteStore, WebSession, WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
+    AuditEvent, BackupArtifact, ControllerTask, IdempotencyRecord, IntegrationRecord, LATEST_SCHEMA_VERSION,
+    PersistenceError, RepositorySnapshotFile, RepositorySyncSchedule, SecretRecord, SpecificationRevision, SqliteStore,
+    WebSession, WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
 };
 #[cfg(feature = "postgres")]
 use specx_core::postgres::PostgresStore;
@@ -56,15 +57,23 @@ fn test_backup_root() -> PathBuf {
     std::env::temp_dir().join(format!("specx-api-backups-{}-{stamp}", std::process::id()))
 }
 
+fn test_content_root() -> PathBuf {
+    let stamp =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
+    std::env::temp_dir().join(format!("specx-api-content-{}-{stamp}", std::process::id()))
+}
+
 #[derive(Clone)]
 pub struct ApiState {
     inner: Arc<Mutex<ApiInner>>,
+    content_store: Arc<FileContentStore>,
     backup_root: Arc<PathBuf>,
     backup_storage: Option<Arc<BackupStorage>>,
     backup_retention: usize,
     metrics: Arc<ApiMetrics>,
     postgres_backend: bool,
     public_origin: Option<PublicOrigin>,
+    webhook_secret: Option<Arc<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -276,6 +285,255 @@ impl StoreBackend {
                 let snapshot = snapshot.clone();
                 run_postgres_future(store.clone(), move |store| async move {
                     store.upsert_repository_snapshot(&context, &snapshot).await
+                })
+            }
+        }
+    }
+
+    fn upsert_repository_snapshot_file(&self, file: &RepositorySnapshotFile) -> Result<(), PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.upsert_repository_snapshot_file(file),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let file = file.clone();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.upsert_repository_snapshot_file(&file).await
+                })
+            }
+        }
+    }
+
+    fn repository_snapshot_files(&self, snapshot_id: &str) -> Result<Vec<RepositorySnapshotFile>, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.repository_snapshot_files(snapshot_id),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let snapshot_id = snapshot_id.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.repository_snapshot_files(&snapshot_id).await
+                })
+            }
+        }
+    }
+
+    fn enqueue_controller_task(&self, task: &ControllerTask) -> Result<bool, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.enqueue_controller_task(task),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let task = task.clone();
+                run_postgres_future(
+                    store.clone(),
+                    move |store| async move { store.enqueue_controller_task(&task).await },
+                )
+            }
+        }
+    }
+
+    fn claim_due_controller_tasks(
+        &self,
+        now: &str,
+        lease_until: &str,
+        limit: usize,
+    ) -> Result<Vec<ControllerTask>, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.claim_due_controller_tasks(now, lease_until, limit),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let now = now.to_owned();
+                let lease_until = lease_until.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.claim_due_controller_tasks(&now, &lease_until, limit).await
+                })
+            }
+        }
+    }
+
+    fn controller_task(&self, task_id: &str) -> Result<Option<ControllerTask>, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.controller_task(task_id),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let task_id = task_id.to_owned();
+                run_postgres_future(store.clone(), move |store| async move { store.controller_task(&task_id).await })
+            }
+        }
+    }
+
+    fn complete_controller_task(&self, task_id: &str, now: &str) -> Result<bool, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.complete_controller_task(task_id, now),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let task_id = task_id.to_owned();
+                let now = now.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.complete_controller_task(&task_id, &now).await
+                })
+            }
+        }
+    }
+
+    fn fail_controller_task(
+        &self,
+        task_id: &str,
+        retry: bool,
+        error: &str,
+        next_run_at: &str,
+        now: &str,
+    ) -> Result<bool, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.fail_controller_task(task_id, retry, error, next_run_at, now),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let task_id = task_id.to_owned();
+                let error = error.to_owned();
+                let next_run_at = next_run_at.to_owned();
+                let now = now.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.fail_controller_task(&task_id, retry, &error, &next_run_at, &now).await
+                })
+            }
+        }
+    }
+
+    fn upsert_repository_sync_schedule(&self, schedule: &RepositorySyncSchedule) -> Result<(), PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.upsert_repository_sync_schedule(schedule),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let schedule = schedule.clone();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.upsert_repository_sync_schedule(&schedule).await
+                })
+            }
+        }
+    }
+
+    fn due_repository_sync_schedules(
+        &self,
+        now: &str,
+        limit: usize,
+    ) -> Result<Vec<RepositorySyncSchedule>, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.due_repository_sync_schedules(now, limit),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let now = now.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.due_repository_sync_schedules(&now, limit).await
+                })
+            }
+        }
+    }
+
+    fn advance_repository_sync_schedule(
+        &self,
+        id: &str,
+        next_run_at: &str,
+        now: &str,
+    ) -> Result<bool, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.advance_repository_sync_schedule(id, next_run_at, now),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let id = id.to_owned();
+                let next_run_at = next_run_at.to_owned();
+                let now = now.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.advance_repository_sync_schedule(&id, &next_run_at, &now).await
+                })
+            }
+        }
+    }
+
+    fn upsert_secret(&self, secret: &SecretRecord) -> Result<(), PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.upsert_secret(secret),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let secret = secret.clone();
+                run_postgres_future(store.clone(), move |store| async move { store.upsert_secret(&secret).await })
+            }
+        }
+    }
+
+    fn secret_by_id(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        id: &str,
+    ) -> Result<Option<SecretRecord>, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.secret_by_id(tenant_id, workspace_id, id),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let tenant_id = tenant_id.to_owned();
+                let workspace_id = workspace_id.to_owned();
+                let id = id.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.secret_by_id(&tenant_id, &workspace_id, &id).await
+                })
+            }
+        }
+    }
+
+    fn list_secrets(&self, tenant_id: &str, workspace_id: &str) -> Result<Vec<SecretRecord>, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.list_secrets(tenant_id, workspace_id),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let tenant_id = tenant_id.to_owned();
+                let workspace_id = workspace_id.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.list_secrets(&tenant_id, &workspace_id).await
+                })
+            }
+        }
+    }
+
+    fn delete_secret(&self, tenant_id: &str, workspace_id: &str, id: &str) -> Result<bool, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.delete_secret(tenant_id, workspace_id, id),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let tenant_id = tenant_id.to_owned();
+                let workspace_id = workspace_id.to_owned();
+                let id = id.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.delete_secret(&tenant_id, &workspace_id, &id).await
+                })
+            }
+        }
+    }
+
+    fn upsert_integration(&self, integration: &IntegrationRecord) -> Result<(), PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.upsert_integration(integration),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let integration = integration.clone();
+                run_postgres_future(
+                    store.clone(),
+                    move |store| async move { store.upsert_integration(&integration).await },
+                )
+            }
+        }
+    }
+
+    fn list_integrations(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<IntegrationRecord>, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.list_integrations(tenant_id, workspace_id),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let tenant_id = tenant_id.to_owned();
+                let workspace_id = workspace_id.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.list_integrations(&tenant_id, &workspace_id).await
                 })
             }
         }
@@ -963,12 +1221,16 @@ impl ApiState {
     pub fn new(core: Core, store: SqliteStore) -> Self {
         Self {
             inner: Arc::new(Mutex::new(ApiInner { store: StoreBackend::sqlite(store), seed_core: Some(core) })),
+            content_store: Arc::new(
+                FileContentStore::new(test_content_root()).expect("content store root is writable"),
+            ),
             backup_root: Arc::new(test_backup_root()),
             backup_storage: None,
             backup_retention: 10,
             metrics: Arc::new(ApiMetrics::storage_ready()),
             postgres_backend: false,
             public_origin: None,
+            webhook_secret: None,
         }
     }
 
@@ -979,24 +1241,33 @@ impl ApiState {
             .unwrap_or_else(test_backup_root);
         Self {
             inner: Arc::new(Mutex::new(ApiInner { store: StoreBackend::sqlite(store), seed_core: None })),
+            content_store: Arc::new(
+                FileContentStore::new(backup_root.join("../specx-content")).expect("content store root is writable"),
+            ),
             backup_root: Arc::new(backup_root),
             backup_storage: None,
             backup_retention: 10,
             metrics: Arc::new(ApiMetrics::storage_ready()),
             postgres_backend: false,
             public_origin: None,
+            webhook_secret: None,
         }
     }
 
     fn from_store_with_backup_root(store: SqliteStore, backup_root: impl AsRef<FsPath>) -> Self {
+        let backup_root = backup_root.as_ref().to_path_buf();
         Self {
             inner: Arc::new(Mutex::new(ApiInner { store: StoreBackend::sqlite(store), seed_core: None })),
-            backup_root: Arc::new(backup_root.as_ref().to_path_buf()),
+            content_store: Arc::new(
+                FileContentStore::new(backup_root.join("../specx-content")).expect("content store root is writable"),
+            ),
+            backup_root: Arc::new(backup_root),
             backup_storage: None,
             backup_retention: 10,
             metrics: Arc::new(ApiMetrics::storage_ready()),
             postgres_backend: false,
             public_origin: None,
+            webhook_secret: None,
         }
     }
 
@@ -1018,12 +1289,17 @@ impl ApiState {
         let store = PostgresStore::connect(url, max_pool_size).await?;
         Ok(Self {
             inner: Arc::new(Mutex::new(ApiInner { store: StoreBackend::postgres(store), seed_core: None })),
+            content_store: Arc::new(
+                FileContentStore::new(backup_root.as_ref().join("../specx-content"))
+                    .expect("content store root is writable"),
+            ),
             backup_root: Arc::new(backup_root.as_ref().to_path_buf()),
             backup_storage: None,
             backup_retention: 10,
             metrics: Arc::new(ApiMetrics::storage_ready()),
             postgres_backend: true,
             public_origin: None,
+            webhook_secret: None,
         })
     }
 
@@ -1037,6 +1313,115 @@ impl ApiState {
             )
         })?);
         Ok(self)
+    }
+
+    /// Configure the shared secret used by repository webhook requests. The
+    /// secret remains in process memory and is never persisted in the catalog.
+    pub fn with_webhook_secret(mut self, secret: Option<String>) -> Self {
+        self.webhook_secret = secret.filter(|value| !value.trim().is_empty()).map(Arc::new);
+        self
+    }
+
+    pub(crate) fn webhook_secret(&self) -> Option<&str> {
+        self.webhook_secret.as_deref().map(String::as_str)
+    }
+
+    pub(crate) async fn controller_task(&self, task_id: &str) -> Result<Option<ControllerTask>, PersistenceError> {
+        let inner = self.inner.lock().await;
+        inner.store.controller_task(task_id)
+    }
+
+    pub(crate) async fn enqueue_repository_task(
+        &self,
+        context: &WorkspaceContext,
+        repository_id: &str,
+    ) -> Result<String, PersistenceError> {
+        let now = Utc::now().to_rfc3339();
+        let task = ControllerTask {
+            id: format!(
+                "repository-{:x}",
+                Sha256::digest(format!("{}\0{}\0{}", context.tenant_id, context.workspace_id, repository_id))
+            ),
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            controller_id: "repository-controller".into(),
+            resource_kind: "Repository".into(),
+            resource_id: repository_id.to_owned(),
+            generation: 1,
+            deduplication_key: repository_id.to_owned(),
+            status: "pending".into(),
+            attempts: 0,
+            next_run_at: now.clone(),
+            lease_until: None,
+            last_error: None,
+            created_at: now,
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        let inner = self.inner.lock().await;
+        inner.store.enqueue_controller_task(&task)?;
+        Ok(task.id)
+    }
+
+    /// Claim and process a bounded number of durable controller tasks. Hosts
+    /// call this from a periodic worker; a lease makes crashed processes safe
+    /// to recover after the lease expires.
+    pub async fn run_controller_once(&self, limit: usize) -> Result<usize, PersistenceError> {
+        let now = Utc::now();
+        let lease_until = (now + chrono::Duration::seconds(60)).to_rfc3339();
+        let now_text = now.to_rfc3339();
+        let tasks = {
+            let inner = self.inner.lock().await;
+            inner.store.claim_due_controller_tasks(&now_text, &lease_until, limit)?
+        };
+        let mut processed = 0;
+        for task in tasks {
+            let result = resources::process_controller_task(self, &task).await;
+            let completed_at = Utc::now().to_rfc3339();
+            let inner = self.inner.lock().await;
+            match result {
+                Ok(()) => {
+                    inner.store.complete_controller_task(&task.id, &completed_at)?;
+                }
+                Err(error) => {
+                    let retry = task.attempts < 5;
+                    let delay = chrono::Duration::seconds((task.attempts.max(1) * 5).min(300));
+                    let next_run_at = (Utc::now() + delay).to_rfc3339();
+                    inner.store.fail_controller_task(
+                        &task.id,
+                        retry,
+                        "controller reconciliation failed",
+                        &next_run_at,
+                        &completed_at,
+                    )?;
+                    tracing::warn!(task_id = %task.id, retry, error = ?error, "controller task failed");
+                }
+            }
+            processed += 1;
+        }
+        Ok(processed)
+    }
+
+    pub async fn run_repository_poller_once(&self, limit: usize) -> Result<usize, PersistenceError> {
+        let now = Utc::now();
+        let now_text = now.to_rfc3339();
+        let schedules = {
+            let inner = self.inner.lock().await;
+            inner.store.due_repository_sync_schedules(&now_text, limit)?
+        };
+        let mut enqueued = 0;
+        for schedule in schedules {
+            let context = WorkspaceContext {
+                tenant_id: schedule.tenant_id.clone(),
+                workspace_id: schedule.workspace_id.clone(),
+                actor_id: "specx-poller".into(),
+            };
+            self.enqueue_repository_task(&context, &schedule.repository_id).await?;
+            let next = (now + chrono::Duration::seconds(schedule.interval_seconds.max(30))).to_rfc3339();
+            let inner = self.inner.lock().await;
+            inner.store.advance_repository_sync_schedule(&schedule.id, &next, &now_text)?;
+            enqueued += 1;
+        }
+        Ok(enqueued)
     }
 
     /// Whether this API state uses the shared PostgreSQL backend. Local
@@ -1374,6 +1759,10 @@ async fn authorize_request(State(state): State<ApiState>, mut request: Request, 
         request.headers_mut().insert("x-request-id", value);
     }
     let result = if matches!(request.uri().path(), "/health" | "/ready" | "/openapi.json") {
+        next.run(request).await
+    } else if request.uri().path().starts_with("/webhooks/repositories/") {
+        // Repository webhooks authenticate with their HMAC signature in the
+        // handler and deliberately do not require a browser workspace session.
         next.run(request).await
     } else if state.metrics.ready.load(Ordering::Acquire) == 0 {
         ApiError::NotReady.into_response()

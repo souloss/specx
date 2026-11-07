@@ -8,13 +8,16 @@
 mod content_store;
 mod git_provider;
 mod markdown;
+mod repository;
 mod runtime;
 
 pub use content_store::{ContentStore, ContentStoreError, FileContentStore};
 pub use git_provider::{
-    CommandGitProvider, GitFileRequest, GitFileSnapshot, GitProvider, GitProviderError, validate_markdown_path,
+    CommandGitProvider, GitCredential, GitFileRequest, GitFileSnapshot, GitProvider, GitProviderError,
+    GitRepositoryProvider, GitRepositoryRequest, GitRepositorySnapshot, RepositoryFile, validate_markdown_path,
 };
 pub use markdown::{MarkdownDocumentController, MarkdownDocumentRequest, MarkdownDocumentResult};
+pub use repository::{RepositoryController, RepositoryReconcileRequest, RepositorySnapshotResult};
 pub use runtime::{
     Controller, ControllerDescriptor, ControllerError, ControllerEventRouter, ControllerRuntime, ReconcileRequest,
     ReconcileResult, RunOutcome, RuntimeError,

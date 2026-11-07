@@ -162,6 +162,6 @@ HTTP 与 Tauri 共用同一 API Router。Pinia 只保存当前界面需要的服
 
 ## 6. 一期边界与后续扩展
 
-当前实现包括 Repository/ServiceRepository/SpecificationCodeBinding（含 Markdown 路径）的 SQLite 与 PostgreSQL 持久化、旧 Git 绑定数据回填、服务仓库 API、规范代码版本 API、两种规范来源模式、仓库托管规范的只读约束，以及手动同步生成的去重 `RepositorySnapshot` 元数据。
+当前实现包括 Repository/ServiceRepository/SpecificationCodeBinding（含 Markdown 路径）的 SQLite 与 PostgreSQL 持久化、旧 Git 绑定数据回填、服务仓库 API、规范代码版本 API、两种规范来源模式、仓库托管规范的只读约束，Markdown 文件发现与选择，持久 RepositorySnapshot 内容，异步 Repository Controller、分支轮询、签名 Webhook、任务状态以及加密 Secret/Integration 资源。
 
-以下仍不是一期已交付功能：私有仓库凭据、Provider OAuth、Markdown 文件发现与选择器、webhook/轮询自动同步、持久同步任务、Repository Controller 的独立快照链路、Asset/SourceSpec 编辑器、语言和框架分析、CI 回调/API Token、规范文件上传、分析快照与结果索引。当前已支持受控的 Git clone/fetch、Markdown 文件读取、`POST /specifications/{specificationId}/sync` 手动同步和 `GET /specifications/{specificationId}/sync-status` 恢复最近同步证据；同步响应包含 resolved commit、manifest hash、content hash、Provider 版本和 `snapshotId`，内容变更会追加规范修订，仓库/来源/提交相同的快照会去重并在 SQLite/PostgreSQL 中恢复。后续自动同步应复用这些稳定身份和 Core CAS 语义，让 Repository Controller 产生可供下游消费的快照，凭据放入独立 Integration/Secret 模块，内容物理存储由平台内部 ContentStore 统一选择。
+以下仍不是一期已交付功能：Provider OAuth、分布式 Worker、多 Provider 适配、Asset/SourceSpec 编辑器、语言和框架分析、CI 回调/API Token、规范文件上传、分析快照与结果索引。凭据 API 已提供 AES-GCM 密文存储和最小权限 Provider 上下文；部署必须设置 `SPECX_SECRET_KEY`，Webhook 必须设置 `SPECX_WEBHOOK_SECRET`。当前同步响应包含 resolved commit、manifest hash、content hash、Provider 版本和 `snapshotId`，内容变更会追加规范修订，仓库/来源/提交相同的快照会去重并在 SQLite/PostgreSQL 中恢复。

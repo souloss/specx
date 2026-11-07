@@ -1079,7 +1079,7 @@ async fn readiness_reports_migration_state_and_health_headers() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["status"], "ready");
-    assert_eq!(body["schemaVersion"], 16);
+    assert_eq!(body["schemaVersion"], 17);
 }
 
 #[tokio::test]

@@ -2,7 +2,7 @@
 
 `core` owns the schema for both SQLite and PostgreSQL. The adapters expose the
 same `schema_migrations` contract and must reach the same latest version before
-serving business requests. The current version is **16**.
+serving business requests. The current version is **17**.
 
 Every migration is a monotonic integer. A version is applied exactly once and
 is recorded only after its DDL and data backfill succeeds. Existing databases
@@ -28,6 +28,10 @@ Version 16 adds immutable, workspace-scoped `repository_snapshots` keyed by
 repository, source ref, and resolved commit. Each row keeps the manifest hash,
 provider version, fetch time, and optional content-root metadata so downstream
 controllers can consume durable evidence after a trigger or process restart.
+Version 17 adds durable controller tasks with leases and retry state,
+`repository_snapshot_files` content references, workspace-scoped encrypted Secret
+metadata, provider Integrations, and branch polling schedules. The platform
+ContentStore owns the bytes; the database keeps only references and evidence.
 
 Hosts open the adapter before exposing the API router. `/ready` remains false
 until the latest marker exists. Web startup makes three bounded attempts with a
