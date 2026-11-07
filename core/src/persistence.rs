@@ -6,12 +6,12 @@
 
 use crate::{
     CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Core, Id,
-    Repository, Service, ServiceCodeBinding, ServiceGroup, ServiceRefKind, ServiceRefTrack, ServiceRepository,
-    Specification, SpecificationCodeBinding, SpecificationKind, SpecificationRefKind, Tag, Workspace, WorkspaceContext,
-    normalize_repository_url,
+    Repository, RepositorySnapshot, Service, ServiceCodeBinding, ServiceGroup, ServiceRefKind, ServiceRefTrack,
+    ServiceRepository, Specification, SpecificationCodeBinding, SpecificationKind, SpecificationRefKind, Tag,
+    Workspace, WorkspaceContext, normalize_repository_url,
 };
 
-pub const LATEST_SCHEMA_VERSION: i64 = 15;
+pub const LATEST_SCHEMA_VERSION: i64 = 16;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, backup::Backup, params};
 use sha2::{Digest, Sha256};
@@ -199,6 +199,14 @@ impl SqliteStore {
                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
                UNIQUE (tenant_id, workspace_id, canonical_url)
              );
+             CREATE TABLE IF NOT EXISTS repository_snapshots (
+               id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+               repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+               source_ref TEXT NOT NULL, resolved_commit TEXT NOT NULL, manifest_hash TEXT NOT NULL,
+               content_root_ref TEXT, fetched_at TEXT NOT NULL, provider_version TEXT NOT NULL, created_at TEXT NOT NULL,
+               UNIQUE (tenant_id, workspace_id, repository_id, source_ref, resolved_commit)
+             );
+             CREATE INDEX IF NOT EXISTS repository_snapshots_scope ON repository_snapshots(tenant_id, workspace_id, repository_id, fetched_at);
              CREATE INDEX IF NOT EXISTS repositories_scope ON repositories(tenant_id, workspace_id, display_name);
              CREATE TABLE IF NOT EXISTS service_repositories (
                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
@@ -480,6 +488,19 @@ impl SqliteStore {
             .or_else(|error| if error.to_string().contains("duplicate column name") { Ok(0) } else { Err(error) })?;
         transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (15, datetime('now'))", [])?;
+        transaction.execute(
+            "CREATE TABLE IF NOT EXISTS repository_snapshots (
+               id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+               repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+               source_ref TEXT NOT NULL, resolved_commit TEXT NOT NULL, manifest_hash TEXT NOT NULL,
+               content_root_ref TEXT, fetched_at TEXT NOT NULL, provider_version TEXT NOT NULL, created_at TEXT NOT NULL,
+               UNIQUE (tenant_id, workspace_id, repository_id, source_ref, resolved_commit)
+             );
+             CREATE INDEX IF NOT EXISTS repository_snapshots_scope ON repository_snapshots(tenant_id, workspace_id, repository_id, fetched_at)",
+            [],
+        )?;
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (16, datetime('now'))", [])?;
         transaction.commit().map_err(PersistenceError::from)?;
         Ok(())
     }
@@ -580,6 +601,7 @@ impl SqliteStore {
             "service_tags",
             "service_ref_tracks",
             "service_repositories",
+            "repository_snapshots",
             "specification_code_bindings",
             "specification_revisions",
             "specifications",
@@ -634,6 +656,7 @@ impl SqliteStore {
             "services",
             "service_tags",
             "repositories",
+            "repository_snapshots",
             "code_sources",
             "service_code_bindings",
             "service_repositories",
@@ -676,6 +699,7 @@ impl SqliteStore {
                 "service_tags",
                 "service_ref_tracks",
                 "service_repositories",
+                "repository_snapshots",
                 "service_code_bindings",
                 "specification_revisions",
                 "specifications",
@@ -704,6 +728,10 @@ impl SqliteStore {
                 (
                     "repositories",
                     "id, tenant_id, workspace_id, provider, display_name, canonical_url, created_at, updated_at, archived",
+                ),
+                (
+                    "repository_snapshots",
+                    "id, tenant_id, workspace_id, repository_id, source_ref, resolved_commit, manifest_hash, content_root_ref, fetched_at, provider_version, created_at",
                 ),
                 (
                     "code_sources",
@@ -1649,6 +1677,21 @@ impl SqliteStore {
             )?;
             ensure_upsert_scope(changed, "repository")?;
         }
+        for snapshot in core
+            .repository_snapshots
+            .values()
+            .filter(|snapshot| snapshot.tenant_id == context.tenant_id && snapshot.workspace_id == context.workspace_id)
+        {
+            let changed = transaction.execute(
+                "INSERT INTO repository_snapshots(id,tenant_id,workspace_id,repository_id,source_ref,resolved_commit,manifest_hash,content_root_ref,fetched_at,provider_version,created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+                 ON CONFLICT(tenant_id,workspace_id,repository_id,source_ref,resolved_commit) DO UPDATE SET manifest_hash=excluded.manifest_hash,
+                   content_root_ref=excluded.content_root_ref,fetched_at=excluded.fetched_at,provider_version=excluded.provider_version
+                 WHERE repository_snapshots.tenant_id=excluded.tenant_id AND repository_snapshots.workspace_id=excluded.workspace_id",
+                params![snapshot.id, snapshot.tenant_id, snapshot.workspace_id, snapshot.repository_id, snapshot.source_ref, snapshot.resolved_commit, snapshot.manifest_hash, snapshot.content_root_ref, snapshot.fetched_at, snapshot.provider_version, snapshot.created_at],
+            )?;
+            ensure_upsert_scope(changed, "repository snapshot")?;
+        }
         for relation in core
             .service_repositories
             .values()
@@ -1793,6 +1836,17 @@ impl SqliteStore {
         updated: &Specification,
         audit: Option<&AuditEvent>,
     ) -> Result<bool, PersistenceError> {
+        self.update_specification_if_current_with_audit_and_snapshot(context, expected, updated, audit, None)
+    }
+
+    pub fn update_specification_if_current_with_audit_and_snapshot(
+        &self,
+        context: &WorkspaceContext,
+        expected: &Specification,
+        updated: &Specification,
+        audit: Option<&AuditEvent>,
+        snapshot: Option<&RepositorySnapshot>,
+    ) -> Result<bool, PersistenceError> {
         if expected.id != updated.id
             || expected.tenant_id != context.tenant_id
             || expected.workspace_id != context.workspace_id
@@ -1800,6 +1854,11 @@ impl SqliteStore {
             || updated.workspace_id != context.workspace_id
         {
             return Err(PersistenceError("specification update scope does not match".into()));
+        }
+        if let Some(snapshot) = snapshot {
+            if snapshot.tenant_id != context.tenant_id || snapshot.workspace_id != context.workspace_id {
+                return Err(PersistenceError("repository snapshot scope does not match".into()));
+            }
         }
 
         let transaction = self.connection.unchecked_transaction()?;
@@ -1854,8 +1913,35 @@ impl SqliteStore {
         if let Some(event) = audit {
             insert_audit_event(&transaction, event)?;
         }
+        if let Some(snapshot) = snapshot {
+            transaction.execute(
+                "INSERT INTO repository_snapshots(id,tenant_id,workspace_id,repository_id,source_ref,resolved_commit,manifest_hash,content_root_ref,fetched_at,provider_version,created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+                 ON CONFLICT(tenant_id,workspace_id,repository_id,source_ref,resolved_commit) DO UPDATE SET manifest_hash=excluded.manifest_hash,
+                   content_root_ref=excluded.content_root_ref,fetched_at=excluded.fetched_at,provider_version=excluded.provider_version",
+                params![snapshot.id, snapshot.tenant_id, snapshot.workspace_id, snapshot.repository_id, snapshot.source_ref, snapshot.resolved_commit, snapshot.manifest_hash, snapshot.content_root_ref, snapshot.fetched_at, snapshot.provider_version, snapshot.created_at],
+            )?;
+        }
         transaction.commit().map_err(PersistenceError::from)?;
         Ok(true)
+    }
+
+    pub fn upsert_repository_snapshot(
+        &self,
+        context: &WorkspaceContext,
+        snapshot: &RepositorySnapshot,
+    ) -> Result<(), PersistenceError> {
+        if snapshot.tenant_id != context.tenant_id || snapshot.workspace_id != context.workspace_id {
+            return Err(PersistenceError("repository snapshot scope does not match".into()));
+        }
+        self.connection.execute(
+            "INSERT INTO repository_snapshots(id,tenant_id,workspace_id,repository_id,source_ref,resolved_commit,manifest_hash,content_root_ref,fetched_at,provider_version,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             ON CONFLICT(tenant_id,workspace_id,repository_id,source_ref,resolved_commit) DO UPDATE SET manifest_hash=excluded.manifest_hash,
+               content_root_ref=excluded.content_root_ref,fetched_at=excluded.fetched_at,provider_version=excluded.provider_version",
+            params![snapshot.id, snapshot.tenant_id, snapshot.workspace_id, snapshot.repository_id, snapshot.source_ref, snapshot.resolved_commit, snapshot.manifest_hash, snapshot.content_root_ref, snapshot.fetched_at, snapshot.provider_version, snapshot.created_at],
+        )?;
+        Ok(())
     }
 
     pub fn update_specification_code_binding_if_current_with_audit(
@@ -2192,6 +2278,25 @@ impl SqliteStore {
         })? {
             let repository = row?;
             core.repositories.insert(repository.id.clone(), repository);
+        }
+        let mut repository_snapshots = self.connection.prepare("SELECT id,tenant_id,workspace_id,repository_id,source_ref,resolved_commit,manifest_hash,content_root_ref,fetched_at,provider_version,created_at FROM repository_snapshots WHERE tenant_id=?1 AND workspace_id=?2")?;
+        for row in repository_snapshots.query_map(params![context.tenant_id, context.workspace_id], |row| {
+            Ok(RepositorySnapshot {
+                id: row.get(0)?,
+                tenant_id: row.get(1)?,
+                workspace_id: row.get(2)?,
+                repository_id: row.get(3)?,
+                source_ref: row.get(4)?,
+                resolved_commit: row.get(5)?,
+                manifest_hash: row.get(6)?,
+                content_root_ref: row.get(7)?,
+                fetched_at: row.get(8)?,
+                provider_version: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })? {
+            let snapshot = row?;
+            core.repository_snapshots.insert(snapshot.id.clone(), snapshot);
         }
         let mut relations = self.connection.prepare("SELECT id,tenant_id,workspace_id,service_id,repository_id,created_at,updated_at FROM service_repositories WHERE tenant_id=?1 AND workspace_id=?2")?;
         for row in relations.query_map(params![context.tenant_id, context.workspace_id], |row| {
@@ -2659,6 +2764,44 @@ mod tests {
         let updated = Core::load(&store, &context).unwrap();
         assert_eq!(updated.specifications.get("spec-1").unwrap().version, 2);
         assert_eq!(updated.specifications.get("spec-1").unwrap().content, "# Updated Gateway");
+    }
+
+    #[test]
+    fn repository_snapshots_round_trip_and_keep_workspace_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("specx.sqlite");
+        let store = SqliteStore::open(&database).unwrap();
+        let context = WorkspaceContext {
+            tenant_id: "tenant-1".into(),
+            workspace_id: "workspace-1".into(),
+            actor_id: "actor-1".into(),
+        };
+        let other = WorkspaceContext {
+            tenant_id: "tenant-1".into(),
+            workspace_id: "workspace-2".into(),
+            actor_id: "actor-1".into(),
+        };
+        let mut core = Core::default();
+        let repository = core.create_repository(&context, "repo-1".into(), "https://github.com/acme/api").unwrap();
+        let snapshot = RepositorySnapshot {
+            id: "snapshot-1".into(),
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            repository_id: repository.id.clone(),
+            source_ref: "main".into(),
+            resolved_commit: "a".repeat(40),
+            manifest_hash: "sha256:manifest".into(),
+            content_root_ref: None,
+            fetched_at: "2026-11-07T00:00:00Z".into(),
+            provider_version: "git-cli".into(),
+            created_at: "2026-11-07T00:00:00Z".into(),
+        };
+        core.record_repository_snapshot(&context, snapshot.clone()).unwrap();
+        store.persist_core(&core, &context).unwrap();
+        let reopened = SqliteStore::open(&database).unwrap();
+        let loaded = reopened.load_core(&context).unwrap();
+        assert_eq!(loaded.list_repository_snapshots(&context, &repository.id), vec![&snapshot]);
+        assert!(loaded.list_repository_snapshots(&other, &repository.id).is_empty());
     }
 
     #[test]
@@ -3335,6 +3478,81 @@ mod tests {
         assert!(store.persist_core_with_audit(&core, &context, Some(&event)).is_err());
         assert!(Core::load(&store, &context).unwrap().list_groups(&context).is_empty());
         assert_eq!(store.audit_event_count(&context).unwrap(), 0);
+    }
+
+    #[test]
+    fn specification_and_snapshot_commit_roll_back_together() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let context = context("default");
+        let mut core = Core::default();
+        core.create_group(&context, "root".into(), "Root".into(), None).unwrap();
+        core.create_service(
+            &context,
+            Service {
+                id: "service-1".into(),
+                tenant_id: context.tenant_id.clone(),
+                workspace_id: context.workspace_id.clone(),
+                group_id: Some("root".into()),
+                name: "Gateway".into(),
+                slug: "gateway".into(),
+                description: String::new(),
+                tag_ids: Vec::new(),
+                updated_at: "2026-11-08T00:00:00Z".into(),
+                archived: false,
+            },
+        )
+        .unwrap();
+        core.create_markdown_specification(
+            &context,
+            Specification {
+                id: "spec-1".into(),
+                tenant_id: context.tenant_id.clone(),
+                workspace_id: context.workspace_id.clone(),
+                service_id: "service-1".into(),
+                title: "README".into(),
+                kind: SpecificationKind::Markdown,
+                content: "# Before".into(),
+                version: 1,
+                content_hash: String::new(),
+                updated_at: "2026-11-08T00:00:00Z".into(),
+            },
+        )
+        .unwrap();
+        core.persist(&store, &context).unwrap();
+
+        let expected = Core::load(&store, &context).unwrap().specifications.get("spec-1").unwrap().clone();
+        let mut updated = expected.clone();
+        updated.content = "# After".into();
+        updated.updated_at = "2026-11-08T00:01:00Z".into();
+        let snapshot = RepositorySnapshot {
+            id: "snapshot-1".into(),
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            repository_id: "missing-repository".into(),
+            source_ref: "main".into(),
+            resolved_commit: "a".repeat(40),
+            manifest_hash: "sha256:manifest".into(),
+            content_root_ref: None,
+            fetched_at: updated.updated_at.clone(),
+            provider_version: "git-cli".into(),
+            created_at: updated.updated_at.clone(),
+        };
+
+        assert!(
+            store
+                .update_specification_if_current_with_audit_and_snapshot(
+                    &context,
+                    &expected,
+                    &updated,
+                    None,
+                    Some(&snapshot),
+                )
+                .is_err()
+        );
+        let restored = Core::load(&store, &context).unwrap();
+        assert_eq!(restored.specifications.get("spec-1").unwrap(), &expected);
+        assert_eq!(store.specification_revision_count(&context, "spec-1").unwrap(), 1);
+        assert!(restored.list_repository_snapshots(&context, "missing-repository").is_empty());
     }
 
     #[test]

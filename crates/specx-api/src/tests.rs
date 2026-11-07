@@ -453,6 +453,8 @@ async fn repository_managed_specifications_sync_from_git_and_dedupe_unchanged_co
     assert_eq!(body["specification"]["content"], "# New\n");
     assert_eq!(body["specification"]["version"], 2);
     assert_eq!(body["providerVersion"], "git-cli");
+    assert!(body["snapshotId"].as_str().is_some_and(|value| !value.is_empty()));
+    assert!(body["manifestHash"].as_str().is_some_and(|value| value.starts_with("sha256:")));
     let first_commit = body["resolvedCommit"].as_str().unwrap().to_owned();
 
     let response = app.clone().oneshot(sync_request()).await.unwrap();
@@ -1063,7 +1065,7 @@ async fn readiness_reports_migration_state_and_health_headers() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["status"], "ready");
-    assert_eq!(body["schemaVersion"], 15);
+    assert_eq!(body["schemaVersion"], 16);
 }
 
 #[tokio::test]

@@ -16,7 +16,7 @@
 | ServiceRepository | Core | 服务与唯一 Repository 的关联；不携带根路径或 primary/secondary 角色 |
 | SpecificationCodeBinding | Core | 规范在所属服务仓库上的 Markdown 路径与 branch、tag 或 commit 选择器 |
 | Asset / SourceSpec（后续） | Core/Provider | 服务下的资产身份及其文件选择规则 |
-| RepositorySnapshot（后续） | Core/Controller/Provider | 通用仓库控制器解析出的不可变 commit、内容引用和来源证据 |
+| RepositorySnapshot（快照元数据已接入） | Core/Controller/Provider | 手动同步已持久化的不可变 commit、manifest、Provider 和来源证据；内容根与自动触发由后续仓库控制器补齐 |
 | CodeSnapshot（后续） | Core/Provider | 基于 RepositorySnapshot 的代码分析版本和结果证据 |
 
 服务的稳定 ID 不随名称、目录移动、标签修改或来源同步改变。规范属于服务，但规范内容类型由 `spec_kind` 标识；Core 不解析 Markdown 语义，只保存经校验的内容和元数据。

@@ -4,7 +4,7 @@
 
 本文定义 SpecX 的长期建模方向。它借鉴 Kubernetes 的资源、声明式配置、标签选择器和插件思想，但不把 Kubernetes 的全部控制面、调度器或 YAML 接口照搬进来。本文中标记为“目标”或“后续”的内容不代表当前已经实现；可执行行为仍以代码、OpenAPI 和迁移为准。
 
-当前已落地通用基础：`specx-types` 提供资源引用、状态、条件、事件和内容引用契约，`specx-controller` 提供宿主内控制器运行时、事件按 Kind 分发、代际去重、有限重试、文件 ContentStore、Git Provider 和 Markdown Document Controller。Markdown 控制器已通过规范同步 API 接入；持久 RepositorySnapshot、任务队列以及 Webhook/Poller 自动唤醒仍属于后续纵向 Story。
+当前已落地通用基础：`specx-types` 提供资源引用、状态、条件、事件和内容引用契约，`specx-controller` 提供宿主内控制器运行时、事件按 Kind 分发、代际去重、有限重试、文件 ContentStore、Git Provider 和 Markdown Document Controller。Markdown 控制器已通过规范同步 API 接入；手动同步会持久化去重的 `RepositorySnapshot` 元数据。持久任务队列、Webhook/Poller 自动唤醒、快照内容根托管和独立 Repository Controller 仍属于后续纵向 Story。
 
 ## 1. 目标与边界
 
@@ -294,7 +294,7 @@ POST   /resources/{kind}/{id}/reconcile
 
 ### Phase 4：控制器驱动的自动同步与分析闭环
 
-- 将当前已接入 API 的 Git Provider/Markdown Document Controller 手动同步适配器升级为通用 Repository Controller：Git fetch、ref 解析、版本自动选择、resolved commit、webhook/轮询和 `RepositorySnapshot`。
+- 将当前已接入 API 的 Git Provider/Markdown Document Controller 手动同步适配器升级为通用 Repository Controller：复用已有快照元数据契约，补齐 Git fetch、ref 解析、版本自动选择、webhook/轮询和持久任务恢复。
 - 让 Markdown Document Controller 改为只消费仓库快照，按 binding 的路径读取并追加规范修订；控制器之间通过快照和持久事件交接。
 - 引入 Asset/SourceSpec、代码快照和分析结果索引，让其他控制器复用同一仓库快照而不理解 Markdown。
 - 用标签和选择器驱动批量协调、搜索索引和通知，但不让选择器绕过授权。

@@ -293,6 +293,13 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     return specificationSyncs.value[specificationId] ?? null;
   }
 
+  function clearSpecificationSync(specificationId: string) {
+    if (!specificationSyncs.value[specificationId]) return;
+    const next = { ...specificationSyncs.value };
+    delete next[specificationId];
+    specificationSyncs.value = next;
+  }
+
   async function syncSpecification(specificationId: string) {
     if (!catalog.value) throw new Error(translate("apiError.forbidden"));
     const result = await specxApi.syncSpecification(catalog.value.workspace.id, specificationId);
@@ -306,6 +313,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     const current = specificationCodeBindingFor(specificationId);
     const saved = await specxApi.setSpecificationCodeBinding(catalog.value.workspace.id, specificationId, refKind, refName, path, current?.etag);
     specificationCodeBindings.value = { ...specificationCodeBindings.value, [specificationId]: saved };
+    clearSpecificationSync(specificationId);
     return saved;
   }
 
@@ -315,6 +323,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     if (!current) return;
     await specxApi.deleteSpecificationCodeBinding(catalog.value.workspace.id, specificationId, current.etag);
     specificationCodeBindings.value = { ...specificationCodeBindings.value, [specificationId]: null };
+    clearSpecificationSync(specificationId);
   }
 
   function specificationDraft(specificationId: string) {

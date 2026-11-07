@@ -855,6 +855,8 @@ pub struct SpecificationResponse {
 #[serde(rename_all = "camelCase")]
 pub struct SpecificationSyncResponse {
     pub specification: SpecificationResponse,
+    pub snapshot_id: Id,
+    pub manifest_hash: String,
     pub resolved_commit: String,
     pub content_hash: String,
     pub changed: bool,
@@ -2752,7 +2754,7 @@ async fn sync_specification(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let context = request_context(&headers)?;
-    let (expected, binding, repository_url) = {
+    let (expected, binding, repository_id, repository_url) = {
         let mut inner = state.inner.lock().await;
         let core = load_core(&mut inner, &context)?;
         let specification = core
@@ -2772,7 +2774,7 @@ async fn sync_specification(
             .service_repository(&context, &specification.service_id)
             .ok_or(CoreError::NotFound("service_repository"))?;
         let repository = core.repository(&context, &relation.repository_id).ok_or(CoreError::NotFound("repository"))?;
-        (specification, binding, repository.canonical_url.clone())
+        (specification, binding, repository.id.clone(), repository.canonical_url.clone())
     };
 
     let provider_root = std::env::temp_dir().join(format!("specx-git-sync-{}", uuid::Uuid::new_v4()));
@@ -2798,7 +2800,20 @@ async fn sync_specification(
     .map_err(|_| ApiError::RepositorySyncFailed)??;
     let synced_at = Utc::now().to_rfc3339();
 
-    let specification = if sync.changed {
+    let snapshot_input = RepositorySnapshot {
+        id: uuid::Uuid::new_v4().to_string(),
+        tenant_id: context.tenant_id.clone(),
+        workspace_id: context.workspace_id.clone(),
+        repository_id: repository_id.clone(),
+        source_ref: binding.ref_name.clone(),
+        resolved_commit: sync.resolved_commit.clone(),
+        manifest_hash: sync.manifest_hash.clone(),
+        content_root_ref: None,
+        fetched_at: synced_at.clone(),
+        provider_version: sync.provider_version.clone(),
+        created_at: synced_at.clone(),
+    };
+    let (specification, snapshot_id) = if sync.changed {
         let mut inner = state.inner.lock().await;
         let mut core = load_core(&mut inner, &context)?;
         let current = core
@@ -2811,27 +2826,42 @@ async fn sync_specification(
             return Err(ApiError::PreconditionFailed);
         }
         let updated = core.update_managed_specification_content(&context, &specification_id, sync.content.clone())?;
+        let snapshot = core.record_repository_snapshot(&context, snapshot_input.clone())?;
         let audit = audit_event(&context, &headers, "sync", "specification", &specification_id);
-        if !inner.store.update_specification_if_current_with_audit(&context, &current, &updated, Some(&audit))? {
+        if !inner.store.update_specification_if_current_with_audit_and_snapshot(
+            &context,
+            &current,
+            &updated,
+            Some(&audit),
+            Some(&snapshot),
+        )? {
             return Err(ApiError::PreconditionFailed);
         }
         inner.seed_core = None;
-        inner
+        let specification = inner
             .store
             .load_core(&context)?
             .list_specifications(&context)
             .into_iter()
             .find(|specification| specification.id == specification_id)
             .cloned()
-            .ok_or(CoreError::NotFound("specification"))?
+            .ok_or(CoreError::NotFound("specification"))?;
+        (specification, snapshot.id)
     } else {
-        expected.clone()
+        let mut inner = state.inner.lock().await;
+        let mut core = load_core(&mut inner, &context)?;
+        let snapshot = core.record_repository_snapshot(&context, snapshot_input)?;
+        inner.store.upsert_repository_snapshot(&context, &snapshot)?;
+        inner.seed_core = None;
+        (expected.clone(), snapshot.id)
     };
 
     let specification_response: SpecificationResponse = specification.into();
     let etag = specification_response.etag.clone();
     let response = SpecificationSyncResponse {
         specification: specification_response,
+        snapshot_id,
+        manifest_hash: sync.manifest_hash,
         resolved_commit: sync.resolved_commit,
         content_hash: sync.content_hash,
         changed: sync.changed,

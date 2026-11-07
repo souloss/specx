@@ -7,8 +7,9 @@ use std::collections::{HashMap, HashSet};
 
 pub use specx_types::{
     CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Id, Repository,
-    Service, ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, ServiceRefKind, ServiceRefTrack, ServiceRepository,
-    Specification, SpecificationCodeBinding, SpecificationKind, SpecificationRefKind, Tag, Workspace, WorkspaceContext,
+    RepositorySnapshot, Service, ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, ServiceRefKind, ServiceRefTrack,
+    ServiceRepository, Specification, SpecificationCodeBinding, SpecificationKind, SpecificationRefKind, Tag,
+    Workspace, WorkspaceContext,
 };
 
 pub mod persistence;
@@ -37,6 +38,7 @@ pub enum CoreError {
     DuplicateRefTrack,
     InvalidRefTrack,
     InvalidSpecificationCodeBinding,
+    InvalidRepositorySnapshot,
     ManagedSpecification,
     HasDependents(&'static str),
 }
@@ -49,6 +51,7 @@ pub struct Core {
     code_sources: HashMap<Id, CodeSource>,
     code_bindings: HashMap<Id, ServiceCodeBinding>,
     repositories: HashMap<Id, Repository>,
+    repository_snapshots: HashMap<Id, RepositorySnapshot>,
     service_repositories: HashMap<Id, ServiceRepository>,
     ref_tracks: HashMap<Id, ServiceRefTrack>,
     specification_code_bindings: HashMap<Id, SpecificationCodeBinding>,
@@ -89,6 +92,11 @@ impl Core {
     #[cfg(feature = "postgres")]
     pub(crate) fn service_repositories(&self) -> impl Iterator<Item = &ServiceRepository> {
         self.service_repositories.values()
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn repository_snapshots(&self) -> impl Iterator<Item = &RepositorySnapshot> {
+        self.repository_snapshots.values()
     }
 
     #[cfg(feature = "postgres")]
@@ -139,6 +147,11 @@ impl Core {
     #[cfg(feature = "postgres")]
     pub(crate) fn insert_service_repository(&mut self, relation: ServiceRepository) {
         self.service_repositories.insert(relation.id.clone(), relation);
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn insert_repository_snapshot(&mut self, snapshot: RepositorySnapshot) {
+        self.repository_snapshots.insert(snapshot.id.clone(), snapshot);
     }
 
     #[cfg(feature = "postgres")]
@@ -530,6 +543,70 @@ impl Core {
         self.repositories.get(repository_id).filter(|repository| {
             repository.tenant_id == context.tenant_id && repository.workspace_id == context.workspace_id
         })
+    }
+
+    /// Returns snapshots for one repository in newest-first order.
+    pub fn list_repository_snapshots(
+        &self,
+        context: &WorkspaceContext,
+        repository_id: &str,
+    ) -> Vec<&RepositorySnapshot> {
+        let mut snapshots: Vec<_> = self
+            .repository_snapshots
+            .values()
+            .filter(|snapshot| {
+                snapshot.tenant_id == context.tenant_id
+                    && snapshot.workspace_id == context.workspace_id
+                    && snapshot.repository_id == repository_id
+            })
+            .collect();
+        snapshots.sort_by(|left, right| {
+            right
+                .fetched_at
+                .cmp(&left.fetched_at)
+                .then_with(|| right.created_at.cmp(&left.created_at))
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        snapshots
+    }
+
+    pub fn repository_snapshot(&self, context: &WorkspaceContext, snapshot_id: &str) -> Option<&RepositorySnapshot> {
+        self.repository_snapshots
+            .get(snapshot_id)
+            .filter(|snapshot| snapshot.tenant_id == context.tenant_id && snapshot.workspace_id == context.workspace_id)
+    }
+
+    /// Inserts immutable snapshot evidence, returning the existing row when
+    /// the same repository/ref/commit has already been observed.
+    pub fn record_repository_snapshot(
+        &mut self,
+        context: &WorkspaceContext,
+        snapshot: RepositorySnapshot,
+    ) -> Result<RepositorySnapshot, CoreError> {
+        let repository = self.repository(context, &snapshot.repository_id).ok_or(CoreError::NotFound("repository"))?;
+        if snapshot.tenant_id != context.tenant_id
+            || snapshot.workspace_id != context.workspace_id
+            || repository.tenant_id != context.tenant_id
+            || repository.workspace_id != context.workspace_id
+            || snapshot.source_ref.trim().is_empty()
+            || snapshot.resolved_commit.trim().is_empty()
+            || snapshot.manifest_hash.trim().is_empty()
+            || snapshot.provider_version.trim().is_empty()
+            || snapshot.fetched_at.trim().is_empty()
+        {
+            return Err(CoreError::InvalidRepositorySnapshot);
+        }
+        if let Some(existing) = self.repository_snapshots.values().find(|existing| {
+            existing.tenant_id == context.tenant_id
+                && existing.workspace_id == context.workspace_id
+                && existing.repository_id == snapshot.repository_id
+                && existing.source_ref == snapshot.source_ref
+                && existing.resolved_commit == snapshot.resolved_commit
+        }) {
+            return Ok(existing.clone());
+        }
+        self.repository_snapshots.insert(snapshot.id.clone(), snapshot.clone());
+        Ok(snapshot)
     }
 
     pub fn list_service_ref_tracks(
@@ -1470,6 +1547,40 @@ mod tests {
             core.link_service_repository(&context, "relation-2".into(), "svc-code", &other.id),
             Err(CoreError::ServiceRepositoryExists)
         );
+    }
+
+    #[test]
+    fn repository_snapshots_are_scoped_and_deduplicated() {
+        let context = context("tenant-1", "workspace-1");
+        let other = super::tests::context("tenant-1", "workspace-2");
+        let mut core = Core::default();
+        let repository = core.create_repository(&context, "repo-1".into(), "https://github.com/acme/api").unwrap();
+        let snapshot = RepositorySnapshot {
+            id: "snapshot-1".into(),
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            repository_id: repository.id.clone(),
+            source_ref: "main".into(),
+            resolved_commit: "a".repeat(40),
+            manifest_hash: "sha256:manifest".into(),
+            content_root_ref: None,
+            fetched_at: "2026-11-07T00:00:00Z".into(),
+            provider_version: "git-cli".into(),
+            created_at: "2026-11-07T00:00:00Z".into(),
+        };
+        assert_eq!(core.record_repository_snapshot(&context, snapshot.clone()).unwrap(), snapshot);
+        assert_eq!(
+            core.record_repository_snapshot(
+                &context,
+                RepositorySnapshot { id: "different".into(), ..snapshot.clone() }
+            )
+            .unwrap()
+            .id,
+            "snapshot-1"
+        );
+        assert_eq!(core.list_repository_snapshots(&context, &repository.id).len(), 1);
+        assert!(core.repository_snapshot(&other, "snapshot-1").is_none());
+        assert_eq!(core.record_repository_snapshot(&other, snapshot), Err(CoreError::NotFound("repository")));
     }
 
     #[test]

@@ -17,6 +17,8 @@ vi.mock("@/lib/backend/client", () => ({
     restoreSpecificationRevision: vi.fn(),
     deleteSpecification: vi.fn(),
     syncSpecification: vi.fn(),
+    setSpecificationCodeBinding: vi.fn(),
+    deleteSpecificationCodeBinding: vi.fn(),
   },
 }));
 beforeEach(() => {
@@ -152,6 +154,8 @@ describe("catalog loading", () => {
     workspace.catalog = catalogFixture();
     vi.mocked(specxApi.syncSpecification).mockResolvedValue({
       specification: { ...workspace.catalog.specifications[0], content: "# Synced", contentHash: "sha256:synced", version: 2, etag: '"spec-v2"' },
+      snapshotId: "snapshot-1",
+      manifestHash: "sha256:manifest",
       resolvedCommit: "a".repeat(40),
       contentHash: "sha256:synced",
       changed: true,
@@ -164,5 +168,37 @@ describe("catalog loading", () => {
     expect(specxApi.syncSpecification).toHaveBeenCalledWith("workspace", "spec");
     expect(workspace.catalog.specifications[0]).toMatchObject({ content: "# Synced", version: 2, contentHash: "sha256:synced" });
     expect(workspace.specificationSyncFor("spec")).toMatchObject({ changed: true, resolvedCommit: "a".repeat(40) });
+  });
+
+  it("clears stale sync evidence when the managed source changes", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    vi.mocked(specxApi.syncSpecification).mockResolvedValue({
+      specification: workspace.catalog.specifications[0],
+      snapshotId: "snapshot-1",
+      manifestHash: "sha256:manifest",
+      resolvedCommit: "a".repeat(40),
+      contentHash: workspace.catalog.specifications[0].contentHash,
+      changed: false,
+      syncedAt: "2026-11-07T00:00:00Z",
+      providerVersion: "git-cli",
+    });
+    vi.mocked(specxApi.setSpecificationCodeBinding).mockResolvedValue({
+      id: "binding-1",
+      specificationId: "spec",
+      repository: { id: "repo-1", provider: "github", displayName: "acme/api", canonicalUrl: "https://github.com/acme/api" },
+      path: "docs/new.md",
+      refKind: "branch",
+      refName: "main",
+      createdAt: "2026-11-07T00:00:00Z",
+      updatedAt: "2026-11-07T00:00:00Z",
+      etag: '"binding-v1"',
+    });
+
+    await workspace.syncSpecification("spec");
+    expect(workspace.specificationSyncFor("spec")).not.toBeNull();
+    await workspace.setSpecificationCodeBinding("spec", "branch", "main", "docs/new.md");
+
+    expect(workspace.specificationSyncFor("spec")).toBeNull();
   });
 });

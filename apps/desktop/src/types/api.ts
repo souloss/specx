@@ -107,6 +107,8 @@ export type SpecificationCodeBindingResponse = {
 };
 export type SpecificationSyncResponse = {
   specification: SpecificationResponse;
+  snapshotId: string;
+  manifestHash: string;
   resolvedCommit: string;
   contentHash: string;
   changed: boolean;

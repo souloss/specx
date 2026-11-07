@@ -122,6 +122,7 @@ impl From<CoreError> for ErrorKind {
             CoreError::DuplicateRefTrack => Self::DuplicateRefTrack,
             CoreError::InvalidRefTrack => Self::InvalidRefTrack,
             CoreError::InvalidSpecificationCodeBinding => Self::InvalidSpecificationCodeBinding,
+            CoreError::InvalidRepositorySnapshot => Self::Internal,
             CoreError::ManagedSpecification => Self::ManagedSpecification,
             CoreError::HasDependents(_) => Self::HasDependents,
         }

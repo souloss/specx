@@ -1,6 +1,6 @@
 # SpecX 控制器与同步链路
 
-状态：第一版控制器接入已完成。`specx-controller` 已提供通用运行时、事件路由、有限重试、平台文件 ContentStore、Git Provider 和 Markdown Document Controller；API 已提供手动同步入口。持久 RepositorySnapshot、任务队列、Webhook/Poller 自动唤醒仍属于下一阶段。
+状态：仓库快照交接第一版已完成。`specx-controller` 已提供通用运行时、事件路由、有限重试、平台文件 ContentStore、Git Provider 和 Markdown Document Controller；API 手动同步会生成并持久化去重的 `RepositorySnapshot`，返回 resolved commit、manifest hash、Provider 版本和快照 ID。持久任务队列、Webhook/Poller 自动唤醒和快照内容根的长期托管仍属于下一阶段。
 
 本文把“控制器”定义为连接资源事实与外部能力的协调组件。控制器负责观察资源、调用能力、写回状态和产生不可变快照；Provider 只负责一次外部操作或外部观察，不拥有 SpecX 资源，也不直接写 Core 数据库。
 
@@ -128,9 +128,9 @@ Provider 不一定需要把完整仓库复制进 SpecX。它可以返回带 `con
 
 ## 5. Markdown 文档同步控制器
 
-第一版已经提供一个受 API 调用的同步适配器：它读取 `SpecificationCodeBinding` 的仓库 URL、ref 和 Markdown 路径，通过内置 Git Provider 获取文件，规范化换行并计算 `sha256:` 内容摘要，再以 Core 的 ETag CAS 写入规范正文和修订。`POST /specifications/{specificationId}/sync` 返回解析出的 commit、内容摘要、Provider 版本、同步时间和 `changed` 标志；重复内容不会追加修订。
+第一版已经提供一个受 API 调用的同步适配器：它读取 `SpecificationCodeBinding` 的仓库 URL、ref 和 Markdown 路径，通过内置 Git Provider 获取文件，解析提交和 tree manifest，规范化换行并计算 `sha256:` 内容摘要，再以 Core 的 ETag CAS 写入规范正文和修订。`POST /specifications/{specificationId}/sync` 返回解析出的 commit、manifest hash、内容摘要、Provider 版本、同步时间和 `snapshotId`；重复内容不会追加修订，仓库/来源/提交相同的快照也不会重复创建。
 
-该适配器是目标快照链路的可替换实现，暂时由 API 的受控同步调用承载。它不宣称已经具备持久 `RepositorySnapshot`、Webhook/Poller 或跨进程任务恢复；这些能力接入后，接口输入应切换为上游快照，控制器主体和 Core 写回语义保持不变。
+该适配器是目标快照链路的可替换实现，暂时由 API 的受控同步调用承载。当前 `RepositorySnapshot` 已持久化提交、manifest、Provider 和时间证据，但内容根仍由 Provider 临时 checkout 管理；持久内容对象、Webhook/Poller 或跨进程任务恢复接入后，接口输入应切换为上游快照，控制器主体和 Core 写回语义保持不变。
 
 Markdown 控制器处理“仓库快照中的某个路径如何成为 SpecX 规范内容”，不负责发现仓库、解析 branch 或注册 webhook。
 

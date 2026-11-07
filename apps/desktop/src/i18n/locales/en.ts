@@ -183,6 +183,7 @@ const en: MessageSchema = {
     syncing: "Syncing…",
     syncUpdated: "Updated from {commit}",
     syncUnchanged: "Already up to date ({commit})",
+    syncManifest: "Manifest {hash}",
     syncLastRun: "Last synchronized {date}",
     syncFailed: "Unable to synchronize this document",
     bindCodeVersion: "Bind code version",

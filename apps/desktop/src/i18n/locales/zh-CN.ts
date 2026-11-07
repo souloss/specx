@@ -181,6 +181,7 @@ const zhCN = {
     syncing: "正在同步…",
     syncUpdated: "已从 {commit} 更新",
     syncUnchanged: "已是最新版本（{commit}）",
+    syncManifest: "清单 {hash}",
     syncLastRun: "最近同步于 {date}",
     syncFailed: "无法同步这份文档",
     bindCodeVersion: "绑定代码版本",

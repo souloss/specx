@@ -36,7 +36,7 @@ use specx_core::persistence::{
 use specx_core::postgres::PostgresStore;
 use specx_core::{
     CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Core, CoreError,
-    Id, Repository, Service, ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, Specification,
+    Id, Repository, RepositorySnapshot, Service, ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, Specification,
     SpecificationCodeBinding, SpecificationKind, SpecificationRefKind, Tag, Workspace, WorkspaceContext,
     normalize_repository_url,
 };
@@ -259,6 +259,24 @@ impl StoreBackend {
             Self::Postgres(store) => {
                 let key = key.to_owned();
                 run_postgres_future(store.clone(), move |store| async move { store.load_idempotency(&key).await })
+            }
+        }
+    }
+
+    fn upsert_repository_snapshot(
+        &self,
+        context: &WorkspaceContext,
+        snapshot: &RepositorySnapshot,
+    ) -> Result<(), PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.upsert_repository_snapshot(context, snapshot),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let context = context.clone();
+                let snapshot = snapshot.clone();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.upsert_repository_snapshot(&context, &snapshot).await
+                })
             }
         }
     }
@@ -684,17 +702,36 @@ impl StoreBackend {
         updated: &Specification,
         audit: Option<&AuditEvent>,
     ) -> Result<bool, PersistenceError> {
+        self.update_specification_if_current_with_audit_and_snapshot(context, expected, updated, audit, None)
+    }
+
+    fn update_specification_if_current_with_audit_and_snapshot(
+        &self,
+        context: &WorkspaceContext,
+        expected: &Specification,
+        updated: &Specification,
+        audit: Option<&AuditEvent>,
+        snapshot: Option<&RepositorySnapshot>,
+    ) -> Result<bool, PersistenceError> {
         match self {
-            Self::Sqlite(store) => store.update_specification_if_current_with_audit(context, expected, updated, audit),
+            Self::Sqlite(store) => store
+                .update_specification_if_current_with_audit_and_snapshot(context, expected, updated, audit, snapshot),
             #[cfg(feature = "postgres")]
             Self::Postgres(store) => {
                 let context = context.clone();
                 let expected = expected.clone();
                 let updated = updated.clone();
                 let audit = audit.cloned();
+                let snapshot = snapshot.cloned();
                 run_postgres_future(store.clone(), move |store| async move {
                     store
-                        .update_specification_if_current_with_audit(&context, &expected, &updated, audit.as_ref())
+                        .update_specification_if_current_with_audit_and_snapshot(
+                            &context,
+                            &expected,
+                            &updated,
+                            audit.as_ref(),
+                            snapshot.as_ref(),
+                        )
                         .await
                 })
             }

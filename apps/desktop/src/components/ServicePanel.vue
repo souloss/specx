@@ -119,6 +119,7 @@ async function synchronizeSpecification() {
         <span v-if="specificationCodeBinding" class="mt-1 block truncate font-mono text-xs text-muted-foreground">{{ specificationCodeBinding.path }} · {{ specificationCodeBinding.refName }}</span>
         <div v-if="specificationSync" class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-primary/15 pt-2 text-xs text-muted-foreground" role="status">
           <span class="font-medium text-foreground">{{ specificationSync.changed ? t("specification.syncUpdated", { commit: specificationSync.resolvedCommit.slice(0, 7) }) : t("specification.syncUnchanged", { commit: specificationSync.resolvedCommit.slice(0, 7) }) }}</span>
+          <span :title="specificationSync.manifestHash">{{ t("specification.syncManifest", { hash: specificationSync.manifestHash.slice(0, 15) }) }}</span>
           <span>{{ t("specification.syncLastRun", { date: formatDate(specificationSync.syncedAt, locale) }) }}</span>
         </div>
       </div>

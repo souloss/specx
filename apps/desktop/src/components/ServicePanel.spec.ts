@@ -60,6 +60,8 @@ describe("ServicePanel repository-managed specification", () => {
       changed: true,
       syncedAt: "2026-11-07T00:00:00Z",
       providerVersion: "git-cli",
+      snapshotId: "snapshot-1",
+      manifestHash: "sha256:manifest",
     };
     mockWorkspace.syncSpecification.mockImplementationOnce(() =>
       new Promise((resolve) => {
@@ -105,6 +107,7 @@ describe("ServicePanel repository-managed specification", () => {
     expect(mockWorkspace.syncSpecification).toHaveBeenCalledWith("spec");
     expect(wrapper.text()).toContain("已从 aaaaaaa 更新");
     expect(wrapper.text()).toContain("最近同步于");
+    expect(wrapper.text()).toContain("清单 sha256:manifes");
     wrapper.unmount();
   });
 });

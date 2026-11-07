@@ -2,7 +2,7 @@
 
 `core` owns the schema for both SQLite and PostgreSQL. The adapters expose the
 same `schema_migrations` contract and must reach the same latest version before
-serving business requests. The current version is **15**.
+serving business requests. The current version is **16**.
 
 Every migration is a monotonic integer. A version is applied exactly once and
 is recorded only after its DDL and data backfill succeeds. Existing databases
@@ -24,6 +24,10 @@ branch/tag/commit selection from the service relationship to each specification.
 Version 15 adds the selected Markdown path to each specification code binding.
 Bindings with a non-empty path represent repository-managed specifications and
 are protected from in-app content edits and source removal.
+Version 16 adds immutable, workspace-scoped `repository_snapshots` keyed by
+repository, source ref, and resolved commit. Each row keeps the manifest hash,
+provider version, fetch time, and optional content-root metadata so downstream
+controllers can consume durable evidence after a trigger or process restart.
 
 Hosts open the adapter before exposing the API router. `/ready` remains false
 until the latest marker exists. Web startup makes three bounded attempts with a

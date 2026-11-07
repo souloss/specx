@@ -14,9 +14,9 @@ use crate::persistence::{
 };
 use crate::{
     CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Core,
-    Repository, Service, ServiceCodeBinding, ServiceGroup, ServiceRefKind, ServiceRefTrack, ServiceRepository,
-    Specification, SpecificationCodeBinding, SpecificationKind, SpecificationRefKind, Tag, Workspace, WorkspaceContext,
-    normalize_repository_url,
+    Repository, RepositorySnapshot, Service, ServiceCodeBinding, ServiceGroup, ServiceRefKind, ServiceRefTrack,
+    ServiceRepository, Specification, SpecificationCodeBinding, SpecificationKind, SpecificationRefKind, Tag,
+    Workspace, WorkspaceContext, normalize_repository_url,
 };
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -218,6 +218,14 @@ impl PostgresStore {
                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived BOOLEAN NOT NULL DEFAULT FALSE,
                    UNIQUE (tenant_id, workspace_id, canonical_url)
                  );
+                 CREATE TABLE IF NOT EXISTS repository_snapshots (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+                   source_ref TEXT NOT NULL, resolved_commit TEXT NOT NULL, manifest_hash TEXT NOT NULL,
+                   content_root_ref TEXT, fetched_at TEXT NOT NULL, provider_version TEXT NOT NULL, created_at TEXT NOT NULL,
+                   UNIQUE (tenant_id, workspace_id, repository_id, source_ref, resolved_commit)
+                 );
+                 CREATE INDEX IF NOT EXISTS repository_snapshots_scope ON repository_snapshots(tenant_id, workspace_id, repository_id, fetched_at);
                  CREATE INDEX IF NOT EXISTS repositories_scope ON repositories(tenant_id, workspace_id, display_name);
                  CREATE TABLE IF NOT EXISTS service_repositories (
                    id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
@@ -531,6 +539,23 @@ impl PostgresStore {
             .execute("INSERT INTO schema_migrations(version) VALUES (15) ON CONFLICT DO NOTHING", &[])
             .await
             .map_err(pg_error)?;
+        transaction
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS repository_snapshots (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+                   source_ref TEXT NOT NULL, resolved_commit TEXT NOT NULL, manifest_hash TEXT NOT NULL,
+                   content_root_ref TEXT, fetched_at TEXT NOT NULL, provider_version TEXT NOT NULL, created_at TEXT NOT NULL,
+                   UNIQUE (tenant_id, workspace_id, repository_id, source_ref, resolved_commit)
+                 );
+                 CREATE INDEX IF NOT EXISTS repository_snapshots_scope ON repository_snapshots(tenant_id, workspace_id, repository_id, fetched_at);",
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (16) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
         transaction.commit().await.map_err(pg_error)?;
         Ok(())
     }
@@ -736,6 +761,23 @@ impl PostgresStore {
             ).await.map_err(pg_error)?;
             ensure_scope(changed, "repository")?;
         }
+        for snapshot in core
+            .repository_snapshots()
+            .filter(|snapshot| in_scope(context, &snapshot.tenant_id, &snapshot.workspace_id))
+        {
+            let changed = transaction
+                .execute(
+                    "INSERT INTO repository_snapshots(id,tenant_id,workspace_id,repository_id,source_ref,resolved_commit,manifest_hash,content_root_ref,fetched_at,provider_version,created_at)
+                     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                     ON CONFLICT(tenant_id,workspace_id,repository_id,source_ref,resolved_commit) DO UPDATE SET manifest_hash=excluded.manifest_hash,
+                       content_root_ref=excluded.content_root_ref,fetched_at=excluded.fetched_at,provider_version=excluded.provider_version
+                     WHERE repository_snapshots.tenant_id=excluded.tenant_id AND repository_snapshots.workspace_id=excluded.workspace_id",
+                    &[&snapshot.id, &snapshot.tenant_id, &snapshot.workspace_id, &snapshot.repository_id, &snapshot.source_ref, &snapshot.resolved_commit, &snapshot.manifest_hash, &snapshot.content_root_ref, &snapshot.fetched_at, &snapshot.provider_version, &snapshot.created_at],
+                )
+                .await
+                .map_err(pg_error)?;
+            ensure_scope(changed, "repository snapshot")?;
+        }
         for relation in core
             .service_repositories()
             .filter(|relation| in_scope(context, &relation.tenant_id, &relation.workspace_id))
@@ -896,6 +938,10 @@ impl PostgresStore {
         for row in repository_rows {
             core.insert_repository(repository_from_row(&row));
         }
+        let repository_snapshot_rows = client.query("SELECT id,tenant_id,workspace_id,repository_id,source_ref,resolved_commit,manifest_hash,content_root_ref,fetched_at,provider_version,created_at FROM repository_snapshots WHERE tenant_id=$1 AND workspace_id=$2", &[&context.tenant_id, &context.workspace_id]).await.map_err(pg_error)?;
+        for row in repository_snapshot_rows {
+            core.insert_repository_snapshot(repository_snapshot_from_row(&row));
+        }
         let service_repository_rows = client.query("SELECT id,tenant_id,workspace_id,service_id,repository_id,created_at,updated_at FROM service_repositories WHERE tenant_id=$1 AND workspace_id=$2", &[&context.tenant_id, &context.workspace_id]).await.map_err(pg_error)?;
         for row in service_repository_rows {
             core.insert_service_repository(service_repository_from_row(&row));
@@ -1006,6 +1052,17 @@ impl PostgresStore {
         updated: &Specification,
         audit: Option<&AuditEvent>,
     ) -> Result<bool, PersistenceError> {
+        self.update_specification_if_current_with_audit_and_snapshot(context, expected, updated, audit, None).await
+    }
+
+    pub async fn update_specification_if_current_with_audit_and_snapshot(
+        &self,
+        context: &WorkspaceContext,
+        expected: &Specification,
+        updated: &Specification,
+        audit: Option<&AuditEvent>,
+        snapshot: Option<&RepositorySnapshot>,
+    ) -> Result<bool, PersistenceError> {
         if expected.id != updated.id
             || expected.tenant_id != context.tenant_id
             || expected.workspace_id != context.workspace_id
@@ -1013,6 +1070,11 @@ impl PostgresStore {
             || updated.workspace_id != context.workspace_id
         {
             return Err(PersistenceError::new("specification update scope does not match"));
+        }
+        if let Some(snapshot) = snapshot {
+            if snapshot.tenant_id != context.tenant_id || snapshot.workspace_id != context.workspace_id {
+                return Err(PersistenceError::new("repository snapshot scope does not match"));
+            }
         }
 
         let mut client = self.client().await?;
@@ -1071,8 +1133,42 @@ impl PostgresStore {
         if let Some(event) = audit {
             insert_audit(&transaction, event).await?;
         }
+        if let Some(snapshot) = snapshot {
+            transaction
+                .execute(
+                    "INSERT INTO repository_snapshots(id,tenant_id,workspace_id,repository_id,source_ref,resolved_commit,manifest_hash,content_root_ref,fetched_at,provider_version,created_at)
+                     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                     ON CONFLICT(tenant_id,workspace_id,repository_id,source_ref,resolved_commit) DO UPDATE SET manifest_hash=excluded.manifest_hash,
+                       content_root_ref=excluded.content_root_ref,fetched_at=excluded.fetched_at,provider_version=excluded.provider_version",
+                    &[&snapshot.id, &snapshot.tenant_id, &snapshot.workspace_id, &snapshot.repository_id, &snapshot.source_ref, &snapshot.resolved_commit, &snapshot.manifest_hash, &snapshot.content_root_ref, &snapshot.fetched_at, &snapshot.provider_version, &snapshot.created_at],
+                )
+                .await
+                .map_err(pg_error)?;
+        }
         transaction.commit().await.map_err(pg_error)?;
         Ok(true)
+    }
+
+    pub async fn upsert_repository_snapshot(
+        &self,
+        context: &WorkspaceContext,
+        snapshot: &RepositorySnapshot,
+    ) -> Result<(), PersistenceError> {
+        if snapshot.tenant_id != context.tenant_id || snapshot.workspace_id != context.workspace_id {
+            return Err(PersistenceError::new("repository snapshot scope does not match"));
+        }
+        let client = self.client().await?;
+        client
+            .execute(
+                "INSERT INTO repository_snapshots(id,tenant_id,workspace_id,repository_id,source_ref,resolved_commit,manifest_hash,content_root_ref,fetched_at,provider_version,created_at)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                 ON CONFLICT(tenant_id,workspace_id,repository_id,source_ref,resolved_commit) DO UPDATE SET manifest_hash=excluded.manifest_hash,
+                   content_root_ref=excluded.content_root_ref,fetched_at=excluded.fetched_at,provider_version=excluded.provider_version",
+                &[&snapshot.id, &snapshot.tenant_id, &snapshot.workspace_id, &snapshot.repository_id, &snapshot.source_ref, &snapshot.resolved_commit, &snapshot.manifest_hash, &snapshot.content_root_ref, &snapshot.fetched_at, &snapshot.provider_version, &snapshot.created_at],
+            )
+            .await
+            .map_err(pg_error)?;
+        Ok(())
     }
 
     pub async fn update_specification_code_binding_if_current_with_audit(
@@ -2565,6 +2661,22 @@ fn repository_from_row(row: &Row) -> Repository {
         created_at: row.get(6),
         updated_at: row.get(7),
         archived: row.get(8),
+    }
+}
+
+fn repository_snapshot_from_row(row: &Row) -> RepositorySnapshot {
+    RepositorySnapshot {
+        id: row.get(0),
+        tenant_id: row.get(1),
+        workspace_id: row.get(2),
+        repository_id: row.get(3),
+        source_ref: row.get(4),
+        resolved_commit: row.get(5),
+        manifest_hash: row.get(6),
+        content_root_ref: row.get(7),
+        fetched_at: row.get(8),
+        provider_version: row.get(9),
+        created_at: row.get(10),
     }
 }
 

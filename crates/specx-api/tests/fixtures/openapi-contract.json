@@ -143,8 +143,8 @@
       "properties": ["content", "contentHash", "etag", "id", "kind", "serviceId", "tenantId", "title", "updatedAt", "version", "workspaceId"]
     },
     "SpecificationSyncResponse": {
-      "required": ["changed", "contentHash", "providerVersion", "resolvedCommit", "specification", "syncedAt"],
-      "properties": ["changed", "contentHash", "providerVersion", "resolvedCommit", "specification", "syncedAt"]
+      "required": ["changed", "contentHash", "manifestHash", "providerVersion", "resolvedCommit", "snapshotId", "specification", "syncedAt"],
+      "properties": ["changed", "contentHash", "manifestHash", "providerVersion", "resolvedCommit", "snapshotId", "specification", "syncedAt"]
     },
     "ServicePageResponse": {
       "required": ["items", "limit", "offset", "query", "tagIds", "total"],

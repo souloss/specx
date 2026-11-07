@@ -3884,11 +3884,21 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "specx-controller",
  "specx-core",
  "tokio",
  "tracing",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "specx-controller"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+ "specx-formats",
+ "specx-types",
 ]
 
 [[package]]

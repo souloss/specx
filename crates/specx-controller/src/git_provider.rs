@@ -21,6 +21,7 @@ pub struct GitFileRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitFileSnapshot {
     pub resolved_commit: String,
+    pub manifest_hash: String,
     pub content: String,
     pub content_hash: String,
     pub provider_version: String,
@@ -135,7 +136,7 @@ impl CommandGitProvider {
         &self,
         request: &GitFileRequest,
         checkout: &Path,
-    ) -> Result<(String, Vec<u8>), GitProviderError> {
+    ) -> Result<(String, String, Vec<u8>), GitProviderError> {
         match request.ref_kind {
             SpecificationRefKind::Branch | SpecificationRefKind::Tag => {
                 let ref_name = request.ref_name.as_str();
@@ -156,10 +157,11 @@ impl CommandGitProvider {
                 )?;
                 let commit = self.run_git(Some(checkout), &["rev-parse", "HEAD"], "resolve")?;
                 let commit = String::from_utf8(commit).map_err(|_| GitProviderError::InvalidUtf8)?.trim().to_owned();
+                let manifest = self.run_git(Some(checkout), &["ls-tree", "-r", "--full-tree", "HEAD"], "resolve")?;
                 let pathspec = format!("HEAD:{}", request.path);
                 let bytes =
                     self.run_git(Some(checkout), &["show", "--format=", "--no-ext-diff", &pathspec], "read_file")?;
-                Ok((commit, bytes))
+                Ok((commit, manifest_hash(&manifest), bytes))
             }
             SpecificationRefKind::Commit => {
                 self.run_git(
@@ -175,10 +177,12 @@ impl CommandGitProvider {
                 )?;
                 let commit = self.run_git(Some(checkout), &["rev-parse", "FETCH_HEAD^{commit}"], "resolve")?;
                 let commit = String::from_utf8(commit).map_err(|_| GitProviderError::InvalidUtf8)?.trim().to_owned();
+                let manifest =
+                    self.run_git(Some(checkout), &["ls-tree", "-r", "--full-tree", "FETCH_HEAD"], "resolve")?;
                 let pathspec = format!("FETCH_HEAD:{}", request.path);
                 let bytes =
                     self.run_git(Some(checkout), &["show", "--format=", "--no-ext-diff", &pathspec], "read_file")?;
-                Ok((commit, bytes))
+                Ok((commit, manifest_hash(&manifest), bytes))
             }
         }
     }
@@ -191,7 +195,7 @@ impl GitProvider for CommandGitProvider {
             return Err(GitProviderError::InvalidRequest);
         }
         let checkout = self.checkout_path(request);
-        let result = self.resolve_and_read(request, &checkout).and_then(|(resolved_commit, bytes)| {
+        let result = self.resolve_and_read(request, &checkout).and_then(|(resolved_commit, manifest_hash, bytes)| {
             if bytes.len() > MAX_DOCUMENT_BYTES {
                 return Err(GitProviderError::DocumentTooLarge);
             }
@@ -203,6 +207,7 @@ impl GitProvider for CommandGitProvider {
             let digest = Sha256::digest(content.as_bytes());
             Ok(GitFileSnapshot {
                 resolved_commit,
+                manifest_hash,
                 content_hash: format!("sha256:{digest:x}"),
                 content,
                 provider_version: "git-cli".into(),
@@ -211,6 +216,11 @@ impl GitProvider for CommandGitProvider {
         let _ = fs::remove_dir_all(&checkout);
         result
     }
+}
+
+fn manifest_hash(manifest: &[u8]) -> String {
+    let digest = Sha256::digest(manifest);
+    format!("sha256:{digest:x}")
 }
 
 pub fn validate_markdown_path(path: &str) -> Result<(), GitProviderError> {

@@ -147,6 +147,27 @@ pub struct Repository {
     pub archived: bool,
 }
 
+/// Immutable evidence that a repository ref resolved to one fetched revision.
+///
+/// The content root is optional while the platform uses an external checkout
+/// or a provider-managed object store. Consumers must use the commit and
+/// manifest hash as the stable hand-off evidence instead of the mutable ref.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositorySnapshot {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    pub repository_id: Id,
+    pub source_ref: String,
+    pub resolved_commit: String,
+    pub manifest_hash: String,
+    pub content_root_ref: Option<String>,
+    pub fetched_at: String,
+    pub provider_version: String,
+    pub created_at: String,
+}
+
 /// A service's optional link to its single code repository.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

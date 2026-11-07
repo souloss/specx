@@ -17,6 +17,7 @@ pub struct MarkdownDocumentResult {
     pub content: String,
     pub content_hash: String,
     pub resolved_commit: String,
+    pub manifest_hash: String,
     pub provider_version: String,
     pub changed: bool,
 }
@@ -48,6 +49,7 @@ where
             content,
             content_hash,
             resolved_commit: snapshot.resolved_commit,
+            manifest_hash: snapshot.manifest_hash,
             provider_version: snapshot.provider_version,
         })
     }
@@ -64,6 +66,7 @@ mod tests {
         fn read_markdown_file(&self, _request: &GitFileRequest) -> Result<GitFileSnapshot, GitProviderError> {
             Ok(GitFileSnapshot {
                 resolved_commit: "a".repeat(40),
+                manifest_hash: "sha256:manifest".into(),
                 content: "# Hello\r\n".into(),
                 content_hash: "unused".into(),
                 provider_version: "fake".into(),
