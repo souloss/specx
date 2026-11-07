@@ -9,7 +9,7 @@ import type { Specification } from "@/types/domain";
 import { formatDate } from "@/lib/core";
 import { i18n, translate } from "@/i18n";
 
-const props = defineProps<{ specification: Specification }>();
+const props = defineProps<{ specification: Specification; managed?: boolean }>();
 const open = defineModel<boolean>("open", { required: true });
 const workspace = useWorkspaceStore();
 const t = translate;
@@ -83,11 +83,18 @@ async function restore() {
                 <strong>{{ t("specification.revision", { version: selected.version }) }}</strong>
                 <p class="text-xs text-muted-foreground">{{ t("specification.revisionBy", { actor: selected.createdBy, date: formatDate(selected.createdAt, locale) }) }}</p>
               </div>
-              <Button v-if="selected.version !== specification.version" size="sm" variant="outline" :disabled="hasDraft" :title="hasDraft ? t('specification.saveBeforeRestore') : undefined" @click="restoreVersion = selected.version"
+              <Button
+                v-if="selected.version !== specification.version"
+                size="sm"
+                variant="outline"
+                :disabled="hasDraft || managed"
+                :title="managed ? t('specification.managedReadOnlyDescription') : hasDraft ? t('specification.saveBeforeRestore') : undefined"
+                @click="restoreVersion = selected.version"
                 ><RotateCcw class="h-3.5 w-3.5" />{{ t("specification.restoreVersion") }}</Button
               >
             </div>
             <p v-if="hasDraft" class="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-950 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-100">{{ t("specification.saveBeforeRestore") }}</p>
+            <p v-else-if="managed" class="rounded-md border border-primary/30 bg-primary/5 p-2 text-xs text-muted-foreground">{{ t("specification.managedReadOnlyDescription") }}</p>
             <div class="grid gap-3 lg:grid-cols-2">
               <div>
                 <div class="mb-2 flex items-center gap-1 text-xs font-medium text-muted-foreground"><Eye class="h-3.5 w-3.5" />{{ t("specification.revision", { version: selected.version }) }}</div>

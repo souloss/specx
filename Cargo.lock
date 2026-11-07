@@ -2216,6 +2216,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "specx-controller",
  "specx-core",
  "tempfile",
  "tokio",
@@ -2223,6 +2224,16 @@ dependencies = [
  "tracing",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "specx-controller"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+ "specx-formats",
+ "specx-types",
+ "tempfile",
 ]
 
 [[package]]
@@ -2244,6 +2255,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
+ "url",
  "webpki-roots 0.26.11",
 ]
 

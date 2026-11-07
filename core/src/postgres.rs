@@ -13,8 +13,10 @@ use crate::persistence::{
     WebSession, WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
 };
 use crate::{
-    CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Core, Service,
-    ServiceCodeBinding, ServiceGroup, Specification, SpecificationKind, Tag, Workspace, WorkspaceContext,
+    CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Core,
+    Repository, Service, ServiceCodeBinding, ServiceGroup, ServiceRefKind, ServiceRefTrack, ServiceRepository,
+    Specification, SpecificationCodeBinding, SpecificationKind, SpecificationRefKind, Tag, Workspace, WorkspaceContext,
+    normalize_repository_url,
 };
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -210,6 +212,28 @@ impl PostgresStore {
                    UNIQUE (tenant_id, workspace_id, service_id, source_id, entity_kind, path)
                  );
                  CREATE INDEX IF NOT EXISTS service_code_bindings_service ON service_code_bindings(tenant_id, workspace_id, service_id);
+                 CREATE TABLE IF NOT EXISTS repositories (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   provider TEXT NOT NULL, display_name TEXT NOT NULL, canonical_url TEXT NOT NULL,
+                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived BOOLEAN NOT NULL DEFAULT FALSE,
+                   UNIQUE (tenant_id, workspace_id, canonical_url)
+                 );
+                 CREATE INDEX IF NOT EXISTS repositories_scope ON repositories(tenant_id, workspace_id, display_name);
+                 CREATE TABLE IF NOT EXISTS service_repositories (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+                   repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                   UNIQUE (tenant_id, workspace_id, service_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS service_ref_tracks (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   service_repository_id TEXT NOT NULL REFERENCES service_repositories(id) ON DELETE CASCADE,
+                   ref_kind TEXT NOT NULL, ref_name TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                   UNIQUE (tenant_id, workspace_id, service_repository_id, ref_kind, ref_name)
+                 );
+                 CREATE UNIQUE INDEX IF NOT EXISTS service_ref_tracks_default ON service_ref_tracks(tenant_id, workspace_id, service_repository_id)
+                   WHERE ref_kind = 'default_branch';
                  CREATE INDEX IF NOT EXISTS services_scope ON services(tenant_id, workspace_id, name);
                  CREATE TABLE IF NOT EXISTS service_tags (
                    tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
@@ -229,6 +253,15 @@ impl PostgresStore {
                    content TEXT NOT NULL, content_hash TEXT NOT NULL, created_by TEXT NOT NULL,
                    created_at TEXT NOT NULL, UNIQUE (specification_id, version)
                  );
+                 CREATE TABLE IF NOT EXISTS specification_code_bindings (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   specification_id TEXT NOT NULL REFERENCES specifications(id) ON DELETE CASCADE,
+                   service_repository_id TEXT NOT NULL REFERENCES service_repositories(id) ON DELETE CASCADE,
+                   path TEXT NOT NULL DEFAULT '', ref_kind TEXT NOT NULL, ref_name TEXT NOT NULL,
+                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                   UNIQUE (tenant_id, workspace_id, specification_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS specification_code_bindings_scope ON specification_code_bindings(tenant_id, workspace_id, specification_id);
                  CREATE TABLE IF NOT EXISTS workspace_members (
                    tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL, actor_id TEXT NOT NULL,
                    role TEXT NOT NULL, revoked_at TEXT, created_at TEXT NOT NULL,
@@ -365,6 +398,137 @@ impl PostgresStore {
             .map_err(pg_error)?;
         transaction
             .execute("INSERT INTO schema_migrations(version) VALUES (12) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .batch_execute(
+                "CREATE TEMP TABLE specx_v13_legacy_repository_map(
+                   source_id TEXT PRIMARY KEY, repository_id TEXT NOT NULL
+                 ) ON COMMIT DROP",
+            )
+            .await
+            .map_err(pg_error)?;
+        let legacy_git_sources = transaction
+            .query(
+                "SELECT id,tenant_id,workspace_id,root_locator,created_at,updated_at,archived
+                 FROM code_sources WHERE source_type='git' ORDER BY created_at,id",
+                &[],
+            )
+            .await
+            .map_err(pg_error)?;
+        for row in legacy_git_sources {
+            let source_id: String = row.get(0);
+            let tenant_id: String = row.get(1);
+            let workspace_id: String = row.get(2);
+            let root_locator: String = row.get(3);
+            let created_at: String = row.get(4);
+            let updated_at: String = row.get(5);
+            let archived: bool = row.get(6);
+            let Ok((canonical_url, provider, display_name)) = normalize_repository_url(&root_locator) else {
+                continue;
+            };
+            let existing = transaction
+                .query_opt(
+                    "SELECT id FROM repositories WHERE tenant_id=$1 AND workspace_id=$2 AND canonical_url=$3",
+                    &[&tenant_id, &workspace_id, &canonical_url],
+                )
+                .await
+                .map_err(pg_error)?;
+            let repository_id: String = if let Some(existing) = existing {
+                existing.get(0)
+            } else {
+                transaction
+                    .execute(
+                        "INSERT INTO repositories(id,tenant_id,workspace_id,provider,display_name,canonical_url,created_at,updated_at,archived)
+                         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING",
+                        &[&source_id, &tenant_id, &workspace_id, &provider, &display_name, &canonical_url, &created_at, &updated_at, &archived],
+                    )
+                    .await
+                    .map_err(pg_error)?;
+                transaction
+                    .query_one(
+                        "SELECT id FROM repositories WHERE tenant_id=$1 AND workspace_id=$2 AND canonical_url=$3",
+                        &[&tenant_id, &workspace_id, &canonical_url],
+                    )
+                    .await
+                    .map_err(pg_error)?
+                    .get(0)
+            };
+            transaction
+                .execute(
+                    "INSERT INTO specx_v13_legacy_repository_map(source_id,repository_id) VALUES($1,$2)",
+                    &[&source_id, &repository_id],
+                )
+                .await
+                .map_err(pg_error)?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO service_repositories(id,tenant_id,workspace_id,service_id,repository_id,created_at,updated_at)
+                 SELECT binding.id,binding.tenant_id,binding.workspace_id,binding.service_id,repository.id,binding.created_at,binding.updated_at
+                 FROM service_code_bindings binding
+                 JOIN specx_v13_legacy_repository_map source_repository ON source_repository.source_id=binding.source_id
+                 JOIN repositories repository ON repository.id=source_repository.repository_id
+                 WHERE binding.id=(
+                   SELECT candidate.id FROM service_code_bindings candidate
+                   JOIN specx_v13_legacy_repository_map candidate_repository ON candidate_repository.source_id=candidate.source_id
+                   WHERE candidate.tenant_id=binding.tenant_id AND candidate.workspace_id=binding.workspace_id
+                     AND candidate.service_id=binding.service_id
+                   ORDER BY CASE candidate.role WHEN 'primary' THEN 0 ELSE 1 END,candidate.created_at,candidate.id LIMIT 1
+                 ) ON CONFLICT(tenant_id,workspace_id,service_id) DO NOTHING",
+                &[],
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute(
+                "INSERT INTO service_ref_tracks(id,tenant_id,workspace_id,service_repository_id,ref_kind,ref_name,created_at,updated_at)
+                 SELECT binding.id,binding.tenant_id,binding.workspace_id,relation.id,
+                   CASE binding.revision_kind WHEN 'default_branch' THEN 'default_branch' ELSE binding.revision_kind END,
+                   CASE binding.revision_kind WHEN 'default_branch' THEN NULL ELSE binding.revision END,
+                   binding.created_at,binding.updated_at
+                 FROM service_code_bindings binding
+                 JOIN specx_v13_legacy_repository_map source_repository ON source_repository.source_id=binding.source_id
+                 JOIN service_repositories relation ON relation.service_id=binding.service_id
+                   AND relation.tenant_id=binding.tenant_id AND relation.workspace_id=binding.workspace_id
+                   AND relation.repository_id=source_repository.repository_id
+                 WHERE binding.revision_kind IN ('default_branch','branch','tag','commit')
+                 ORDER BY binding.created_at,binding.id
+                 ON CONFLICT DO NOTHING",
+                &[],
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (13) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS specification_code_bindings (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   specification_id TEXT NOT NULL REFERENCES specifications(id) ON DELETE CASCADE,
+                   service_repository_id TEXT NOT NULL REFERENCES service_repositories(id) ON DELETE CASCADE,
+                   path TEXT NOT NULL DEFAULT '', ref_kind TEXT NOT NULL, ref_name TEXT NOT NULL,
+                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                   UNIQUE (tenant_id, workspace_id, specification_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS specification_code_bindings_scope ON specification_code_bindings(tenant_id, workspace_id, specification_id);",
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (14) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .batch_execute(
+                "ALTER TABLE specification_code_bindings ADD COLUMN IF NOT EXISTS path TEXT NOT NULL DEFAULT '';",
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (15) ON CONFLICT DO NOTHING", &[])
             .await
             .map_err(pg_error)?;
         transaction.commit().await.map_err(pg_error)?;
@@ -559,6 +723,60 @@ impl PostgresStore {
             ).await.map_err(pg_error)?;
             ensure_scope(changed, "code binding")?;
         }
+        for repository in
+            core.repositories().filter(|repository| in_scope(context, &repository.tenant_id, &repository.workspace_id))
+        {
+            let changed = transaction.execute(
+                "INSERT INTO repositories(id,tenant_id,workspace_id,provider,display_name,canonical_url,created_at,updated_at,archived)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                 ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,display_name=excluded.display_name,
+                   canonical_url=excluded.canonical_url,updated_at=excluded.updated_at,archived=excluded.archived
+                 WHERE repositories.tenant_id=excluded.tenant_id AND repositories.workspace_id=excluded.workspace_id",
+                &[&repository.id, &repository.tenant_id, &repository.workspace_id, &repository.provider, &repository.display_name, &repository.canonical_url, &repository.created_at, &repository.updated_at, &repository.archived],
+            ).await.map_err(pg_error)?;
+            ensure_scope(changed, "repository")?;
+        }
+        for relation in core
+            .service_repositories()
+            .filter(|relation| in_scope(context, &relation.tenant_id, &relation.workspace_id))
+        {
+            let changed = transaction.execute(
+                "INSERT INTO service_repositories(id,tenant_id,workspace_id,service_id,repository_id,created_at,updated_at)
+                 VALUES($1,$2,$3,$4,$5,$6,$7)
+                 ON CONFLICT(id) DO UPDATE SET service_id=excluded.service_id,repository_id=excluded.repository_id,updated_at=excluded.updated_at
+                 WHERE service_repositories.tenant_id=excluded.tenant_id AND service_repositories.workspace_id=excluded.workspace_id",
+                &[&relation.id, &relation.tenant_id, &relation.workspace_id, &relation.service_id, &relation.repository_id, &relation.created_at, &relation.updated_at],
+            ).await.map_err(pg_error)?;
+            ensure_scope(changed, "service repository")?;
+        }
+        for track in core.ref_tracks().filter(|track| in_scope(context, &track.tenant_id, &track.workspace_id)) {
+            let changed = transaction.execute(
+                "INSERT INTO service_ref_tracks(id,tenant_id,workspace_id,service_repository_id,ref_kind,ref_name,created_at,updated_at)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+                 ON CONFLICT(id) DO UPDATE SET service_repository_id=excluded.service_repository_id,ref_kind=excluded.ref_kind,
+                   ref_name=excluded.ref_name,updated_at=excluded.updated_at
+                 WHERE service_ref_tracks.tenant_id=excluded.tenant_id AND service_ref_tracks.workspace_id=excluded.workspace_id",
+                &[&track.id, &track.tenant_id, &track.workspace_id, &track.service_repository_id, &ref_kind_name(track.ref_kind), &track.ref_name, &track.created_at, &track.updated_at],
+            ).await.map_err(pg_error)?;
+            ensure_scope(changed, "service ref track")?;
+        }
+        for binding in core
+            .specification_code_bindings()
+            .filter(|binding| in_scope(context, &binding.tenant_id, &binding.workspace_id))
+        {
+            let changed = transaction
+                .execute(
+                    "INSERT INTO specification_code_bindings(id,tenant_id,workspace_id,specification_id,service_repository_id,path,ref_kind,ref_name,created_at,updated_at)
+                     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                     ON CONFLICT(id) DO UPDATE SET specification_id=excluded.specification_id,service_repository_id=excluded.service_repository_id,
+                       path=excluded.path,ref_kind=excluded.ref_kind,ref_name=excluded.ref_name,updated_at=excluded.updated_at
+                     WHERE specification_code_bindings.tenant_id=excluded.tenant_id AND specification_code_bindings.workspace_id=excluded.workspace_id",
+                    &[&binding.id, &binding.tenant_id, &binding.workspace_id, &binding.specification_id, &binding.service_repository_id, &binding.path, &specification_ref_kind_name(binding.ref_kind), &binding.ref_name, &binding.created_at, &binding.updated_at],
+                )
+                .await
+                .map_err(pg_error)?;
+            ensure_scope(changed, "specification code binding")?;
+        }
         for specification in core
             .specifications()
             .filter(|specification| in_scope(context, &specification.tenant_id, &specification.workspace_id))
@@ -673,6 +891,22 @@ impl PostgresStore {
         let binding_rows = client.query("SELECT id,tenant_id,workspace_id,service_id,source_id,role,entity_kind,path,revision_kind,revision,created_at,updated_at FROM service_code_bindings WHERE tenant_id=$1 AND workspace_id=$2", &[&context.tenant_id, &context.workspace_id]).await.map_err(pg_error)?;
         for row in binding_rows {
             core.insert_code_binding(code_binding_from_row(&row)?);
+        }
+        let repository_rows = client.query("SELECT id,tenant_id,workspace_id,provider,display_name,canonical_url,created_at,updated_at,archived FROM repositories WHERE tenant_id=$1 AND workspace_id=$2", &[&context.tenant_id, &context.workspace_id]).await.map_err(pg_error)?;
+        for row in repository_rows {
+            core.insert_repository(repository_from_row(&row));
+        }
+        let service_repository_rows = client.query("SELECT id,tenant_id,workspace_id,service_id,repository_id,created_at,updated_at FROM service_repositories WHERE tenant_id=$1 AND workspace_id=$2", &[&context.tenant_id, &context.workspace_id]).await.map_err(pg_error)?;
+        for row in service_repository_rows {
+            core.insert_service_repository(service_repository_from_row(&row));
+        }
+        let ref_track_rows = client.query("SELECT id,tenant_id,workspace_id,service_repository_id,ref_kind,ref_name,created_at,updated_at FROM service_ref_tracks WHERE tenant_id=$1 AND workspace_id=$2", &[&context.tenant_id, &context.workspace_id]).await.map_err(pg_error)?;
+        for row in ref_track_rows {
+            core.insert_ref_track(ref_track_from_row(&row)?);
+        }
+        let specification_binding_rows = client.query("SELECT id,tenant_id,workspace_id,specification_id,service_repository_id,path,ref_kind,ref_name,created_at,updated_at FROM specification_code_bindings WHERE tenant_id=$1 AND workspace_id=$2", &[&context.tenant_id, &context.workspace_id]).await.map_err(pg_error)?;
+        for row in specification_binding_rows {
+            core.insert_specification_code_binding(specification_code_binding_from_row(&row)?);
         }
         Ok(core)
     }
@@ -833,6 +1067,57 @@ impl PostgresStore {
                 )
                 .await
                 .map_err(pg_error)?;
+        }
+        if let Some(event) = audit {
+            insert_audit(&transaction, event).await?;
+        }
+        transaction.commit().await.map_err(pg_error)?;
+        Ok(true)
+    }
+
+    pub async fn update_specification_code_binding_if_current_with_audit(
+        &self,
+        context: &WorkspaceContext,
+        expected: &SpecificationCodeBinding,
+        updated: &SpecificationCodeBinding,
+        audit: Option<&AuditEvent>,
+    ) -> Result<bool, PersistenceError> {
+        if expected.id != updated.id
+            || expected.tenant_id != context.tenant_id
+            || expected.workspace_id != context.workspace_id
+            || updated.tenant_id != context.tenant_id
+            || updated.workspace_id != context.workspace_id
+        {
+            return Err(PersistenceError::new("specification code binding update scope does not match"));
+        }
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(pg_error)?;
+        let changed = transaction
+            .execute(
+                "UPDATE specification_code_bindings
+                 SET service_repository_id=$1,ref_kind=$2,ref_name=$3,updated_at=$4
+                 WHERE id=$5 AND tenant_id=$6 AND workspace_id=$7 AND specification_id=$8
+                   AND service_repository_id=$9 AND ref_kind=$10 AND ref_name=$11 AND updated_at=$12",
+                &[
+                    &updated.service_repository_id,
+                    &specification_ref_kind_name(updated.ref_kind),
+                    &updated.ref_name,
+                    &updated.updated_at,
+                    &expected.id,
+                    &context.tenant_id,
+                    &context.workspace_id,
+                    &expected.specification_id,
+                    &expected.service_repository_id,
+                    &specification_ref_kind_name(expected.ref_kind),
+                    &expected.ref_name,
+                    &expected.updated_at,
+                ],
+            )
+            .await
+            .map_err(pg_error)?;
+        if changed != 1 {
+            transaction.commit().await.map_err(pg_error)?;
+            return Ok(false);
         }
         if let Some(event) = audit {
             insert_audit(&transaction, event).await?;
@@ -1405,6 +1690,13 @@ impl PostgresStore {
             .map_err(pg_error)?;
         transaction
             .execute(
+                "DELETE FROM specification_code_bindings WHERE tenant_id=$1 AND workspace_id=$2",
+                &[&context.tenant_id, &workspace_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute(
                 "DELETE FROM specifications WHERE tenant_id=$1 AND workspace_id=$2",
                 &[&context.tenant_id, &workspace_id],
             )
@@ -1420,6 +1712,27 @@ impl PostgresStore {
         transaction
             .execute(
                 "DELETE FROM service_code_bindings WHERE tenant_id=$1 AND workspace_id=$2",
+                &[&context.tenant_id, &workspace_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute(
+                "DELETE FROM service_ref_tracks WHERE tenant_id=$1 AND workspace_id=$2",
+                &[&context.tenant_id, &workspace_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute(
+                "DELETE FROM service_repositories WHERE tenant_id=$1 AND workspace_id=$2",
+                &[&context.tenant_id, &workspace_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute(
+                "DELETE FROM repositories WHERE tenant_id=$1 AND workspace_id=$2",
                 &[&context.tenant_id, &workspace_id],
             )
             .await
@@ -1589,6 +1902,66 @@ impl PostgresStore {
             .execute(
                 "DELETE FROM service_code_bindings WHERE tenant_id=$1 AND workspace_id=$2 AND id=$3",
                 &[&context.tenant_id, &context.workspace_id, &binding_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        insert_audit(&transaction, audit).await?;
+        transaction.commit().await.map_err(pg_error)
+    }
+
+    pub async fn delete_service_repository(
+        &self,
+        context: &WorkspaceContext,
+        service_repository_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(pg_error)?;
+        lock_workspace(&transaction, context).await?;
+        transaction
+            .execute(
+                "DELETE FROM service_repositories WHERE tenant_id=$1 AND workspace_id=$2 AND id=$3",
+                &[&context.tenant_id, &context.workspace_id, &service_repository_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        insert_audit(&transaction, audit).await?;
+        transaction.commit().await.map_err(pg_error)
+    }
+
+    pub async fn delete_service_ref_track(
+        &self,
+        context: &WorkspaceContext,
+        track_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(pg_error)?;
+        lock_workspace(&transaction, context).await?;
+        transaction
+            .execute(
+                "DELETE FROM service_ref_tracks WHERE tenant_id=$1 AND workspace_id=$2 AND id=$3",
+                &[&context.tenant_id, &context.workspace_id, &track_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        insert_audit(&transaction, audit).await?;
+        transaction.commit().await.map_err(pg_error)
+    }
+
+    pub async fn delete_specification_code_binding(
+        &self,
+        context: &WorkspaceContext,
+        specification_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(pg_error)?;
+        lock_workspace(&transaction, context).await?;
+        transaction
+            .execute(
+                "DELETE FROM specification_code_bindings WHERE tenant_id=$1 AND workspace_id=$2 AND specification_id=$3",
+                &[&context.tenant_id, &context.workspace_id, &specification_id],
             )
             .await
             .map_err(pg_error)?;
@@ -2019,6 +2392,40 @@ fn parse_execution_scope(value: &str) -> Result<CodeExecutionScope, PersistenceE
         _ => Err(PersistenceError::new(format!("unsupported code execution scope: {value}"))),
     }
 }
+fn ref_kind_name(value: ServiceRefKind) -> &'static str {
+    match value {
+        ServiceRefKind::DefaultBranch => "default_branch",
+        ServiceRefKind::Branch => "branch",
+        ServiceRefKind::Tag => "tag",
+        ServiceRefKind::Commit => "commit",
+    }
+}
+
+fn specification_ref_kind_name(value: SpecificationRefKind) -> &'static str {
+    match value {
+        SpecificationRefKind::Branch => "branch",
+        SpecificationRefKind::Tag => "tag",
+        SpecificationRefKind::Commit => "commit",
+    }
+}
+
+fn parse_specification_ref_kind(value: &str) -> Result<SpecificationRefKind, PersistenceError> {
+    match value {
+        "branch" => Ok(SpecificationRefKind::Branch),
+        "tag" => Ok(SpecificationRefKind::Tag),
+        "commit" => Ok(SpecificationRefKind::Commit),
+        _ => Err(PersistenceError::new("invalid specification ref kind")),
+    }
+}
+fn parse_ref_kind(value: &str) -> Result<ServiceRefKind, PersistenceError> {
+    match value {
+        "default_branch" => Ok(ServiceRefKind::DefaultBranch),
+        "branch" => Ok(ServiceRefKind::Branch),
+        "tag" => Ok(ServiceRefKind::Tag),
+        "commit" => Ok(ServiceRefKind::Commit),
+        _ => Err(PersistenceError::new(format!("unsupported service ref kind: {value}"))),
+    }
+}
 fn binding_role_name(value: CodeBindingRole) -> &'static str {
     match value {
         CodeBindingRole::Primary => "primary",
@@ -2144,6 +2551,60 @@ fn code_binding_from_row(row: &Row) -> Result<ServiceCodeBinding, PersistenceErr
         revision: row.get(9),
         created_at: row.get(10),
         updated_at: row.get(11),
+    })
+}
+
+fn repository_from_row(row: &Row) -> Repository {
+    Repository {
+        id: row.get(0),
+        tenant_id: row.get(1),
+        workspace_id: row.get(2),
+        provider: row.get(3),
+        display_name: row.get(4),
+        canonical_url: row.get(5),
+        created_at: row.get(6),
+        updated_at: row.get(7),
+        archived: row.get(8),
+    }
+}
+
+fn service_repository_from_row(row: &Row) -> ServiceRepository {
+    ServiceRepository {
+        id: row.get(0),
+        tenant_id: row.get(1),
+        workspace_id: row.get(2),
+        service_id: row.get(3),
+        repository_id: row.get(4),
+        created_at: row.get(5),
+        updated_at: row.get(6),
+    }
+}
+
+fn ref_track_from_row(row: &Row) -> Result<ServiceRefTrack, PersistenceError> {
+    Ok(ServiceRefTrack {
+        id: row.get(0),
+        tenant_id: row.get(1),
+        workspace_id: row.get(2),
+        service_repository_id: row.get(3),
+        ref_kind: parse_ref_kind(&row.get::<_, String>(4))?,
+        ref_name: row.get(5),
+        created_at: row.get(6),
+        updated_at: row.get(7),
+    })
+}
+
+fn specification_code_binding_from_row(row: &Row) -> Result<SpecificationCodeBinding, PersistenceError> {
+    Ok(SpecificationCodeBinding {
+        id: row.get(0),
+        tenant_id: row.get(1),
+        workspace_id: row.get(2),
+        specification_id: row.get(3),
+        service_repository_id: row.get(4),
+        path: row.get(5),
+        ref_kind: parse_specification_ref_kind(&row.get::<_, String>(6))?,
+        ref_name: row.get(7),
+        created_at: row.get(8),
+        updated_at: row.get(9),
     })
 }
 

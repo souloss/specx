@@ -1,6 +1,7 @@
 use super::*;
 use axum::body::Body;
 use http_body_util::BodyExt;
+use std::sync::OnceLock;
 use tower::ServiceExt;
 
 fn headers(request: axum::http::request::Builder) -> axum::http::request::Builder {
@@ -208,6 +209,280 @@ async fn code_sources_and_bindings_validate_scope_paths_and_etags() {
         serde_json::from_slice(&app.oneshot(bindings).await.unwrap().into_body().collect().await.unwrap().to_bytes())
             .unwrap();
     assert_eq!(body["items"][0]["path"], "services/payments/api");
+}
+
+#[tokio::test]
+async fn services_bind_repositories_and_specifications_bind_independent_refs() {
+    let app = router(ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap()));
+    for (id, slug) in [("svc-one", "one"), ("svc-two", "two")] {
+        let create = headers(axum::http::Request::post("/services"))
+            .header("content-type", "application/json")
+            .body(Body::from(format!(r#"{{"id":"{id}","name":"Service {slug}","slug":"{slug}"}}"#)))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(create).await.unwrap().status(), StatusCode::OK);
+    }
+
+    let link = headers(axum::http::Request::post("/services/svc-one/repository"))
+        .header("content-type", "application/json")
+        .header("idempotency-key", "repo-one-link")
+        .body(Body::from(r#"{"repositoryUrl":"https://github.com/acme/platform.git/"}"#))
+        .unwrap();
+    let linked = app.clone().oneshot(link).await.unwrap();
+    assert_eq!(linked.status(), StatusCode::OK);
+    let linked: serde_json::Value =
+        serde_json::from_slice(&linked.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(linked["repository"]["provider"], "github");
+    assert_eq!(linked["repository"]["canonicalUrl"], "https://github.com/acme/platform");
+    let relation_id = linked["id"].as_str().unwrap().to_owned();
+    let repository_id = linked["repository"]["id"].as_str().unwrap().to_owned();
+
+    let replay = headers(axum::http::Request::post("/services/svc-one/repository"))
+        .header("content-type", "application/json")
+        .header("idempotency-key", "repo-one-link")
+        .body(Body::from(r#"{"repositoryUrl":"https://github.com/acme/platform.git/"}"#))
+        .unwrap();
+    let response = app.clone().oneshot(replay).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let replay: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(replay["id"], relation_id);
+
+    let shared = headers(axum::http::Request::post("/services/svc-two/repository"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"repositoryUrl":"https://github.com/acme/platform"}"#))
+        .unwrap();
+    let shared = app.clone().oneshot(shared).await.unwrap();
+    assert_eq!(shared.status(), StatusCode::OK);
+    let shared: serde_json::Value =
+        serde_json::from_slice(&shared.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_ne!(shared["id"], relation_id);
+    assert_eq!(shared["repository"]["id"], repository_id);
+
+    let too_many = headers(axum::http::Request::post("/services/svc-one/repository"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"repositoryUrl":"https://gitlab.com/acme/other"}"#))
+        .unwrap();
+    let response = app.clone().oneshot(too_many).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let create_spec = headers(axum::http::Request::post("/specifications"))
+        .header("content-type", "application/json")
+        .header("idempotency-key", "spec-one")
+        .body(Body::from(r##"{"id":"spec-one","serviceId":"svc-one","title":"API","content":"# API"}"##))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(create_spec).await.unwrap().status(), StatusCode::OK);
+    let bind = headers(axum::http::Request::put("/specifications/spec-one/code-binding"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"refKind":"branch","refName":"main"}"#))
+        .unwrap();
+    let response = app.clone().oneshot(bind).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let binding_etag = response.headers().get(ETAG).unwrap().to_str().unwrap().to_owned();
+    let binding: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(binding["refKind"], "branch");
+    assert_eq!(binding["refName"], "main");
+    let update = headers(axum::http::Request::put("/specifications/spec-one/code-binding"))
+        .header(IF_MATCH, binding_etag)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"refKind":"tag","refName":"v1.2.0"}"#))
+        .unwrap();
+    let update_response = app.clone().oneshot(update).await.unwrap();
+    assert_eq!(update_response.status(), StatusCode::OK);
+    let updated_binding_etag = update_response.headers().get(ETAG).unwrap().to_str().unwrap().to_owned();
+    let invalid = headers(axum::http::Request::put("/specifications/spec-one/code-binding"))
+        .header(IF_MATCH, updated_binding_etag)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"refKind":"commit","refName":"latest"}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(invalid).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let get_binding =
+        headers(axum::http::Request::get("/specifications/spec-one/code-binding")).body(Body::empty()).unwrap();
+    let response = app.clone().oneshot(get_binding).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let delete_etag = response.headers().get(ETAG).unwrap().to_str().unwrap().to_owned();
+    let delete_binding = headers(axum::http::Request::delete("/specifications/spec-one/code-binding"))
+        .header(IF_MATCH, delete_etag)
+        .body(Body::empty())
+        .unwrap();
+    let delete_response = app.clone().oneshot(delete_binding).await.unwrap();
+    if delete_response.status() != StatusCode::NO_CONTENT {
+        let status = delete_response.status();
+        let body = delete_response.into_body().collect().await.unwrap().to_bytes();
+        panic!("delete binding failed: {status} {}", String::from_utf8_lossy(&body));
+    }
+    let missing_binding =
+        headers(axum::http::Request::get("/specifications/spec-one/code-binding")).body(Body::empty()).unwrap();
+    assert_eq!(app.clone().oneshot(missing_binding).await.unwrap().status(), StatusCode::NOT_FOUND);
+
+    let missing_precondition =
+        headers(axum::http::Request::delete("/services/svc-one/repository")).body(Body::empty()).unwrap();
+    assert_eq!(app.clone().oneshot(missing_precondition).await.unwrap().status(), StatusCode::PRECONDITION_REQUIRED);
+    let stale = headers(axum::http::Request::delete("/services/svc-one/repository"))
+        .header(IF_MATCH, "\"stale\"")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(app.clone().oneshot(stale).await.unwrap().status(), StatusCode::PRECONDITION_FAILED);
+    let latest = headers(axum::http::Request::get("/services/svc-one/repository")).body(Body::empty()).unwrap();
+    let latest = app.clone().oneshot(latest).await.unwrap();
+    let latest_etag = latest.headers().get(ETAG).unwrap().to_str().unwrap().to_owned();
+    let unlink = headers(axum::http::Request::delete("/services/svc-one/repository"))
+        .header(IF_MATCH, latest_etag)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(app.clone().oneshot(unlink).await.unwrap().status(), StatusCode::NO_CONTENT);
+
+    let still_linked = headers(axum::http::Request::get("/services/svc-two/repository")).body(Body::empty()).unwrap();
+    assert_eq!(app.oneshot(still_linked).await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn repository_managed_specifications_are_created_with_an_immutable_source() {
+    let app = router(ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap()));
+    let service = headers(axum::http::Request::post("/services"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"svc-managed","name":"Managed","slug":"managed"}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(service).await.unwrap().status(), StatusCode::OK);
+    let repository = headers(axum::http::Request::post("/services/svc-managed/repository"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"repositoryUrl":"https://github.com/acme/managed"}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(repository).await.unwrap().status(), StatusCode::OK);
+
+    let create = headers(axum::http::Request::post("/specifications"))
+        .header("content-type", "application/json")
+        .body(Body::from(r##"{"id":"spec-managed","serviceId":"svc-managed","title":"API","content":"# API","source":{"path":"docs/api.md","refKind":"branch","refName":"main"}}"##))
+        .unwrap();
+    let response = app.clone().oneshot(create).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let specification_etag = response.headers().get(ETAG).unwrap().clone();
+    let binding =
+        headers(axum::http::Request::get("/specifications/spec-managed/code-binding")).body(Body::empty()).unwrap();
+    let binding_body = app.clone().oneshot(binding).await.unwrap().into_body().collect().await.unwrap().to_bytes();
+    let binding: serde_json::Value = serde_json::from_slice(&binding_body).unwrap();
+    assert_eq!(binding["path"], "docs/api.md");
+
+    let update = headers(axum::http::Request::put("/specifications/spec-managed"))
+        .header(IF_MATCH, &specification_etag)
+        .header("content-type", "application/json")
+        .body(Body::from(r##"{"title":"Changed","content":"# Changed"}"##))
+        .unwrap();
+    let response = app.clone().oneshot(update).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"], "managed_specification");
+
+    let binding_etag = binding["etag"].as_str().unwrap();
+    let remove = headers(axum::http::Request::delete("/specifications/spec-managed/code-binding"))
+        .header(IF_MATCH, binding_etag)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(app.clone().oneshot(remove).await.unwrap().status(), StatusCode::CONFLICT);
+
+    let delete = headers(axum::http::Request::delete("/specifications/spec-managed"))
+        .header(IF_MATCH, &specification_etag)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(app.oneshot(delete).await.unwrap().status(), StatusCode::CONFLICT);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn repository_managed_specifications_sync_from_git_and_dedupe_unchanged_content() {
+    static GIT_ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let _guard = GIT_ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+    let repository = tempfile::tempdir().unwrap();
+    let source = repository.path().join("source");
+    std::fs::create_dir_all(source.join("docs")).unwrap();
+    std::fs::write(source.join("docs/api.md"), "# New\r\n").unwrap();
+    fn git(directory: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git").arg("-C").arg(directory).args(args).status().unwrap();
+        assert!(status.success(), "git command failed: {args:?}");
+    }
+    git(&source, &["init", "--quiet"]);
+    git(&source, &["config", "user.email", "test@example.com"]);
+    git(&source, &["config", "user.name", "SpecX Test"]);
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "--quiet", "-m", "initial"]);
+    git(&source, &["branch", "-M", "main"]);
+
+    let wrapper = repository.path().join("git-wrapper.py");
+    std::fs::write(
+        &wrapper,
+        "#!/usr/bin/env python3\nimport os, subprocess, sys\nargs = sys.argv[1:]\nsource = os.environ['SPECX_TEST_GIT_SOURCE']\nif args and args[0] == 'clone': args[-2] = source\nelif len(args) >= 4 and args[0] == 'remote' and args[1] == 'add': args[-1] = source\nraise SystemExit(subprocess.run(['git', *args]).returncode)\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&wrapper).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&wrapper, permissions).unwrap();
+    let previous_git = std::env::var_os("SPECX_GIT_BIN");
+    let previous_source = std::env::var_os("SPECX_TEST_GIT_SOURCE");
+    unsafe {
+        std::env::set_var("SPECX_GIT_BIN", &wrapper);
+        std::env::set_var("SPECX_TEST_GIT_SOURCE", source.as_os_str());
+    }
+
+    let app = router(ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap()));
+    let service = headers(axum::http::Request::post("/services"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"svc-sync","name":"Sync","slug":"sync"}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(service).await.unwrap().status(), StatusCode::OK);
+    let repository = headers(axum::http::Request::post("/services/svc-sync/repository"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"repositoryUrl":"https://github.com/acme/sync"}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(repository).await.unwrap().status(), StatusCode::OK);
+    let specification = headers(axum::http::Request::post("/specifications"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r##"{"id":"spec-sync","serviceId":"svc-sync","title":"API","content":"# Old","source":{"path":"docs/api.md","refKind":"branch","refName":"main"}}"##,
+        ))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(specification).await.unwrap().status(), StatusCode::OK);
+
+    let sync_request =
+        || headers(axum::http::Request::post("/specifications/spec-sync/sync")).body(Body::empty()).unwrap();
+    let response = app.clone().oneshot(sync_request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["changed"], true);
+    assert_eq!(body["specification"]["content"], "# New\n");
+    assert_eq!(body["specification"]["version"], 2);
+    assert_eq!(body["providerVersion"], "git-cli");
+    let first_commit = body["resolvedCommit"].as_str().unwrap().to_owned();
+
+    let response = app.clone().oneshot(sync_request()).await.unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["changed"], false);
+    assert_eq!(body["resolvedCommit"], first_commit);
+    assert_eq!(body["specification"]["version"], 2);
+
+    std::fs::write(source.join("docs/api.md"), "# Newer\n").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "--quiet", "-m", "update"]);
+    let response = app.oneshot(sync_request()).await.unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["changed"], true);
+    assert_eq!(body["specification"]["content"], "# Newer\n");
+    assert_eq!(body["specification"]["version"], 3);
+    assert_ne!(body["resolvedCommit"], first_commit);
+
+    unsafe {
+        match previous_git {
+            Some(value) => std::env::set_var("SPECX_GIT_BIN", value),
+            None => std::env::remove_var("SPECX_GIT_BIN"),
+        }
+        match previous_source {
+            Some(value) => std::env::set_var("SPECX_TEST_GIT_SOURCE", value),
+            None => std::env::remove_var("SPECX_TEST_GIT_SOURCE"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -788,7 +1063,7 @@ async fn readiness_reports_migration_state_and_health_headers() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["status"], "ready");
-    assert_eq!(body["schemaVersion"], 12);
+    assert_eq!(body["schemaVersion"], 15);
 }
 
 #[tokio::test]
@@ -1579,6 +1854,11 @@ async fn domain_errors_have_specific_localized_envelopes_without_debug_text() {
         (CoreError::InvalidGroupOrder, 422, "invalid_group_order", "invalidGroupOrder"),
         (CoreError::DuplicateTag, 409, "duplicate_tag", "duplicateTag"),
         (CoreError::DuplicateSlug, 409, "duplicate_slug", "duplicateSlug"),
+        (CoreError::DuplicateRepository, 409, "duplicate_repository", "duplicateRepository"),
+        (CoreError::InvalidRepository, 422, "invalid_repository", "invalidRepository"),
+        (CoreError::ServiceRepositoryExists, 409, "service_repository_exists", "serviceRepositoryExists"),
+        (CoreError::DuplicateRefTrack, 409, "duplicate_ref_track", "duplicateRefTrack"),
+        (CoreError::InvalidRefTrack, 422, "invalid_ref_track", "invalidRefTrack"),
         (CoreError::HasDependents("private SQL password=secret"), 409, "has_dependents", "hasDependents"),
     ];
     for (error, status, code, key) in cases {

@@ -1,4 +1,5 @@
 use super::*;
+use specx_controller::{CommandGitProvider, MarkdownDocumentController, MarkdownDocumentRequest};
 
 pub fn router<S>(state: ApiState) -> Router<S>
 where
@@ -25,6 +26,10 @@ where
         .route("/tags/{tag_id}", put(update_tag).delete(delete_tag))
         .route("/services", get(list_services).post(create_service))
         .route("/services/{service_id}", put(update_service).patch(set_service_archived).delete(delete_service))
+        .route(
+            "/services/{service_id}/repository",
+            get(get_service_repository).post(link_service_repository).delete(unlink_service_repository),
+        )
         .route("/code-sources", get(list_code_sources).post(create_code_source))
         .route("/code-sources/{source_id}", put(update_code_source).delete(delete_code_source))
         .route("/services/{service_id}/code-bindings", get(list_service_code_bindings).post(create_code_binding))
@@ -33,6 +38,13 @@ where
         .route("/specifications/{specification_id}/revisions", get(list_specification_revisions))
         .route("/specifications/{specification_id}/revisions/{version}", get(get_specification_revision))
         .route("/specifications/{specification_id}/revisions/{version}/restore", post(restore_specification_revision))
+        .route(
+            "/specifications/{specification_id}/code-binding",
+            get(get_specification_code_binding)
+                .put(set_specification_code_binding)
+                .delete(delete_specification_code_binding),
+        )
+        .route("/specifications/{specification_id}/sync", post(sync_specification))
         .route("/specifications/{specification_id}", put(update_specification).delete(delete_specification))
         .route("/backups", get(list_backups).post(create_backup))
         .route("/backups/{file_name}/restore", post(restore_backup))
@@ -657,6 +669,56 @@ pub struct ServiceCodeBindingResponse {
     pub etag: String,
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositorySummaryResponse {
+    pub id: Id,
+    pub provider: String,
+    pub display_name: String,
+    pub canonical_url: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceRepositoryResponse {
+    pub id: Id,
+    pub repository: RepositorySummaryResponse,
+    pub created_at: String,
+    pub updated_at: String,
+    pub etag: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecificationCodeBindingResponse {
+    pub id: Id,
+    pub specification_id: Id,
+    pub repository: RepositorySummaryResponse,
+    pub path: String,
+    #[schema(value_type = String)]
+    pub ref_kind: SpecificationRefKind,
+    pub ref_name: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub etag: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetSpecificationCodeBindingRequest {
+    #[schema(value_type = String)]
+    pub ref_kind: SpecificationRefKind,
+    #[serde(default)]
+    pub path: String,
+    pub ref_name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LinkServiceRepositoryRequest {
+    pub repository_url: String,
+}
+
 impl From<ServiceCodeBinding> for ServiceCodeBindingResponse {
     fn from(binding: ServiceCodeBinding) -> Self {
         let mut response = Self {
@@ -677,6 +739,65 @@ impl From<ServiceCodeBinding> for ServiceCodeBindingResponse {
         response.etag = code_binding_etag(&response);
         response
     }
+}
+
+fn service_repository_response(
+    core: &Core,
+    context: &WorkspaceContext,
+    service_id: &str,
+) -> Result<ServiceRepositoryResponse, CoreError> {
+    let relation = core.service_repository(context, service_id).ok_or(CoreError::NotFound("service_repository"))?;
+    let repository: &Repository =
+        core.repository(context, &relation.repository_id).ok_or(CoreError::NotFound("repository"))?;
+    let mut response = ServiceRepositoryResponse {
+        id: relation.id.clone(),
+        repository: RepositorySummaryResponse {
+            id: repository.id.clone(),
+            provider: repository.provider.clone(),
+            display_name: repository.display_name.clone(),
+            canonical_url: repository.canonical_url.clone(),
+        },
+        created_at: relation.created_at.clone(),
+        updated_at: relation.updated_at.clone(),
+        etag: String::new(),
+    };
+    response.etag = service_repository_etag(&response);
+    Ok(response)
+}
+
+fn specification_code_binding_response(
+    core: &Core,
+    context: &WorkspaceContext,
+    binding: &SpecificationCodeBinding,
+) -> Result<SpecificationCodeBindingResponse, CoreError> {
+    let specification = core
+        .list_specifications(context)
+        .into_iter()
+        .find(|specification| specification.id == binding.specification_id)
+        .ok_or(CoreError::NotFound("specification"))?;
+    let relation = core
+        .service_repository(context, &specification.service_id)
+        .filter(|relation| relation.id == binding.service_repository_id)
+        .ok_or(CoreError::NotFound("service_repository"))?;
+    let repository = core.repository(context, &relation.repository_id).ok_or(CoreError::NotFound("repository"))?;
+    let mut response = SpecificationCodeBindingResponse {
+        id: binding.id.clone(),
+        specification_id: binding.specification_id.clone(),
+        repository: RepositorySummaryResponse {
+            id: repository.id.clone(),
+            provider: repository.provider.clone(),
+            display_name: repository.display_name.clone(),
+            canonical_url: repository.canonical_url.clone(),
+        },
+        path: binding.path.clone(),
+        ref_kind: binding.ref_kind,
+        ref_name: binding.ref_name.clone(),
+        created_at: binding.created_at.clone(),
+        updated_at: binding.updated_at.clone(),
+        etag: String::new(),
+    };
+    response.etag = specification_code_binding_etag(&response);
+    Ok(response)
 }
 
 impl From<Service> for ServiceResponse {
@@ -728,6 +849,17 @@ pub struct SpecificationResponse {
     pub content_hash: String,
     pub updated_at: String,
     pub etag: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecificationSyncResponse {
+    pub specification: SpecificationResponse,
+    pub resolved_commit: String,
+    pub content_hash: String,
+    pub changed: bool,
+    pub synced_at: String,
+    pub provider_version: String,
 }
 
 impl From<Specification> for SpecificationResponse {
@@ -1027,6 +1159,7 @@ async fn get_specification_revision(
         (status = 404, description = "Specification or revision does not exist", body = ErrorResponse),
         (status = 412, description = "If-Match does not match the current specification", body = ErrorResponse),
         (status = 428, description = "If-Match is required", body = ErrorResponse),
+        (status = 409, description = "Repository-managed specifications cannot be restored", body = ErrorResponse),
         (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
         (status = 500, description = "Storage failure", body = ErrorResponse)
     ),
@@ -2430,6 +2563,374 @@ async fn delete_code_source(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/services/{service_id}/repository",
+    params(("service_id" = String, Path)),
+    responses((status = 200, body = ServiceRepositoryResponse, headers(("ETag" = String))), (status = 404, body = ErrorResponse)),
+    tag = "code"
+)]
+async fn get_service_repository(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    if !core.list_services(&context).into_iter().any(|service| service.id == service_id) {
+        return Err(CoreError::NotFound("service").into());
+    }
+    let response = service_repository_response(&core, &context, &service_id)?;
+    let etag = response.etag.clone();
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(
+    get,
+    path = "/specifications/{specification_id}/code-binding",
+    params(("specification_id" = String, Path)),
+    responses((status = 200, body = SpecificationCodeBindingResponse, headers(("ETag" = String))), (status = 404, body = ErrorResponse)),
+    tag = "code"
+)]
+async fn get_specification_code_binding(
+    State(state): State<ApiState>,
+    Path(specification_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    let binding = core
+        .specification_code_binding(&context, &specification_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("specification_code_binding"))?;
+    let response = specification_code_binding_response(&core, &context, &binding)?;
+    let etag = response.etag.clone();
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(
+    put,
+    path = "/specifications/{specification_id}/code-binding",
+    params(("specification_id" = String, Path), ("If-Match" = Option<String>, Header)),
+    request_body = SetSpecificationCodeBindingRequest,
+    responses((status = 200, body = SpecificationCodeBindingResponse, headers(("ETag" = String))), (status = 404, body = ErrorResponse), (status = 409, body = ErrorResponse), (status = 412, body = ErrorResponse), (status = 422, body = ErrorResponse), (status = 428, body = ErrorResponse)),
+    tag = "code"
+)]
+async fn set_specification_code_binding(
+    State(state): State<ApiState>,
+    Path(specification_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<SetSpecificationCodeBindingRequest>,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let specification = core
+        .list_specifications(&context)
+        .into_iter()
+        .find(|specification| specification.id == specification_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("specification"))?;
+    let relation = core
+        .service_repository(&context, &specification.service_id)
+        .ok_or(CoreError::NotFound("service_repository"))?;
+    let existing = core.specification_code_binding(&context, &specification_id).cloned();
+    if let Some(existing) = &existing {
+        let current = specification_code_binding_response(&core, &context, existing)?.etag;
+        let matches = headers
+            .get_all(IF_MATCH)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .any(|value| if_match_satisfies(value, &current));
+        if !matches {
+            return Err(if headers.get(IF_MATCH).is_none() {
+                ApiError::PreconditionRequired
+            } else {
+                ApiError::PreconditionFailed
+            });
+        }
+    }
+    let now = Utc::now().to_rfc3339();
+    let binding = core.set_specification_code_binding(
+        &context,
+        SpecificationCodeBinding {
+            id: existing.as_ref().map_or_else(|| uuid::Uuid::new_v4().to_string(), |binding| binding.id.clone()),
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            specification_id: specification_id.clone(),
+            service_repository_id: relation.id.clone(),
+            path: input.path,
+            ref_kind: input.ref_kind,
+            ref_name: input.ref_name,
+            created_at: existing.as_ref().map_or_else(|| now.clone(), |binding| binding.created_at.clone()),
+            updated_at: now,
+        },
+    )?;
+    let audit = audit_event(
+        &context,
+        &headers,
+        if existing.is_some() { "update" } else { "create" },
+        "specification_code_binding",
+        &binding.id,
+    );
+    let persisted = if let Some(expected) = existing {
+        inner.store.update_specification_code_binding_if_current_with_audit(
+            &context,
+            &expected,
+            &binding,
+            Some(&audit),
+        )?
+    } else {
+        inner.store.persist_core_with_audit(&core, &context, Some(&audit))?;
+        true
+    };
+    if !persisted {
+        return Err(ApiError::PreconditionFailed);
+    }
+    inner.seed_core = None;
+    let response = specification_code_binding_response(&core, &context, &binding)?;
+    let etag = response.etag.clone();
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/specifications/{specification_id}/code-binding",
+    params(("specification_id" = String, Path), ("If-Match" = String, Header)),
+    responses((status = 204), (status = 404, body = ErrorResponse), (status = 409, body = ErrorResponse), (status = 412, body = ErrorResponse), (status = 428, body = ErrorResponse)),
+    tag = "code"
+)]
+async fn delete_specification_code_binding(
+    State(state): State<ApiState>,
+    Path(specification_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let existing = core
+        .specification_code_binding(&context, &specification_id)
+        .cloned()
+        .ok_or(CoreError::NotFound("specification_code_binding"))?;
+    let current = specification_code_binding_response(&core, &context, &existing)?.etag;
+    if !headers
+        .get_all(IF_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| if_match_satisfies(value, &current))
+    {
+        return Err(if headers.get(IF_MATCH).is_none() {
+            ApiError::PreconditionRequired
+        } else {
+            ApiError::PreconditionFailed
+        });
+    }
+    core.delete_specification_code_binding(&context, &specification_id)?;
+    let audit = audit_event(&context, &headers, "delete", "specification_code_binding", &existing.id);
+    inner.store.delete_specification_code_binding(&context, &specification_id, &audit)?;
+    inner.seed_core = None;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    post,
+    path = "/specifications/{specification_id}/sync",
+    params(("specification_id" = String, Path)),
+    responses(
+        (status = 200, description = "Repository-managed specification synchronized", body = SpecificationSyncResponse, headers(("ETag" = String))),
+        (status = 404, body = ErrorResponse),
+        (status = 409, body = ErrorResponse),
+        (status = 502, body = ErrorResponse)
+    ),
+    tag = "code"
+)]
+async fn sync_specification(
+    State(state): State<ApiState>,
+    Path(specification_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let (expected, binding, repository_url) = {
+        let mut inner = state.inner.lock().await;
+        let core = load_core(&mut inner, &context)?;
+        let specification = core
+            .list_specifications(&context)
+            .into_iter()
+            .find(|specification| specification.id == specification_id)
+            .cloned()
+            .ok_or(CoreError::NotFound("specification"))?;
+        let binding = core
+            .specification_code_binding(&context, &specification_id)
+            .cloned()
+            .ok_or(CoreError::NotFound("specification_code_binding"))?;
+        if binding.path.is_empty() {
+            return Err(CoreError::InvalidSpecificationCodeBinding.into());
+        }
+        let relation = core
+            .service_repository(&context, &specification.service_id)
+            .ok_or(CoreError::NotFound("service_repository"))?;
+        let repository = core.repository(&context, &relation.repository_id).ok_or(CoreError::NotFound("repository"))?;
+        (specification, binding, repository.canonical_url.clone())
+    };
+
+    let provider_root = std::env::temp_dir().join(format!("specx-git-sync-{}", uuid::Uuid::new_v4()));
+    let current_content_hash = (!expected.content_hash.is_empty()).then_some(expected.content_hash.clone());
+    let ref_kind = binding.ref_kind;
+    let ref_name = binding.ref_name.clone();
+    let path = binding.path.clone();
+    let sync = tokio::task::spawn_blocking(move || {
+        let result = CommandGitProvider::new(&provider_root).and_then(|provider| {
+            let controller = MarkdownDocumentController::new(provider);
+            controller.reconcile(&MarkdownDocumentRequest {
+                repository_url,
+                ref_kind,
+                ref_name,
+                path,
+                current_content_hash,
+            })
+        });
+        let _ = std::fs::remove_dir_all(&provider_root);
+        result
+    })
+    .await
+    .map_err(|_| ApiError::RepositorySyncFailed)??;
+    let synced_at = Utc::now().to_rfc3339();
+
+    let specification = if sync.changed {
+        let mut inner = state.inner.lock().await;
+        let mut core = load_core(&mut inner, &context)?;
+        let current = core
+            .list_specifications(&context)
+            .into_iter()
+            .find(|specification| specification.id == specification_id)
+            .cloned()
+            .ok_or(CoreError::NotFound("specification"))?;
+        if SpecificationResponse::from(current.clone()).etag != SpecificationResponse::from(expected.clone()).etag {
+            return Err(ApiError::PreconditionFailed);
+        }
+        let updated = core.update_managed_specification_content(&context, &specification_id, sync.content.clone())?;
+        let audit = audit_event(&context, &headers, "sync", "specification", &specification_id);
+        if !inner.store.update_specification_if_current_with_audit(&context, &current, &updated, Some(&audit))? {
+            return Err(ApiError::PreconditionFailed);
+        }
+        inner.seed_core = None;
+        inner
+            .store
+            .load_core(&context)?
+            .list_specifications(&context)
+            .into_iter()
+            .find(|specification| specification.id == specification_id)
+            .cloned()
+            .ok_or(CoreError::NotFound("specification"))?
+    } else {
+        expected.clone()
+    };
+
+    let specification_response: SpecificationResponse = specification.into();
+    let etag = specification_response.etag.clone();
+    let response = SpecificationSyncResponse {
+        specification: specification_response,
+        resolved_commit: sync.resolved_commit,
+        content_hash: sync.content_hash,
+        changed: sync.changed,
+        synced_at,
+        provider_version: sync.provider_version,
+    };
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(
+    post,
+    path = "/services/{service_id}/repository",
+    params(("service_id" = String, Path), ("Idempotency-Key" = Option<String>, Header)),
+    request_body = LinkServiceRepositoryRequest,
+    responses((status = 200, body = ServiceRepositoryResponse, headers(("ETag" = String))), (status = 409, body = ErrorResponse), (status = 422, body = ErrorResponse)),
+    tag = "code"
+)]
+async fn link_service_repository(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<LinkServiceRepositoryRequest>,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let descriptor = idempotency_descriptor(&headers, &context, "service-repositories", &input)?;
+    let mut inner = state.inner.lock().await;
+    if let Some(record) = check_idempotency(&inner.store, descriptor.as_ref())? {
+        if record.resource_type != "service_repository" {
+            return Err(ApiError::IdempotencyConflict);
+        }
+        let core = load_core(&mut inner, &context)?;
+        let relation = core.service_repository(&context, &service_id).ok_or(ApiError::IdempotencyConflict)?;
+        if relation.id != record.resource_id {
+            return Err(ApiError::IdempotencyConflict);
+        }
+        let response = service_repository_response(&core, &context, &service_id)?;
+        let etag = response.etag.clone();
+        return Ok(response_with_etag(response, etag));
+    }
+
+    let mut core = load_core(&mut inner, &context)?;
+    if !core.list_services(&context).into_iter().any(|service| service.id == service_id) {
+        return Err(CoreError::NotFound("service").into());
+    }
+    let (canonical_url, _, _) = normalize_repository_url(&input.repository_url)?;
+    let repository = match core.repository_by_canonical_url(&context, &canonical_url).cloned() {
+        Some(repository) => repository,
+        None => core.create_repository(&context, uuid::Uuid::new_v4().to_string(), &input.repository_url)?,
+    };
+    let relation =
+        core.link_service_repository(&context, uuid::Uuid::new_v4().to_string(), &service_id, &repository.id)?;
+    let audit = audit_event(&context, &headers, "link", "service_repository", &relation.id);
+    inner.store.persist_core_with_audit_and_idempotency(
+        &core,
+        &context,
+        Some(&audit),
+        durable_idempotency(descriptor.as_ref(), &context, "service_repository", &relation.id),
+    )?;
+    inner.seed_core = None;
+    let response = service_repository_response(&core, &context, &service_id)?;
+    let etag = response.etag.clone();
+    Ok(response_with_etag(response, etag))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/services/{service_id}/repository",
+    params(("service_id" = String, Path), ("If-Match" = String, Header)),
+    responses((status = 204), (status = 404, body = ErrorResponse), (status = 409, body = ErrorResponse), (status = 412, body = ErrorResponse), (status = 428, body = ErrorResponse)),
+    tag = "code"
+)]
+async fn unlink_service_repository(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let current = service_repository_response(&core, &context, &service_id)?;
+    if !headers
+        .get_all(IF_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| if_match_satisfies(value, &current.etag))
+    {
+        return Err(if headers.get(IF_MATCH).is_none() {
+            ApiError::PreconditionRequired
+        } else {
+            ApiError::PreconditionFailed
+        });
+    }
+    let relation = core.delete_service_repository(&context, &current.id)?;
+    let audit = audit_event(&context, &headers, "unlink", "service_repository", &relation.id);
+    inner.store.delete_service_repository(&context, &relation.id, &audit)?;
+    inner.seed_core = None;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[utoipa::path(get, path = "/services/{service_id}/code-bindings", params(("service_id" = String, Path)), responses((status = 200, body = ServiceCodeBindingPageResponse)), tag = "code")]
 async fn list_service_code_bindings(
     State(state): State<ApiState>,
@@ -2597,6 +3098,17 @@ pub struct CreateSpecificationRequest {
     pub service_id: Id,
     pub title: String,
     pub content: String,
+    #[serde(default)]
+    pub source: Option<CreateSpecificationSourceRequest>,
+}
+
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateSpecificationSourceRequest {
+    pub path: String,
+    #[schema(value_type = String)]
+    pub ref_kind: SpecificationRefKind,
+    pub ref_name: String,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -2655,22 +3167,43 @@ async fn create_specification(
         return Ok(response_with_etag(response, etag));
     }
     let mut core = load_core(&mut inner, &context)?;
+    let CreateSpecificationRequest { id, service_id, title, content, source } = input;
     let specification = core.create_markdown_specification(
         &context,
         Specification {
-            id: input.id,
+            id,
             tenant_id: context.tenant_id.clone(),
             workspace_id: context.workspace_id.clone(),
-            service_id: input.service_id,
-            title: input.title,
+            service_id,
+            title,
             kind: SpecificationKind::Markdown,
-            content: input.content,
+            content,
             version: 1,
             content_hash: String::new(),
             updated_at: Utc::now().to_rfc3339(),
         },
     )?;
     let specification_id = specification.id.clone();
+    if let Some(source) = source {
+        let relation = core
+            .service_repository(&context, &specification.service_id)
+            .ok_or(CoreError::NotFound("service_repository"))?;
+        core.set_specification_code_binding(
+            &context,
+            SpecificationCodeBinding {
+                id: uuid::Uuid::new_v4().to_string(),
+                tenant_id: context.tenant_id.clone(),
+                workspace_id: context.workspace_id.clone(),
+                specification_id: specification_id.clone(),
+                service_repository_id: relation.id.clone(),
+                path: source.path,
+                ref_kind: source.ref_kind,
+                ref_name: source.ref_name,
+                created_at: specification.updated_at.clone(),
+                updated_at: specification.updated_at.clone(),
+            },
+        )?;
+    }
     let audit = audit_event(&context, &headers, "create", "specification", &specification_id);
     inner.store.persist_core_with_audit_and_idempotency(
         &core,
@@ -2713,6 +3246,7 @@ async fn create_specification(
         (status = 403, description = "Specification is outside the authorized scope", body = ErrorResponse),
         (status = 429, description = "Actor request rate exceeded", body = ErrorResponse),
         (status = 404, description = "Specification does not exist", body = ErrorResponse),
+        (status = 409, description = "Repository-managed specifications cannot be edited", body = ErrorResponse),
         (status = 412, description = "If-Match does not match the current specification", body = ErrorResponse),
         (status = 422, description = "Invalid specification", body = ErrorResponse),
         (status = 428, description = "If-Match is required", body = ErrorResponse),
@@ -2775,6 +3309,7 @@ async fn update_specification(
         (status = 401, body = ErrorResponse),
         (status = 403, body = ErrorResponse),
         (status = 404, body = ErrorResponse),
+        (status = 409, description = "Repository-managed specifications cannot be deleted", body = ErrorResponse),
         (status = 412, body = ErrorResponse),
         (status = 428, body = ErrorResponse)
     ),
@@ -2794,6 +3329,9 @@ async fn delete_specification(
         .find(|specification| specification.id == specification_id)
         .cloned()
         .ok_or(CoreError::NotFound("specification"))?;
+    if core.specification_code_binding(&context, &specification_id).is_some_and(|binding| !binding.path.is_empty()) {
+        return Err(CoreError::ManagedSpecification.into());
+    }
     let current_etag = SpecificationResponse::from(specification).etag;
     let expected_etags: Vec<_> = headers.get_all(IF_MATCH).iter().filter_map(|value| value.to_str().ok()).collect();
     if expected_etags.is_empty() {
@@ -2842,6 +3380,31 @@ fn service_etag(service: &ServiceResponse) -> String {
     .expect("service ETag payload is serializable");
     let digest = Sha256::digest(representation);
     format!("\"sha256:{digest:x}\"")
+}
+
+fn service_repository_etag(repository: &ServiceRepositoryResponse) -> String {
+    let representation = serde_json::to_vec(&(
+        &repository.id,
+        &repository.repository.id,
+        &repository.repository.canonical_url,
+        &repository.updated_at,
+    ))
+    .expect("service repository ETag payload is serializable");
+    format!("\"sha256:{:x}\"", Sha256::digest(representation))
+}
+
+fn specification_code_binding_etag(binding: &SpecificationCodeBindingResponse) -> String {
+    let representation = serde_json::to_vec(&(
+        &binding.id,
+        &binding.specification_id,
+        &binding.repository.id,
+        &binding.path,
+        binding.ref_kind,
+        &binding.ref_name,
+        &binding.updated_at,
+    ))
+    .expect("specification code binding ETag payload is serializable");
+    format!("\"sha256:{:x}\"", Sha256::digest(representation))
 }
 
 fn code_source_etag(source: &CodeSourceResponse) -> String {
@@ -2894,7 +3457,7 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
 #[openapi(
     info(title = "specX API", version = "1.0.0", description = "Service catalog and specification API."),
     servers((url = "/api/specx")),
-    paths(health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, list_code_sources, create_code_source, update_code_source, delete_code_source, list_service_code_bindings, create_code_binding, update_code_binding, delete_code_binding, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
+    paths(health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, get_specification_code_binding, set_specification_code_binding, delete_specification_code_binding, sync_specification, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, list_code_sources, create_code_source, update_code_source, delete_code_source, get_service_repository, link_service_repository, unlink_service_repository, list_service_code_bindings, create_code_binding, update_code_binding, delete_code_binding, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
     components(schemas(
         HealthResponse,
         ReadyResponse,
@@ -2902,6 +3465,7 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
         GroupPageResponse,
         TagPageResponse,
         SpecificationPageResponse,
+        SpecificationSyncResponse,
         SpecificationRevisionPageResponse,
         SpecificationRevisionResponse,
         ServicePageResponse,
@@ -2929,6 +3493,11 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
         ServiceCodeBindingPageResponse,
         CreateCodeBindingRequest,
         UpdateCodeBindingRequest,
+        RepositorySummaryResponse,
+        ServiceRepositoryResponse,
+        LinkServiceRepositoryRequest,
+        SpecificationCodeBindingResponse,
+        SetSpecificationCodeBindingRequest,
         SpecificationKindResponse,
         SpecificationResponse,
         CreateGroupRequest,

@@ -27,6 +27,7 @@ use backup_storage::{BackupObject, BackupStorage};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use specx_controller::GitProviderError;
 use specx_core::persistence::{
     AuditEvent, BackupArtifact, IdempotencyRecord, LATEST_SCHEMA_VERSION, PersistenceError, SpecificationRevision,
     SqliteStore, WebSession, WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
@@ -35,8 +36,9 @@ use specx_core::persistence::{
 use specx_core::postgres::PostgresStore;
 use specx_core::{
     CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Core, CoreError,
-    Id, Service, ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, Specification, SpecificationKind, Tag, Workspace,
-    WorkspaceContext,
+    Id, Repository, Service, ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, Specification,
+    SpecificationCodeBinding, SpecificationKind, SpecificationRefKind, Tag, Workspace, WorkspaceContext,
+    normalize_repository_url,
 };
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{
@@ -559,6 +561,46 @@ impl StoreBackend {
         }
     }
 
+    fn delete_service_repository(
+        &self,
+        context: &WorkspaceContext,
+        relation_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.delete_service_repository(context, relation_id, audit),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let context = context.clone();
+                let relation_id = relation_id.to_owned();
+                let audit = audit.clone();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.delete_service_repository(&context, &relation_id, &audit).await
+                })
+            }
+        }
+    }
+
+    fn delete_specification_code_binding(
+        &self,
+        context: &WorkspaceContext,
+        specification_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.delete_specification_code_binding(context, specification_id, audit),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let context = context.clone();
+                let specification_id = specification_id.to_owned();
+                let audit = audit.clone();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.delete_specification_code_binding(&context, &specification_id, &audit).await
+                })
+            }
+        }
+    }
+
     fn delete_specification(
         &self,
         context: &WorkspaceContext,
@@ -653,6 +695,37 @@ impl StoreBackend {
                 run_postgres_future(store.clone(), move |store| async move {
                     store
                         .update_specification_if_current_with_audit(&context, &expected, &updated, audit.as_ref())
+                        .await
+                })
+            }
+        }
+    }
+
+    fn update_specification_code_binding_if_current_with_audit(
+        &self,
+        context: &WorkspaceContext,
+        expected: &SpecificationCodeBinding,
+        updated: &SpecificationCodeBinding,
+        audit: Option<&AuditEvent>,
+    ) -> Result<bool, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => {
+                store.update_specification_code_binding_if_current_with_audit(context, expected, updated, audit)
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let context = context.clone();
+                let expected = expected.clone();
+                let updated = updated.clone();
+                let audit = audit.cloned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store
+                        .update_specification_code_binding_if_current_with_audit(
+                            &context,
+                            &expected,
+                            &updated,
+                            audit.as_ref(),
+                        )
                         .await
                 })
             }
@@ -1575,6 +1648,7 @@ pub enum ApiError {
     IdempotencyConflict,
     PreconditionRequired,
     PreconditionFailed,
+    RepositorySyncFailed,
     Core(CoreError),
     Persistence(PersistenceError),
 }
@@ -1587,6 +1661,13 @@ impl From<CoreError> for ApiError {
 impl From<PersistenceError> for ApiError {
     fn from(error: PersistenceError) -> Self {
         Self::Persistence(error)
+    }
+}
+
+impl From<GitProviderError> for ApiError {
+    fn from(error: GitProviderError) -> Self {
+        tracing::warn!(code = error.code(), error = %error, "repository synchronization failed");
+        Self::RepositorySyncFailed
     }
 }
 
@@ -1605,6 +1686,7 @@ impl IntoResponse for ApiError {
             Self::IdempotencyConflict => ErrorKind::IdempotencyConflict,
             Self::PreconditionRequired => ErrorKind::PreconditionRequired,
             Self::PreconditionFailed => ErrorKind::PreconditionFailed,
+            Self::RepositorySyncFailed => ErrorKind::RepositorySyncFailed,
             Self::Core(error) => ErrorKind::from(error),
             Self::Persistence(error) => {
                 tracing::error!(error = ?error, "storage operation failed");

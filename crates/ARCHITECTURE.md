@@ -18,6 +18,7 @@ framework crates for hypothetical features.
 | `specx-formats` | Deterministic content normalization and pure format utilities | Standard library only; no resource lookup or I/O |
 | `specx-platform` | Environment-derived paths and shared database URL syntax | Standard library only; no business rules or drivers |
 | `specx-core` | Catalog invariants and SQLite/PostgreSQL persistence | May depend on types and pure formats; never on HTTP or UI |
+| `specx-controller` | Controller registration, event routing, bounded reconciliation, platform ContentStore, Git capability and the first Markdown controller adapter | Depends on types and pure capabilities; never on Core persistence, HTTP, UI or authorization |
 | `specx-api` | HTTP routes, API DTOs, authorization checks, storage selection facade | Depends on core; does not choose host login or browser state |
 | `specx-web` | Server startup, password session, static files, API mounting | Composes API and platform; does not implement catalog rules |
 
@@ -31,6 +32,8 @@ apps/desktop --Tauri IPC--> src-tauri --> specx-api
                                                 +----------> specx-types
 specx-web --> specx-platform
 src-tauri --> specx-platform
+specx-controller --> specx-types
+specx-controller --> specx-formats
 ```
 
 SQLite and PostgreSQL implement the same store behavior. Hosts choose the
@@ -61,9 +64,14 @@ See [the UI foundation](../docs/architecture/ui-foundation.md) for module
 ownership and extension rules.
 
 `specx-types` contains SpecX resource facts. `specx-platform` contains host path
-configuration. `specx-formats` provides deterministic content helpers. Add
-process management, download, proxy, plugin, or AI infrastructure only when a
-concrete SpecX feature has a stable contract and consumer.
+configuration. `specx-formats` provides deterministic content helpers.
+`specx-controller` contains reusable reconciliation, platform content storage,
+the Git Provider boundary and the first Markdown controller adapter. The
+adapter remains independent of Core persistence and HTTP so the first vertical
+slice can be exercised in isolation. When a second controller needs an
+independent release cadence, it can move to its own crate without changing the
+runtime contracts. Add process management, download, proxy, plugin, or AI infrastructure only when a concrete
+SpecX feature has a stable contract and consumer.
 
 ## Change Workflow
 

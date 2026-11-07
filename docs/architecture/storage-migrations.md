@@ -2,7 +2,7 @@
 
 `core` owns the schema for both SQLite and PostgreSQL. The adapters expose the
 same `schema_migrations` contract and must reach the same latest version before
-serving business requests. The current version is **11**.
+serving business requests. The current version is **15**.
 
 Every migration is a monotonic integer. A version is applied exactly once and
 is recorded only after its DDL and data backfill succeeds. Existing databases
@@ -16,7 +16,14 @@ The initial PostgreSQL schema contains objects introduced by earlier SQLite
 migrations, but it still records the intermediate versions (including no-op
 markers) so both adapters share one upgrade history. Do not reuse a version,
 delete an applied migration, or edit a migration that may already be deployed.
-Add the next version and update both adapters in the same change.
+Add the next version and update both adapters in the same change. Version 13 adds
+workspace-scoped repositories, one-repository-per-service links, and independent
+service ref tracks, with a backfill from legacy Git code bindings.
+Version 14 adds workspace-scoped `specification_code_bindings`, moving
+branch/tag/commit selection from the service relationship to each specification.
+Version 15 adds the selected Markdown path to each specification code binding.
+Bindings with a non-empty path represent repository-managed specifications and
+are protected from in-app content edits and source removal.
 
 Hosts open the adapter before exposing the API router. `/ready` remains false
 until the latest marker exists. Web startup makes three bounded attempts with a

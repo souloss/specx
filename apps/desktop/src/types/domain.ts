@@ -34,6 +34,7 @@ export type Service = {
 };
 export type CodeSource = import("./api").CodeSourceResponse;
 export type ServiceCodeBinding = import("./api").ServiceCodeBindingResponse;
+export type ServiceRepository = import("./api").ServiceRepositoryResponse;
 export type Workspace = { id: string; name: string; tenantName: string };
 export type Catalog = {
   workspace: Workspace;

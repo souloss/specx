@@ -16,6 +16,7 @@ vi.mock("@/lib/backend/client", () => ({
     listSpecificationRevisions: vi.fn(),
     restoreSpecificationRevision: vi.fn(),
     deleteSpecification: vi.fn(),
+    syncSpecification: vi.fn(),
   },
 }));
 beforeEach(() => {
@@ -144,5 +145,24 @@ describe("catalog loading", () => {
     expect(specxApi.restoreSpecificationRevision).toHaveBeenCalledWith("workspace", "spec", 1, '"spec-v1"');
     expect(workspace.catalog.specifications[0]).toMatchObject({ content: "# 恢复内容", version: 3 });
     expect(specxApi.listSpecificationRevisions).toHaveBeenCalledWith("workspace", "spec");
+  });
+
+  it("updates the catalog and records the result after synchronizing a managed specification", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    vi.mocked(specxApi.syncSpecification).mockResolvedValue({
+      specification: { ...workspace.catalog.specifications[0], content: "# Synced", contentHash: "sha256:synced", version: 2, etag: '"spec-v2"' },
+      resolvedCommit: "a".repeat(40),
+      contentHash: "sha256:synced",
+      changed: true,
+      syncedAt: "2026-11-07T00:00:00Z",
+      providerVersion: "git-cli",
+    });
+
+    await expect(workspace.syncSpecification("spec")).resolves.toMatchObject({ changed: true, providerVersion: "git-cli" });
+
+    expect(specxApi.syncSpecification).toHaveBeenCalledWith("workspace", "spec");
+    expect(workspace.catalog.specifications[0]).toMatchObject({ content: "# Synced", version: 2, contentHash: "sha256:synced" });
+    expect(workspace.specificationSyncFor("spec")).toMatchObject({ changed: true, resolvedCommit: "a".repeat(40) });
   });
 });

@@ -6,9 +6,9 @@
 use std::collections::{HashMap, HashSet};
 
 pub use specx_types::{
-    CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Id, Service,
-    ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, Specification, SpecificationKind, Tag, Workspace,
-    WorkspaceContext,
+    CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Id, Repository,
+    Service, ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, ServiceRefKind, ServiceRefTrack, ServiceRepository,
+    Specification, SpecificationCodeBinding, SpecificationKind, SpecificationRefKind, Tag, Workspace, WorkspaceContext,
 };
 
 pub mod persistence;
@@ -31,6 +31,13 @@ pub enum CoreError {
     DuplicateCodeBinding,
     InvalidCodeSource,
     InvalidCodeBinding,
+    DuplicateRepository,
+    InvalidRepository,
+    ServiceRepositoryExists,
+    DuplicateRefTrack,
+    InvalidRefTrack,
+    InvalidSpecificationCodeBinding,
+    ManagedSpecification,
     HasDependents(&'static str),
 }
 
@@ -41,6 +48,10 @@ pub struct Core {
     services: HashMap<Id, Service>,
     code_sources: HashMap<Id, CodeSource>,
     code_bindings: HashMap<Id, ServiceCodeBinding>,
+    repositories: HashMap<Id, Repository>,
+    service_repositories: HashMap<Id, ServiceRepository>,
+    ref_tracks: HashMap<Id, ServiceRefTrack>,
+    specification_code_bindings: HashMap<Id, SpecificationCodeBinding>,
     specifications: HashMap<Id, Specification>,
 }
 
@@ -71,6 +82,26 @@ impl Core {
     }
 
     #[cfg(feature = "postgres")]
+    pub(crate) fn repositories(&self) -> impl Iterator<Item = &Repository> {
+        self.repositories.values()
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn service_repositories(&self) -> impl Iterator<Item = &ServiceRepository> {
+        self.service_repositories.values()
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn ref_tracks(&self) -> impl Iterator<Item = &ServiceRefTrack> {
+        self.ref_tracks.values()
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn specification_code_bindings(&self) -> impl Iterator<Item = &SpecificationCodeBinding> {
+        self.specification_code_bindings.values()
+    }
+
+    #[cfg(feature = "postgres")]
     pub(crate) fn specifications(&self) -> impl Iterator<Item = &Specification> {
         self.specifications.values()
     }
@@ -98,6 +129,26 @@ impl Core {
     #[cfg(feature = "postgres")]
     pub(crate) fn insert_code_binding(&mut self, binding: ServiceCodeBinding) {
         self.code_bindings.insert(binding.id.clone(), binding);
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn insert_repository(&mut self, repository: Repository) {
+        self.repositories.insert(repository.id.clone(), repository);
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn insert_service_repository(&mut self, relation: ServiceRepository) {
+        self.service_repositories.insert(relation.id.clone(), relation);
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn insert_ref_track(&mut self, track: ServiceRefTrack) {
+        self.ref_tracks.insert(track.id.clone(), track);
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn insert_specification_code_binding(&mut self, binding: SpecificationCodeBinding) {
+        self.specification_code_bindings.insert(binding.id.clone(), binding);
     }
 
     #[cfg(feature = "postgres")]
@@ -375,8 +426,207 @@ impl Core {
         ensure_workspace(context, &service.workspace_id)?;
         self.services.remove(service_id);
         self.code_bindings.retain(|_, binding| binding.service_id != service_id);
+        let relation_ids: HashSet<_> = self
+            .service_repositories
+            .values()
+            .filter(|relation| relation.service_id == service_id)
+            .map(|relation| relation.id.clone())
+            .collect();
+        self.ref_tracks.retain(|_, track| !relation_ids.contains(&track.service_repository_id));
+        self.service_repositories.retain(|_, relation| relation.service_id != service_id);
+        let specification_ids: HashSet<_> = self
+            .specifications
+            .values()
+            .filter(|specification| specification.service_id == service_id)
+            .map(|specification| specification.id.clone())
+            .collect();
+        self.specification_code_bindings.retain(|_, binding| !specification_ids.contains(&binding.specification_id));
         self.specifications.retain(|_, specification| specification.service_id != service_id);
         Ok(service)
+    }
+
+    pub fn create_repository(
+        &mut self,
+        context: &WorkspaceContext,
+        id: Id,
+        raw_url: &str,
+    ) -> Result<Repository, CoreError> {
+        let (canonical_url, provider, display_name) = normalize_repository_url(raw_url)?;
+        let repository = Repository {
+            id,
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            provider,
+            display_name,
+            canonical_url,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            archived: false,
+        };
+        self.validate_repository(context, &repository, None)?;
+        self.repositories.insert(repository.id.clone(), repository.clone());
+        Ok(repository)
+    }
+
+    pub fn list_repositories(&self, context: &WorkspaceContext) -> Vec<&Repository> {
+        self.repositories
+            .values()
+            .filter(|repository| {
+                repository.tenant_id == context.tenant_id && repository.workspace_id == context.workspace_id
+            })
+            .collect()
+    }
+
+    pub fn repository_by_canonical_url(&self, context: &WorkspaceContext, canonical_url: &str) -> Option<&Repository> {
+        self.list_repositories(context).into_iter().find(|repository| repository.canonical_url == canonical_url)
+    }
+
+    pub fn link_service_repository(
+        &mut self,
+        context: &WorkspaceContext,
+        id: Id,
+        service_id: &str,
+        repository_id: &str,
+    ) -> Result<ServiceRepository, CoreError> {
+        let service = self.services.get(service_id).ok_or(CoreError::NotFound("service"))?;
+        let repository = self.repositories.get(repository_id).ok_or(CoreError::NotFound("repository"))?;
+        ensure_tenant(context, &service.tenant_id)?;
+        ensure_workspace(context, &service.workspace_id)?;
+        ensure_tenant(context, &repository.tenant_id)?;
+        ensure_workspace(context, &repository.workspace_id)?;
+        if let Some(existing) = self.service_repositories.values().find(|relation| {
+            relation.tenant_id == context.tenant_id
+                && relation.workspace_id == context.workspace_id
+                && relation.service_id == service_id
+        }) {
+            if existing.repository_id == repository_id {
+                return Ok(existing.clone());
+            }
+            return Err(CoreError::ServiceRepositoryExists);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let relation = ServiceRepository {
+            id,
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            service_id: service_id.to_owned(),
+            repository_id: repository_id.to_owned(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        self.service_repositories.insert(relation.id.clone(), relation.clone());
+        Ok(relation)
+    }
+
+    pub fn service_repository(&self, context: &WorkspaceContext, service_id: &str) -> Option<&ServiceRepository> {
+        self.service_repositories.values().find(|relation| {
+            relation.tenant_id == context.tenant_id
+                && relation.workspace_id == context.workspace_id
+                && relation.service_id == service_id
+        })
+    }
+
+    pub fn repository(&self, context: &WorkspaceContext, repository_id: &str) -> Option<&Repository> {
+        self.repositories.get(repository_id).filter(|repository| {
+            repository.tenant_id == context.tenant_id && repository.workspace_id == context.workspace_id
+        })
+    }
+
+    pub fn list_service_ref_tracks(
+        &self,
+        context: &WorkspaceContext,
+        service_repository_id: &str,
+    ) -> Vec<&ServiceRefTrack> {
+        self.ref_tracks
+            .values()
+            .filter(|track| {
+                track.tenant_id == context.tenant_id
+                    && track.workspace_id == context.workspace_id
+                    && track.service_repository_id == service_repository_id
+            })
+            .collect()
+    }
+
+    pub fn service_ref_track(&self, context: &WorkspaceContext, track_id: &str) -> Option<&ServiceRefTrack> {
+        self.ref_tracks
+            .get(track_id)
+            .filter(|track| track.tenant_id == context.tenant_id && track.workspace_id == context.workspace_id)
+    }
+
+    pub fn create_service_ref_track(
+        &mut self,
+        context: &WorkspaceContext,
+        mut track: ServiceRefTrack,
+    ) -> Result<ServiceRefTrack, CoreError> {
+        let relation = self
+            .service_repositories
+            .get(&track.service_repository_id)
+            .ok_or(CoreError::NotFound("service_repository"))?;
+        ensure_tenant(context, &track.tenant_id)?;
+        ensure_workspace(context, &track.workspace_id)?;
+        ensure_tenant(context, &relation.tenant_id)?;
+        ensure_workspace(context, &relation.workspace_id)?;
+        if let Some(name) = &mut track.ref_name {
+            *name = name.trim().to_owned();
+            if track.ref_kind == ServiceRefKind::Commit {
+                name.make_ascii_lowercase();
+            }
+        }
+        validate_ref_track(&track)?;
+        if self.ref_tracks.values().any(|existing| {
+            existing.service_repository_id == track.service_repository_id
+                && existing.ref_kind == track.ref_kind
+                && existing.ref_name == track.ref_name
+        }) {
+            return Err(CoreError::DuplicateRefTrack);
+        }
+        if track.ref_kind == ServiceRefKind::DefaultBranch
+            && self.ref_tracks.values().any(|existing| {
+                existing.service_repository_id == track.service_repository_id
+                    && existing.ref_kind == ServiceRefKind::DefaultBranch
+            })
+        {
+            return Err(CoreError::DuplicateRefTrack);
+        }
+        self.ref_tracks.insert(track.id.clone(), track.clone());
+        Ok(track)
+    }
+
+    pub fn delete_service_repository(
+        &mut self,
+        context: &WorkspaceContext,
+        service_repository_id: &str,
+    ) -> Result<ServiceRepository, CoreError> {
+        let relation = self
+            .service_repositories
+            .get(service_repository_id)
+            .cloned()
+            .ok_or(CoreError::NotFound("service_repository"))?;
+        ensure_tenant(context, &relation.tenant_id)?;
+        ensure_workspace(context, &relation.workspace_id)?;
+        if self
+            .specification_code_bindings
+            .values()
+            .any(|binding| binding.service_repository_id == service_repository_id && !binding.path.is_empty())
+        {
+            return Err(CoreError::ManagedSpecification);
+        }
+        self.ref_tracks.retain(|_, track| track.service_repository_id != service_repository_id);
+        self.specification_code_bindings.retain(|_, binding| binding.service_repository_id != service_repository_id);
+        self.service_repositories.remove(service_repository_id);
+        Ok(relation)
+    }
+
+    pub fn delete_service_ref_track(
+        &mut self,
+        context: &WorkspaceContext,
+        track_id: &str,
+    ) -> Result<ServiceRefTrack, CoreError> {
+        let track = self.ref_tracks.get(track_id).cloned().ok_or(CoreError::NotFound("ref_track"))?;
+        ensure_tenant(context, &track.tenant_id)?;
+        ensure_workspace(context, &track.workspace_id)?;
+        self.ref_tracks.remove(track_id);
+        Ok(track)
     }
 
     pub fn create_code_source(
@@ -549,7 +799,39 @@ impl Core {
             self.specifications.get(specification_id).cloned().ok_or(CoreError::NotFound("specification"))?;
         ensure_tenant(context, &specification.tenant_id)?;
         ensure_workspace(context, &specification.workspace_id)?;
+        if self.specification_code_binding(context, specification_id).is_some_and(|binding| !binding.path.is_empty()) {
+            return Err(CoreError::ManagedSpecification);
+        }
         specification.title = title;
+        specification.content = specx_formats::normalize_line_endings(&content);
+        specification.updated_at = chrono::Utc::now().to_rfc3339();
+        self.specifications.insert(specification.id.clone(), specification.clone());
+        Ok(specification)
+    }
+
+    /// Apply content produced by the controller for a repository-managed
+    /// specification. Interactive edits use `update_markdown_specification`,
+    /// which intentionally rejects managed sources; controllers are the only
+    /// caller allowed to update their observed source content.
+    pub fn update_managed_specification_content(
+        &mut self,
+        context: &WorkspaceContext,
+        specification_id: &str,
+        content: String,
+    ) -> Result<Specification, CoreError> {
+        if content.trim().is_empty() {
+            return Err(CoreError::EmptyContent);
+        }
+        let mut specification =
+            self.specifications.get(specification_id).cloned().ok_or(CoreError::NotFound("specification"))?;
+        ensure_tenant(context, &specification.tenant_id)?;
+        ensure_workspace(context, &specification.workspace_id)?;
+        let binding = self
+            .specification_code_binding(context, specification_id)
+            .ok_or(CoreError::InvalidSpecificationCodeBinding)?;
+        if binding.path.is_empty() {
+            return Err(CoreError::InvalidSpecificationCodeBinding);
+        }
         specification.content = specx_formats::normalize_line_endings(&content);
         specification.updated_at = chrono::Utc::now().to_rfc3339();
         self.specifications.insert(specification.id.clone(), specification.clone());
@@ -565,8 +847,80 @@ impl Core {
             self.specifications.get(specification_id).cloned().ok_or(CoreError::NotFound("specification"))?;
         ensure_tenant(context, &specification.tenant_id)?;
         ensure_workspace(context, &specification.workspace_id)?;
+        if self.specification_code_binding(context, specification_id).is_some_and(|binding| !binding.path.is_empty()) {
+            return Err(CoreError::ManagedSpecification);
+        }
         self.specifications.remove(specification_id);
+        self.specification_code_bindings.retain(|_, binding| binding.specification_id != specification_id);
         Ok(specification)
+    }
+
+    pub fn specification_code_binding(
+        &self,
+        context: &WorkspaceContext,
+        specification_id: &str,
+    ) -> Option<&SpecificationCodeBinding> {
+        self.specification_code_bindings.values().find(|binding| {
+            binding.tenant_id == context.tenant_id
+                && binding.workspace_id == context.workspace_id
+                && binding.specification_id == specification_id
+        })
+    }
+
+    pub fn set_specification_code_binding(
+        &mut self,
+        context: &WorkspaceContext,
+        mut binding: SpecificationCodeBinding,
+    ) -> Result<SpecificationCodeBinding, CoreError> {
+        let specification =
+            self.specifications.get(&binding.specification_id).ok_or(CoreError::NotFound("specification"))?;
+        let relation = self
+            .service_repositories
+            .get(&binding.service_repository_id)
+            .ok_or(CoreError::NotFound("service_repository"))?;
+        ensure_tenant(context, &binding.tenant_id)?;
+        ensure_workspace(context, &binding.workspace_id)?;
+        ensure_tenant(context, &specification.tenant_id)?;
+        ensure_workspace(context, &specification.workspace_id)?;
+        ensure_tenant(context, &relation.tenant_id)?;
+        ensure_workspace(context, &relation.workspace_id)?;
+        if relation.service_id != specification.service_id {
+            return Err(CoreError::InvalidSpecificationCodeBinding);
+        }
+        binding.path = binding.path.trim().to_owned();
+        binding.ref_name = binding.ref_name.trim().to_owned();
+        if binding.ref_kind == SpecificationRefKind::Commit {
+            binding.ref_name.make_ascii_lowercase();
+        }
+        validate_specification_ref(&binding)?;
+        if let Some(existing) = self.specification_code_binding(context, &binding.specification_id) {
+            if !existing.path.is_empty() {
+                return Err(CoreError::ManagedSpecification);
+            }
+            if existing.id != binding.id {
+                return Err(CoreError::InvalidSpecificationCodeBinding);
+            }
+        }
+        self.specification_code_bindings.insert(binding.id.clone(), binding.clone());
+        Ok(binding)
+    }
+
+    pub fn delete_specification_code_binding(
+        &mut self,
+        context: &WorkspaceContext,
+        specification_id: &str,
+    ) -> Result<SpecificationCodeBinding, CoreError> {
+        let binding = self
+            .specification_code_binding(context, specification_id)
+            .cloned()
+            .ok_or(CoreError::NotFound("specification_code_binding"))?;
+        ensure_tenant(context, &binding.tenant_id)?;
+        ensure_workspace(context, &binding.workspace_id)?;
+        if !binding.path.is_empty() {
+            return Err(CoreError::ManagedSpecification);
+        }
+        self.specification_code_bindings.remove(&binding.id);
+        Ok(binding)
     }
 
     pub fn list_services(&self, context: &WorkspaceContext) -> Vec<&Service> {
@@ -618,6 +972,31 @@ impl Core {
                 && existing.canonical_key == source.canonical_key
         }) {
             return Err(CoreError::DuplicateCodeSource);
+        }
+        Ok(())
+    }
+
+    fn validate_repository(
+        &self,
+        context: &WorkspaceContext,
+        repository: &Repository,
+        current_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        if repository.provider.trim().is_empty()
+            || repository.display_name.trim().is_empty()
+            || repository.canonical_url.trim().is_empty()
+        {
+            return Err(CoreError::InvalidRepository);
+        }
+        ensure_tenant(context, &repository.tenant_id)?;
+        ensure_workspace(context, &repository.workspace_id)?;
+        if self.repositories.values().any(|existing| {
+            Some(existing.id.as_str()) != current_id
+                && existing.tenant_id == context.tenant_id
+                && existing.workspace_id == context.workspace_id
+                && existing.canonical_url == repository.canonical_url
+        }) {
+            return Err(CoreError::DuplicateRepository);
         }
         Ok(())
     }
@@ -728,6 +1107,131 @@ impl Core {
         }
         false
     }
+}
+
+fn validate_ref_track(track: &ServiceRefTrack) -> Result<(), CoreError> {
+    let has_name = track.ref_name.as_ref().is_some_and(|name| !name.trim().is_empty());
+    if (track.ref_kind == ServiceRefKind::DefaultBranch) == has_name {
+        return Err(CoreError::InvalidRefTrack);
+    }
+    if let Some(name) = &track.ref_name {
+        if name.chars().any(char::is_control) {
+            return Err(CoreError::InvalidRefTrack);
+        }
+        match track.ref_kind {
+            ServiceRefKind::DefaultBranch => return Err(CoreError::InvalidRefTrack),
+            ServiceRefKind::Commit => {
+                if !matches!(name.len(), 40 | 64) || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err(CoreError::InvalidRefTrack);
+                }
+            }
+            ServiceRefKind::Branch | ServiceRefKind::Tag => {
+                let invalid = name.is_empty()
+                    || name.starts_with('/')
+                    || name.ends_with('/')
+                    || name.starts_with('.')
+                    || name.ends_with('.')
+                    || name.ends_with(".lock")
+                    || name.contains("..")
+                    || name.contains("@{")
+                    || name == "@"
+                    || name.split('/').any(|part| part.is_empty() || part.starts_with('.') || part.ends_with('.'))
+                    || name.chars().any(|character| {
+                        character.is_whitespace() || matches!(character, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+                    });
+                if invalid {
+                    return Err(CoreError::InvalidRefTrack);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_specification_ref(binding: &SpecificationCodeBinding) -> Result<(), CoreError> {
+    if !binding.path.is_empty() {
+        let lower_path = binding.path.to_ascii_lowercase();
+        let invalid_path = binding.path.starts_with('/')
+            || binding.path.starts_with('\\')
+            || binding.path.ends_with('/')
+            || binding.path.contains('\\')
+            || binding.path.contains("..")
+            || binding.path.chars().any(char::is_control)
+            || binding.path.chars().any(|character| matches!(character, '~' | '^' | ':' | '?' | '*' | '['))
+            || binding.path.split('/').any(|part| part.is_empty() || part == ".");
+        if invalid_path || !(lower_path.ends_with(".md") || lower_path.ends_with(".markdown")) {
+            return Err(CoreError::InvalidSpecificationCodeBinding);
+        }
+    }
+    if binding.ref_name.is_empty() || binding.ref_name.chars().any(char::is_control) {
+        return Err(CoreError::InvalidSpecificationCodeBinding);
+    }
+    match binding.ref_kind {
+        SpecificationRefKind::Commit => {
+            if !matches!(binding.ref_name.len(), 40 | 64)
+                || !binding.ref_name.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(CoreError::InvalidSpecificationCodeBinding);
+            }
+        }
+        SpecificationRefKind::Branch | SpecificationRefKind::Tag => {
+            let name = &binding.ref_name;
+            let invalid = name.starts_with('/')
+                || name.ends_with('/')
+                || name.starts_with('.')
+                || name.ends_with('.')
+                || name.ends_with(".lock")
+                || name.contains("..")
+                || name.contains("@{")
+                || name == "@"
+                || name.split('/').any(|part| part.is_empty() || part.starts_with('.') || part.ends_with('.'))
+                || name.chars().any(|character| {
+                    character.is_whitespace() || matches!(character, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+                });
+            if invalid {
+                return Err(CoreError::InvalidSpecificationCodeBinding);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn normalize_repository_url(raw_url: &str) -> Result<(String, String, String), CoreError> {
+    let raw_url = raw_url.trim();
+    let ssh_scp_url = raw_url
+        .strip_prefix("git@")
+        .and_then(|value| value.split_once(':'))
+        .map(|(host, path)| format!("ssh://git@{host}/{path}"));
+    let parsed =
+        url::Url::parse(ssh_scp_url.as_deref().unwrap_or(raw_url)).map_err(|_| CoreError::InvalidRepository)?;
+    if !matches!(parsed.scheme(), "https" | "ssh")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty() && parsed.scheme() == "https"
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(CoreError::InvalidRepository);
+    }
+    let host = parsed.host_str().ok_or(CoreError::InvalidRepository)?.to_ascii_lowercase();
+    let mut path = parsed.path().trim_matches('/').to_owned();
+    if let Some(without_git) = path.strip_suffix(".git") {
+        path = without_git.to_owned();
+    }
+    if path.is_empty() || path.split('/').any(|segment| segment.is_empty() || segment == "." || segment == "..") {
+        return Err(CoreError::InvalidRepository);
+    }
+    let authority = parsed.port().map_or(host.clone(), |port| format!("{host}:{port}"));
+    let canonical_url = format!("{}://{authority}/{path}", parsed.scheme());
+    let provider = match host.as_str() {
+        "github.com" => "github",
+        "gitlab.com" => "gitlab",
+        "bitbucket.org" => "bitbucket",
+        _ => "generic_git",
+    }
+    .to_owned();
+    let display_name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(&path).to_owned();
+    Ok((canonical_url, provider, display_name))
 }
 
 fn ensure_tenant(context: &WorkspaceContext, tenant_id: &str) -> Result<(), CoreError> {
@@ -887,6 +1391,127 @@ mod tests {
             updated_at: "2026-11-01T00:00:00Z".into(),
         };
         assert_eq!(core.create_code_binding(&context, invalid), Err(CoreError::InvalidCodeBinding));
+    }
+
+    #[test]
+    fn repository_link_is_single_per_service_and_tracks_keep_refs_independent() {
+        let context = context("tenant-1", "workspace-1");
+        let mut core = Core::default();
+        core.create_service(
+            &context,
+            Service {
+                id: "svc-code".into(),
+                tenant_id: context.tenant_id.clone(),
+                workspace_id: context.workspace_id.clone(),
+                group_id: None,
+                name: "Payments".into(),
+                slug: "payments".into(),
+                description: String::new(),
+                tag_ids: vec![],
+                updated_at: "2026-11-01T00:00:00Z".into(),
+                archived: false,
+            },
+        )
+        .unwrap();
+
+        let repository =
+            core.create_repository(&context, "repo-1".into(), "https://GitHub.com/acme/payments.git/").unwrap();
+        assert_eq!(repository.canonical_url, "https://github.com/acme/payments");
+        assert_eq!(repository.provider, "github");
+        let reused = core.repository_by_canonical_url(&context, "https://github.com/acme/payments").unwrap();
+        assert_eq!(reused.id, repository.id);
+
+        let relation = core.link_service_repository(&context, "relation-1".into(), "svc-code", &repository.id).unwrap();
+        let same = core.link_service_repository(&context, "ignored-id".into(), "svc-code", &repository.id).unwrap();
+        assert_eq!(same.id, relation.id);
+
+        let commit = "A".repeat(40);
+        for (id, ref_kind, ref_name) in [
+            ("track-main", ServiceRefKind::Branch, Some("main")),
+            ("track-release", ServiceRefKind::Branch, Some("release/v1")),
+            ("track-tag", ServiceRefKind::Tag, Some("v1.2.0")),
+            ("track-commit", ServiceRefKind::Commit, Some(commit.as_str())),
+        ] {
+            let track = core
+                .create_service_ref_track(
+                    &context,
+                    ServiceRefTrack {
+                        id: id.into(),
+                        tenant_id: context.tenant_id.clone(),
+                        workspace_id: context.workspace_id.clone(),
+                        service_repository_id: relation.id.clone(),
+                        ref_kind,
+                        ref_name: ref_name.map(str::to_owned),
+                        created_at: "2026-11-01T00:00:00Z".into(),
+                        updated_at: "2026-11-01T00:00:00Z".into(),
+                    },
+                )
+                .unwrap();
+            if ref_kind == ServiceRefKind::Commit {
+                assert_eq!(track.ref_name, Some("a".repeat(40)));
+            }
+        }
+
+        assert_eq!(core.list_service_ref_tracks(&context, &relation.id).len(), 4);
+        let duplicate = ServiceRefTrack {
+            id: "track-duplicate".into(),
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            service_repository_id: relation.id.clone(),
+            ref_kind: ServiceRefKind::Branch,
+            ref_name: Some("main".into()),
+            created_at: "2026-11-01T00:00:00Z".into(),
+            updated_at: "2026-11-01T00:00:00Z".into(),
+        };
+        assert_eq!(core.create_service_ref_track(&context, duplicate), Err(CoreError::DuplicateRefTrack));
+
+        let other = core.create_repository(&context, "repo-2".into(), "ssh://git@gitlab.com/acme/other.git").unwrap();
+        assert_eq!(
+            core.link_service_repository(&context, "relation-2".into(), "svc-code", &other.id),
+            Err(CoreError::ServiceRepositoryExists)
+        );
+    }
+
+    #[test]
+    fn repository_and_ref_track_reject_invalid_values() {
+        assert_eq!(normalize_repository_url("file:///etc/passwd"), Err(CoreError::InvalidRepository));
+        assert_eq!(
+            normalize_repository_url("https://user:secret@github.com/acme/repo"),
+            Err(CoreError::InvalidRepository)
+        );
+        assert_eq!(normalize_repository_url("git@github.com:acme/repo.git").unwrap().0, "ssh://github.com/acme/repo");
+
+        let context = context("tenant-1", "workspace-1");
+        let mut core = Core::default();
+        core.create_service(
+            &context,
+            Service {
+                id: "svc-code".into(),
+                tenant_id: context.tenant_id.clone(),
+                workspace_id: context.workspace_id.clone(),
+                group_id: None,
+                name: "Payments".into(),
+                slug: "payments".into(),
+                description: String::new(),
+                tag_ids: vec![],
+                updated_at: "2026-11-01T00:00:00Z".into(),
+                archived: false,
+            },
+        )
+        .unwrap();
+        let repository = core.create_repository(&context, "repo-1".into(), "https://github.com/acme/payments").unwrap();
+        let relation = core.link_service_repository(&context, "relation-1".into(), "svc-code", &repository.id).unwrap();
+        let invalid = ServiceRefTrack {
+            id: "track-invalid".into(),
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            service_repository_id: relation.id,
+            ref_kind: ServiceRefKind::Branch,
+            ref_name: Some("../main".into()),
+            created_at: "2026-11-01T00:00:00Z".into(),
+            updated_at: "2026-11-01T00:00:00Z".into(),
+        };
+        assert_eq!(core.create_service_ref_track(&context, invalid), Err(CoreError::InvalidRefTrack));
     }
 
     #[test]

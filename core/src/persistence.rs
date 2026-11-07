@@ -6,10 +6,12 @@
 
 use crate::{
     CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Core, Id,
-    Service, ServiceCodeBinding, ServiceGroup, Specification, SpecificationKind, Tag, Workspace, WorkspaceContext,
+    Repository, Service, ServiceCodeBinding, ServiceGroup, ServiceRefKind, ServiceRefTrack, ServiceRepository,
+    Specification, SpecificationCodeBinding, SpecificationKind, SpecificationRefKind, Tag, Workspace, WorkspaceContext,
+    normalize_repository_url,
 };
 
-pub const LATEST_SCHEMA_VERSION: i64 = 12;
+pub const LATEST_SCHEMA_VERSION: i64 = 15;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, backup::Backup, params};
 use sha2::{Digest, Sha256};
@@ -191,6 +193,28 @@ impl SqliteStore {
                UNIQUE (tenant_id, workspace_id, service_id, source_id, entity_kind, path)
              );
              CREATE INDEX IF NOT EXISTS service_code_bindings_service ON service_code_bindings(tenant_id, workspace_id, service_id);
+             CREATE TABLE IF NOT EXISTS repositories (
+               id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+               provider TEXT NOT NULL, display_name TEXT NOT NULL, canonical_url TEXT NOT NULL,
+               created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
+               UNIQUE (tenant_id, workspace_id, canonical_url)
+             );
+             CREATE INDEX IF NOT EXISTS repositories_scope ON repositories(tenant_id, workspace_id, display_name);
+             CREATE TABLE IF NOT EXISTS service_repositories (
+               id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+               service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+               repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+               created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+               UNIQUE (tenant_id, workspace_id, service_id)
+             );
+             CREATE TABLE IF NOT EXISTS service_ref_tracks (
+               id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+               service_repository_id TEXT NOT NULL REFERENCES service_repositories(id) ON DELETE CASCADE,
+               ref_kind TEXT NOT NULL, ref_name TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+               UNIQUE (tenant_id, workspace_id, service_repository_id, ref_kind, ref_name)
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS service_ref_tracks_default ON service_ref_tracks(tenant_id, workspace_id, service_repository_id)
+               WHERE ref_kind = 'default_branch';
              CREATE INDEX IF NOT EXISTS services_scope ON services(tenant_id, workspace_id, name);
              CREATE TABLE IF NOT EXISTS service_tags (
                tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
@@ -212,6 +236,15 @@ impl SqliteStore {
                content TEXT NOT NULL, content_hash TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
                UNIQUE (specification_id, version)
              );
+             CREATE TABLE IF NOT EXISTS specification_code_bindings (
+               id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+               specification_id TEXT NOT NULL REFERENCES specifications(id) ON DELETE CASCADE,
+               service_repository_id TEXT NOT NULL REFERENCES service_repositories(id) ON DELETE CASCADE,
+               path TEXT NOT NULL DEFAULT '', ref_kind TEXT NOT NULL, ref_name TEXT NOT NULL,
+               created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+               UNIQUE (tenant_id, workspace_id, specification_id)
+             );
+             CREATE INDEX IF NOT EXISTS specification_code_bindings_scope ON specification_code_bindings(tenant_id, workspace_id, specification_id);
              CREATE TABLE IF NOT EXISTS workspace_members (
                tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL, actor_id TEXT NOT NULL,
                role TEXT NOT NULL, revoked_at TEXT, created_at TEXT NOT NULL,
@@ -336,6 +369,117 @@ impl SqliteStore {
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (11, datetime('now'))", [])?;
         transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (12, datetime('now'))", [])?;
+        transaction.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS specx_v13_legacy_repository_map(
+               source_id TEXT PRIMARY KEY, repository_id TEXT NOT NULL
+             );
+             DELETE FROM specx_v13_legacy_repository_map;",
+        )?;
+        let legacy_git_sources = {
+            let mut statement = transaction.prepare(
+                "SELECT id,tenant_id,workspace_id,root_locator,created_at,updated_at,archived
+                 FROM code_sources WHERE source_type='git' ORDER BY created_at,id",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, bool>(6)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (source_id, tenant_id, workspace_id, root_locator, created_at, updated_at, archived) in legacy_git_sources {
+            let Ok((canonical_url, provider, display_name)) = normalize_repository_url(&root_locator) else {
+                continue;
+            };
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT id FROM repositories WHERE tenant_id=?1 AND workspace_id=?2 AND canonical_url=?3",
+                    params![tenant_id, workspace_id, canonical_url],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let repository_id = match existing {
+                Some(id) => id,
+                None => {
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO repositories(id,tenant_id,workspace_id,provider,display_name,canonical_url,created_at,updated_at,archived)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                        params![source_id, tenant_id, workspace_id, provider, display_name, canonical_url, created_at, updated_at, archived],
+                    )?;
+                    transaction.query_row(
+                        "SELECT id FROM repositories WHERE tenant_id=?1 AND workspace_id=?2 AND canonical_url=?3",
+                        params![tenant_id, workspace_id, canonical_url],
+                        |row| row.get(0),
+                    )?
+                }
+            };
+            transaction.execute(
+                "INSERT INTO specx_v13_legacy_repository_map(source_id,repository_id) VALUES(?1,?2)",
+                params![source_id, repository_id],
+            )?;
+        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO service_repositories(id,tenant_id,workspace_id,service_id,repository_id,created_at,updated_at)
+             SELECT binding.id,binding.tenant_id,binding.workspace_id,binding.service_id,repository.id,binding.created_at,binding.updated_at
+             FROM service_code_bindings binding
+             JOIN specx_v13_legacy_repository_map source_repository ON source_repository.source_id=binding.source_id
+             JOIN repositories repository ON repository.id=source_repository.repository_id
+             WHERE binding.id=(
+               SELECT candidate.id FROM service_code_bindings candidate
+               JOIN specx_v13_legacy_repository_map candidate_repository ON candidate_repository.source_id=candidate.source_id
+               WHERE candidate.tenant_id=binding.tenant_id AND candidate.workspace_id=binding.workspace_id
+                 AND candidate.service_id=binding.service_id
+               ORDER BY CASE candidate.role WHEN 'primary' THEN 0 ELSE 1 END,candidate.created_at,candidate.id LIMIT 1
+             )
+             ON CONFLICT(tenant_id,workspace_id,service_id) DO NOTHING",
+            [],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO service_ref_tracks(id,tenant_id,workspace_id,service_repository_id,ref_kind,ref_name,created_at,updated_at)
+             SELECT binding.id,binding.tenant_id,binding.workspace_id,relation.id,
+               CASE binding.revision_kind WHEN 'default_branch' THEN 'default_branch' ELSE binding.revision_kind END,
+               CASE binding.revision_kind WHEN 'default_branch' THEN NULL ELSE binding.revision END,
+               binding.created_at,binding.updated_at
+             FROM service_code_bindings binding
+             JOIN specx_v13_legacy_repository_map source_repository ON source_repository.source_id=binding.source_id
+             JOIN service_repositories relation ON relation.service_id=binding.service_id
+               AND relation.tenant_id=binding.tenant_id AND relation.workspace_id=binding.workspace_id
+               AND relation.repository_id=source_repository.repository_id
+             WHERE binding.revision_kind IN ('default_branch','branch','tag','commit')
+             ORDER BY binding.created_at,binding.id",
+            [],
+        )?;
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (13, datetime('now'))", [])?;
+        transaction.execute(
+            "CREATE TABLE IF NOT EXISTS specification_code_bindings (
+               id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+               specification_id TEXT NOT NULL REFERENCES specifications(id) ON DELETE CASCADE,
+               service_repository_id TEXT NOT NULL REFERENCES service_repositories(id) ON DELETE CASCADE,
+               path TEXT NOT NULL DEFAULT '', ref_kind TEXT NOT NULL, ref_name TEXT NOT NULL,
+               created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+               UNIQUE (tenant_id, workspace_id, specification_id)
+             )",
+            [],
+        )?;
+        transaction.execute(
+            "CREATE INDEX IF NOT EXISTS specification_code_bindings_scope ON specification_code_bindings(tenant_id, workspace_id, specification_id)",
+            [],
+        )?;
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (14, datetime('now'))", [])?;
+        transaction
+            .execute("ALTER TABLE specification_code_bindings ADD COLUMN path TEXT NOT NULL DEFAULT ''", [])
+            .or_else(|error| if error.to_string().contains("duplicate column name") { Ok(0) } else { Err(error) })?;
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (15, datetime('now'))", [])?;
         transaction.commit().map_err(PersistenceError::from)?;
         Ok(())
     }
@@ -434,8 +578,14 @@ impl SqliteStore {
         transaction.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
         for table in [
             "service_tags",
+            "service_ref_tracks",
+            "service_repositories",
+            "specification_code_bindings",
             "specification_revisions",
             "specifications",
+            "service_code_bindings",
+            "code_sources",
+            "repositories",
             "services",
             "service_groups",
             "tags",
@@ -475,11 +625,20 @@ impl SqliteStore {
         }
         let source_connection = Connection::open(source)?;
         ensure_integrity(&source_connection)?;
+        let source_has_specification_code_bindings = has_table(&source_connection, "specification_code_bindings")?;
+        let source_has_specification_binding_path = source_has_specification_code_bindings
+            && has_column(&source_connection, "specification_code_bindings", "path")?;
         for table in [
             "service_groups",
             "tags",
             "services",
             "service_tags",
+            "repositories",
+            "code_sources",
+            "service_code_bindings",
+            "service_repositories",
+            "service_ref_tracks",
+            "specification_code_bindings",
             "specifications",
             "specification_revisions",
             "workspace_members",
@@ -487,6 +646,9 @@ impl SqliteStore {
             "api_idempotency",
             "workspace_invitations",
         ] {
+            if table == "specification_code_bindings" && !source_has_specification_code_bindings {
+                continue;
+            }
             let outside_scope: bool = source_connection.query_row(
                 &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE tenant_id != ?1 OR workspace_id != ?2)"),
                 params![context.tenant_id, context.workspace_id],
@@ -512,9 +674,14 @@ impl SqliteStore {
             transaction.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
             for table in [
                 "service_tags",
+                "service_ref_tracks",
+                "service_repositories",
+                "service_code_bindings",
                 "specification_revisions",
                 "specifications",
                 "services",
+                "code_sources",
+                "repositories",
                 "service_groups",
                 "tags",
                 "workspace_members",
@@ -530,11 +697,35 @@ impl SqliteStore {
                 "DELETE FROM main.workspaces WHERE tenant_id = ?1 AND id = ?2",
                 params![context.tenant_id, context.workspace_id],
             )?;
-            for (table, columns) in [
+            let copy_tables = [
                 ("service_groups", "id, tenant_id, workspace_id, parent_id, name, position"),
                 ("tags", "id, tenant_id, workspace_id, name, color"),
                 ("services", "id, tenant_id, workspace_id, group_id, name, slug, description, updated_at, archived"),
+                (
+                    "repositories",
+                    "id, tenant_id, workspace_id, provider, display_name, canonical_url, created_at, updated_at, archived",
+                ),
+                (
+                    "code_sources",
+                    "id, tenant_id, workspace_id, source_type, provider, display_name, canonical_key, root_locator, execution_scope, created_at, updated_at, archived",
+                ),
                 ("service_tags", "tenant_id, workspace_id, service_id, tag_id"),
+                (
+                    "service_code_bindings",
+                    "id, tenant_id, workspace_id, service_id, source_id, role, entity_kind, path, revision_kind, revision, created_at, updated_at",
+                ),
+                (
+                    "service_repositories",
+                    "id, tenant_id, workspace_id, service_id, repository_id, created_at, updated_at",
+                ),
+                (
+                    "service_ref_tracks",
+                    "id, tenant_id, workspace_id, service_repository_id, ref_kind, ref_name, created_at, updated_at",
+                ),
+                (
+                    "specification_code_bindings",
+                    "id, tenant_id, workspace_id, specification_id, service_repository_id, path, ref_kind, ref_name, created_at, updated_at",
+                ),
                 (
                     "specifications",
                     "id, tenant_id, workspace_id, service_id, title, kind, content, version, content_hash, updated_at",
@@ -549,10 +740,18 @@ impl SqliteStore {
                     "audit_events",
                     "tenant_id, workspace_id, actor_id, request_id, action, resource_type, resource_id, created_at",
                 ),
-            ] {
-                transaction.execute_batch(&format!(
-                    "INSERT INTO main.{table}({columns}) SELECT {columns} FROM workspace_backup.{table};"
-                ))?;
+            ];
+            for (table, columns) in copy_tables {
+                if table == "specification_code_bindings" && !source_has_specification_code_bindings {
+                    continue;
+                }
+                if table == "specification_code_bindings" && !source_has_specification_binding_path {
+                    transaction.execute_batch("INSERT INTO main.specification_code_bindings(id,tenant_id,workspace_id,specification_id,service_repository_id,path,ref_kind,ref_name,created_at,updated_at) SELECT id,tenant_id,workspace_id,specification_id,service_repository_id,'',ref_kind,ref_name,created_at,updated_at FROM workspace_backup.specification_code_bindings;")?;
+                } else {
+                    transaction.execute_batch(&format!(
+                        "INSERT INTO main.{table}({columns}) SELECT {columns} FROM workspace_backup.{table};"
+                    ))?;
+                }
             }
             let invitation_columns = if source_has_invitation_revocation {
                 "id, tenant_id, workspace_id, email, role, token_hash, expires_at, accepted_at, revoked_at, created_by, created_at"
@@ -832,6 +1031,22 @@ impl SqliteStore {
             params![context.tenant_id, workspace_id],
         )?;
         transaction.execute(
+            "DELETE FROM service_ref_tracks WHERE tenant_id = ?1 AND workspace_id = ?2",
+            params![context.tenant_id, workspace_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM specification_code_bindings WHERE tenant_id = ?1 AND workspace_id = ?2",
+            params![context.tenant_id, workspace_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM service_repositories WHERE tenant_id = ?1 AND workspace_id = ?2",
+            params![context.tenant_id, workspace_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM repositories WHERE tenant_id = ?1 AND workspace_id = ?2",
+            params![context.tenant_id, workspace_id],
+        )?;
+        transaction.execute(
             "DELETE FROM code_sources WHERE tenant_id = ?1 AND workspace_id = ?2",
             params![context.tenant_id, workspace_id],
         )?;
@@ -937,6 +1152,51 @@ impl SqliteStore {
         transaction.execute(
             "DELETE FROM service_code_bindings WHERE tenant_id=?1 AND workspace_id=?2 AND id=?3",
             params![context.tenant_id, context.workspace_id, binding_id],
+        )?;
+        insert_audit_event(&transaction, audit)?;
+        transaction.commit().map_err(PersistenceError::from)
+    }
+
+    pub fn delete_service_repository(
+        &self,
+        context: &WorkspaceContext,
+        service_repository_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM service_repositories WHERE tenant_id=?1 AND workspace_id=?2 AND id=?3",
+            params![context.tenant_id, context.workspace_id, service_repository_id],
+        )?;
+        insert_audit_event(&transaction, audit)?;
+        transaction.commit().map_err(PersistenceError::from)
+    }
+
+    pub fn delete_service_ref_track(
+        &self,
+        context: &WorkspaceContext,
+        track_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM service_ref_tracks WHERE tenant_id=?1 AND workspace_id=?2 AND id=?3",
+            params![context.tenant_id, context.workspace_id, track_id],
+        )?;
+        insert_audit_event(&transaction, audit)?;
+        transaction.commit().map_err(PersistenceError::from)
+    }
+
+    pub fn delete_specification_code_binding(
+        &self,
+        context: &WorkspaceContext,
+        specification_id: &str,
+        audit: &AuditEvent,
+    ) -> Result<(), PersistenceError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM specification_code_bindings WHERE tenant_id=?1 AND workspace_id=?2 AND specification_id=?3",
+            params![context.tenant_id, context.workspace_id, specification_id],
         )?;
         insert_audit_event(&transaction, audit)?;
         transaction.commit().map_err(PersistenceError::from)
@@ -1376,6 +1636,63 @@ impl SqliteStore {
             )?;
             ensure_upsert_scope(changed, "code binding")?;
         }
+        for repository in core.repositories.values().filter(|repository| {
+            repository.tenant_id == context.tenant_id && repository.workspace_id == context.workspace_id
+        }) {
+            let changed = transaction.execute(
+                "INSERT INTO repositories(id,tenant_id,workspace_id,provider,display_name,canonical_url,created_at,updated_at,archived)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                 ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,display_name=excluded.display_name,
+                   canonical_url=excluded.canonical_url,updated_at=excluded.updated_at,archived=excluded.archived
+                 WHERE repositories.tenant_id=excluded.tenant_id AND repositories.workspace_id=excluded.workspace_id",
+                params![repository.id, repository.tenant_id, repository.workspace_id, repository.provider, repository.display_name, repository.canonical_url, repository.created_at, repository.updated_at, repository.archived],
+            )?;
+            ensure_upsert_scope(changed, "repository")?;
+        }
+        for relation in core
+            .service_repositories
+            .values()
+            .filter(|relation| relation.tenant_id == context.tenant_id && relation.workspace_id == context.workspace_id)
+        {
+            let changed = transaction.execute(
+                "INSERT INTO service_repositories(id,tenant_id,workspace_id,service_id,repository_id,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(id) DO UPDATE SET service_id=excluded.service_id,repository_id=excluded.repository_id,updated_at=excluded.updated_at
+                 WHERE service_repositories.tenant_id=excluded.tenant_id AND service_repositories.workspace_id=excluded.workspace_id",
+                params![relation.id, relation.tenant_id, relation.workspace_id, relation.service_id, relation.repository_id, relation.created_at, relation.updated_at],
+            )?;
+            ensure_upsert_scope(changed, "service repository")?;
+        }
+        for track in core
+            .ref_tracks
+            .values()
+            .filter(|track| track.tenant_id == context.tenant_id && track.workspace_id == context.workspace_id)
+        {
+            let changed = transaction.execute(
+                "INSERT INTO service_ref_tracks(id,tenant_id,workspace_id,service_repository_id,ref_kind,ref_name,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                 ON CONFLICT(id) DO UPDATE SET service_repository_id=excluded.service_repository_id,ref_kind=excluded.ref_kind,
+                   ref_name=excluded.ref_name,updated_at=excluded.updated_at
+                 WHERE service_ref_tracks.tenant_id=excluded.tenant_id AND service_ref_tracks.workspace_id=excluded.workspace_id",
+                params![track.id, track.tenant_id, track.workspace_id, track.service_repository_id, ref_kind_name(track.ref_kind), track.ref_name, track.created_at, track.updated_at],
+            )?;
+            ensure_upsert_scope(changed, "service ref track")?;
+        }
+        for binding in core
+            .specification_code_bindings
+            .values()
+            .filter(|binding| binding.tenant_id == context.tenant_id && binding.workspace_id == context.workspace_id)
+        {
+            let changed = transaction.execute(
+                "INSERT INTO specification_code_bindings(id,tenant_id,workspace_id,specification_id,service_repository_id,path,ref_kind,ref_name,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                 ON CONFLICT(id) DO UPDATE SET specification_id=excluded.specification_id,service_repository_id=excluded.service_repository_id,
+                   path=excluded.path,ref_kind=excluded.ref_kind,ref_name=excluded.ref_name,updated_at=excluded.updated_at
+                 WHERE specification_code_bindings.tenant_id=excluded.tenant_id AND specification_code_bindings.workspace_id=excluded.workspace_id",
+                params![binding.id, binding.tenant_id, binding.workspace_id, binding.specification_id, binding.service_repository_id, binding.path, specification_ref_kind_name(binding.ref_kind), binding.ref_name, binding.created_at, binding.updated_at],
+            )?;
+            ensure_upsert_scope(changed, "specification code binding")?;
+        }
         for specification in core.specifications.values().filter(|specification| {
             specification.tenant_id == context.tenant_id && specification.workspace_id == context.workspace_id
         }) {
@@ -1533,6 +1850,54 @@ impl SqliteStore {
                     updated.updated_at,
                 ],
             )?;
+        }
+        if let Some(event) = audit {
+            insert_audit_event(&transaction, event)?;
+        }
+        transaction.commit().map_err(PersistenceError::from)?;
+        Ok(true)
+    }
+
+    pub fn update_specification_code_binding_if_current_with_audit(
+        &self,
+        context: &WorkspaceContext,
+        expected: &SpecificationCodeBinding,
+        updated: &SpecificationCodeBinding,
+        audit: Option<&AuditEvent>,
+    ) -> Result<bool, PersistenceError> {
+        if expected.id != updated.id
+            || expected.tenant_id != context.tenant_id
+            || expected.workspace_id != context.workspace_id
+            || updated.tenant_id != context.tenant_id
+            || updated.workspace_id != context.workspace_id
+        {
+            return Err(PersistenceError("specification code binding update scope does not match".into()));
+        }
+
+        let transaction = self.connection.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE specification_code_bindings
+             SET service_repository_id=?1,ref_kind=?2,ref_name=?3,updated_at=?4
+             WHERE id=?5 AND tenant_id=?6 AND workspace_id=?7 AND specification_id=?8
+               AND service_repository_id=?9 AND ref_kind=?10 AND ref_name=?11 AND updated_at=?12",
+            params![
+                updated.service_repository_id,
+                specification_ref_kind_name(updated.ref_kind),
+                updated.ref_name,
+                updated.updated_at,
+                expected.id,
+                context.tenant_id,
+                context.workspace_id,
+                expected.specification_id,
+                expected.service_repository_id,
+                specification_ref_kind_name(expected.ref_kind),
+                expected.ref_name,
+                expected.updated_at,
+            ],
+        )?;
+        if changed != 1 {
+            transaction.commit().map_err(PersistenceError::from)?;
+            return Ok(false);
         }
         if let Some(event) = audit {
             insert_audit_event(&transaction, event)?;
@@ -1811,6 +2176,72 @@ impl SqliteStore {
             let binding = row?;
             core.code_bindings.insert(binding.id.clone(), binding);
         }
+        let mut repositories = self.connection.prepare("SELECT id,tenant_id,workspace_id,provider,display_name,canonical_url,created_at,updated_at,archived FROM repositories WHERE tenant_id=?1 AND workspace_id=?2")?;
+        for row in repositories.query_map(params![context.tenant_id, context.workspace_id], |row| {
+            Ok(Repository {
+                id: row.get(0)?,
+                tenant_id: row.get(1)?,
+                workspace_id: row.get(2)?,
+                provider: row.get(3)?,
+                display_name: row.get(4)?,
+                canonical_url: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+                archived: row.get(8)?,
+            })
+        })? {
+            let repository = row?;
+            core.repositories.insert(repository.id.clone(), repository);
+        }
+        let mut relations = self.connection.prepare("SELECT id,tenant_id,workspace_id,service_id,repository_id,created_at,updated_at FROM service_repositories WHERE tenant_id=?1 AND workspace_id=?2")?;
+        for row in relations.query_map(params![context.tenant_id, context.workspace_id], |row| {
+            Ok(ServiceRepository {
+                id: row.get(0)?,
+                tenant_id: row.get(1)?,
+                workspace_id: row.get(2)?,
+                service_id: row.get(3)?,
+                repository_id: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })? {
+            let relation = row?;
+            core.service_repositories.insert(relation.id.clone(), relation);
+        }
+        let mut tracks = self.connection.prepare("SELECT id,tenant_id,workspace_id,service_repository_id,ref_kind,ref_name,created_at,updated_at FROM service_ref_tracks WHERE tenant_id=?1 AND workspace_id=?2")?;
+        for row in tracks.query_map(params![context.tenant_id, context.workspace_id], |row| {
+            Ok(ServiceRefTrack {
+                id: row.get(0)?,
+                tenant_id: row.get(1)?,
+                workspace_id: row.get(2)?,
+                service_repository_id: row.get(3)?,
+                ref_kind: parse_ref_kind(&row.get::<_, String>(4)?)?,
+                ref_name: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })? {
+            let track = row?;
+            core.ref_tracks.insert(track.id.clone(), track);
+        }
+        let mut specification_bindings = self.connection.prepare("SELECT id,tenant_id,workspace_id,specification_id,service_repository_id,path,ref_kind,ref_name,created_at,updated_at FROM specification_code_bindings WHERE tenant_id=?1 AND workspace_id=?2")?;
+        for row in specification_bindings.query_map(params![context.tenant_id, context.workspace_id], |row| {
+            Ok(SpecificationCodeBinding {
+                id: row.get(0)?,
+                tenant_id: row.get(1)?,
+                workspace_id: row.get(2)?,
+                specification_id: row.get(3)?,
+                service_repository_id: row.get(4)?,
+                path: row.get(5)?,
+                ref_kind: parse_specification_ref_kind(&row.get::<_, String>(6)?)?,
+                ref_name: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        })? {
+            let binding = row?;
+            core.specification_code_bindings.insert(binding.id.clone(), binding);
+        }
         Ok(core)
     }
 
@@ -1904,6 +2335,16 @@ fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool
     Ok(false)
 }
 
+fn has_table(connection: &Connection, table: &str) -> Result<bool, PersistenceError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![table],
+            |row| row.get(0),
+        )
+        .map_err(PersistenceError::from)
+}
+
 fn ensure_integrity(connection: &Connection) -> Result<(), PersistenceError> {
     let status: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     if status != "ok" {
@@ -1991,6 +2432,38 @@ fn binding_role_name(value: CodeBindingRole) -> &'static str {
     match value {
         CodeBindingRole::Primary => "primary",
         CodeBindingRole::Additional => "additional",
+    }
+}
+fn ref_kind_name(value: ServiceRefKind) -> &'static str {
+    match value {
+        ServiceRefKind::DefaultBranch => "default_branch",
+        ServiceRefKind::Branch => "branch",
+        ServiceRefKind::Tag => "tag",
+        ServiceRefKind::Commit => "commit",
+    }
+}
+fn parse_ref_kind(value: &str) -> Result<ServiceRefKind, rusqlite::Error> {
+    match value {
+        "default_branch" => Ok(ServiceRefKind::DefaultBranch),
+        "branch" => Ok(ServiceRefKind::Branch),
+        "tag" => Ok(ServiceRefKind::Tag),
+        "commit" => Ok(ServiceRefKind::Commit),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+fn specification_ref_kind_name(value: SpecificationRefKind) -> &'static str {
+    match value {
+        SpecificationRefKind::Branch => "branch",
+        SpecificationRefKind::Tag => "tag",
+        SpecificationRefKind::Commit => "commit",
+    }
+}
+fn parse_specification_ref_kind(value: &str) -> Result<SpecificationRefKind, rusqlite::Error> {
+    match value {
+        "branch" => Ok(SpecificationRefKind::Branch),
+        "tag" => Ok(SpecificationRefKind::Tag),
+        "commit" => Ok(SpecificationRefKind::Commit),
+        _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
 fn parse_binding_role(value: &str) -> Result<CodeBindingRole, rusqlite::Error> {
@@ -2186,6 +2659,95 @@ mod tests {
         let updated = Core::load(&store, &context).unwrap();
         assert_eq!(updated.specifications.get("spec-1").unwrap().version, 2);
         assert_eq!(updated.specifications.get("spec-1").unwrap().content, "# Updated Gateway");
+    }
+
+    #[test]
+    fn migration_backfills_one_repository_and_all_matching_legacy_refs_without_dropping_old_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-bindings.db");
+        let context = context("workspace-1");
+        let mut core = Core::default();
+        core.create_service(
+            &context,
+            Service {
+                id: "svc-legacy".into(),
+                tenant_id: context.tenant_id.clone(),
+                workspace_id: context.workspace_id.clone(),
+                group_id: None,
+                name: "Legacy service".into(),
+                slug: "legacy-service".into(),
+                description: String::new(),
+                tag_ids: vec![],
+                updated_at: "2026-11-01T00:00:00Z".into(),
+                archived: false,
+            },
+        )
+        .unwrap();
+        let store = SqliteStore::open(&path).unwrap();
+        store.persist_core(&core, &context).unwrap();
+        for (id, key) in [("source-a", "legacy:one"), ("source-b", "legacy:two")] {
+            store.connection.execute(
+                "INSERT INTO code_sources(id,tenant_id,workspace_id,source_type,provider,display_name,canonical_key,root_locator,execution_scope,created_at,updated_at,archived)
+                 VALUES(?1,?2,?3,'git','github','platform',?4,'https://github.com/acme/platform','server','2026-01-01','2026-01-01',0)",
+                params![id, context.tenant_id, context.workspace_id, key],
+            ).unwrap();
+        }
+        for (id, source_id, role, kind, path, revision_kind, revision, created_at) in [
+            ("binding-main", "source-a", "primary", "repository_root", "", "branch", Some("main"), "2026-01-01"),
+            (
+                "binding-release",
+                "source-b",
+                "additional",
+                "directory",
+                "services/legacy",
+                "branch",
+                Some("release/1.x"),
+                "2026-01-02",
+            ),
+            (
+                "binding-tag",
+                "source-b",
+                "additional",
+                "directory",
+                "services/legacy/release",
+                "tag",
+                Some("v1.2.0"),
+                "2026-01-03",
+            ),
+        ] {
+            store.connection.execute(
+                "INSERT INTO service_code_bindings(id,tenant_id,workspace_id,service_id,source_id,role,entity_kind,path,revision_kind,revision,created_at,updated_at)
+                 VALUES(?1,?2,?3,'svc-legacy',?4,?5,?6,?7,?8,?9,?10,?10)",
+                params![id, context.tenant_id, context.workspace_id, source_id, role, kind, path, revision_kind, revision, created_at],
+            ).unwrap();
+        }
+        drop(store);
+
+        let migrated = SqliteStore::open(&path).unwrap();
+        let loaded = migrated.load_core(&context).unwrap();
+        let relation = loaded.service_repository(&context, "svc-legacy").unwrap();
+        assert_eq!(relation.id, "binding-main");
+        let repository = loaded.repository(&context, &relation.repository_id).unwrap();
+        assert_eq!(repository.canonical_url, "https://github.com/acme/platform");
+        let mut refs: Vec<_> = loaded
+            .list_service_ref_tracks(&context, &relation.id)
+            .iter()
+            .map(|track| (track.ref_kind, track.ref_name.as_deref()))
+            .collect();
+        refs.sort_by_key(|(kind, name)| (*kind, *name));
+        assert_eq!(
+            refs,
+            vec![
+                (ServiceRefKind::Branch, Some("main")),
+                (ServiceRefKind::Branch, Some("release/1.x")),
+                (ServiceRefKind::Tag, Some("v1.2.0")),
+            ]
+        );
+        let old_binding_count: i64 = migrated
+            .connection
+            .query_row("SELECT COUNT(*) FROM service_code_bindings WHERE service_id='svc-legacy'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(old_binding_count, 3);
     }
 
     #[test]

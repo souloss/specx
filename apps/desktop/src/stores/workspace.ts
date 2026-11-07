@@ -2,9 +2,10 @@ import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
 import { loadPanelSession } from "../lib/core";
 import { specxApi } from "../lib/backend/client";
+import { ApiError } from "../lib/backend/types";
 import type { WorkspaceResponse } from "../types/api";
-import type { Catalog, CodeSource, PanelTab, ServiceCodeBinding, Specification, SpecificationRevision } from "../types/domain";
-import type { CodeSourceResponse, ServiceCodeBindingResponse } from "../types/api";
+import type { Catalog, CodeSource, PanelTab, ServiceCodeBinding, ServiceRepository, Specification, SpecificationRevision } from "../types/domain";
+import type { CodeSourceResponse, ServiceCodeBindingResponse, SpecificationRefKind, SpecificationSyncResponse } from "../types/api";
 import { translate } from "@/i18n";
 
 export const useWorkspaceStore = defineStore("workspace", () => {
@@ -35,6 +36,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const revisionsLoading = ref<Record<string, boolean>>({});
   const codeSources = ref<CodeSource[]>([]);
   const codeBindings = ref<Record<string, ServiceCodeBinding[]>>({});
+  const serviceRepositories = ref<Record<string, ServiceRepository | null>>({});
+  const specificationCodeBindings = ref<Record<string, import("../types/api").SpecificationCodeBindingResponse | null>>({});
+  const specificationSyncs = ref<Record<string, SpecificationSyncResponse>>({});
   let loadRevision = 0;
   watch(
     authenticated,
@@ -133,6 +137,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       workspaces.value = availableWorkspaces;
       codeSources.value = [];
       codeBindings.value = {};
+      serviceRepositories.value = {};
+      specificationCodeBindings.value = {};
+      specificationSyncs.value = {};
       restoreDrafts(next);
       if (sameWorkspace) {
         tabs.value = previousTabs.map((tab) => ({ ...tab, title: tab.kind === "specification" ? next.specifications.find((item) => item.id === tab.specificationId)!.title : next.services.find((item) => item.id === tab.serviceId)!.name }));
@@ -227,6 +234,87 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     if (!catalog.value) return;
     await specxApi.deleteCodeBinding(catalog.value.workspace.id, binding);
     codeBindings.value = { ...codeBindings.value, [binding.serviceId]: bindingsForService(binding.serviceId).filter((item) => item.id !== binding.id) };
+  }
+
+  async function loadServiceRepository(serviceId: string) {
+    const workspaceId = catalog.value?.workspace.id;
+    if (!workspaceId) return null;
+    try {
+      const loaded = await specxApi.getServiceRepository(workspaceId, serviceId);
+      serviceRepositories.value = { ...serviceRepositories.value, [serviceId]: loaded };
+      return loaded;
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 404) {
+        serviceRepositories.value = { ...serviceRepositories.value, [serviceId]: null };
+        return null;
+      }
+      throw cause;
+    }
+  }
+
+  function serviceRepositoryFor(serviceId: string) {
+    return serviceRepositories.value[serviceId] ?? null;
+  }
+
+  async function linkServiceRepository(serviceId: string, repositoryUrl: string) {
+    if (!catalog.value) throw new Error(translate("apiError.forbidden"));
+    const linked = await specxApi.linkServiceRepository(catalog.value.workspace.id, serviceId, repositoryUrl);
+    serviceRepositories.value = { ...serviceRepositories.value, [serviceId]: linked };
+    return linked;
+  }
+
+  async function unlinkServiceRepository(serviceId: string, etag: string) {
+    if (!catalog.value) return;
+    await specxApi.unlinkServiceRepository(catalog.value.workspace.id, serviceId, etag);
+    serviceRepositories.value = { ...serviceRepositories.value, [serviceId]: null };
+  }
+
+  async function loadSpecificationCodeBinding(specificationId: string) {
+    const workspaceId = catalog.value?.workspace.id;
+    if (!workspaceId) return null;
+    try {
+      const loaded = await specxApi.getSpecificationCodeBinding(workspaceId, specificationId);
+      specificationCodeBindings.value = { ...specificationCodeBindings.value, [specificationId]: loaded };
+      return loaded;
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 404) {
+        specificationCodeBindings.value = { ...specificationCodeBindings.value, [specificationId]: null };
+        return null;
+      }
+      throw cause;
+    }
+  }
+
+  function specificationCodeBindingFor(specificationId: string) {
+    return specificationCodeBindings.value[specificationId] ?? null;
+  }
+
+  function specificationSyncFor(specificationId: string) {
+    return specificationSyncs.value[specificationId] ?? null;
+  }
+
+  async function syncSpecification(specificationId: string) {
+    if (!catalog.value) throw new Error(translate("apiError.forbidden"));
+    const result = await specxApi.syncSpecification(catalog.value.workspace.id, specificationId);
+    catalog.value.specifications = catalog.value.specifications.map((item) => (item.id === specificationId ? { ...item, ...result.specification, kind: "markdown" } : item));
+    specificationSyncs.value = { ...specificationSyncs.value, [specificationId]: result };
+    return result;
+  }
+
+  async function setSpecificationCodeBinding(specificationId: string, refKind: SpecificationRefKind, refName: string, path: string) {
+    if (!catalog.value) throw new Error(translate("apiError.forbidden"));
+    const current = specificationCodeBindingFor(specificationId);
+    const saved = await specxApi.setSpecificationCodeBinding(catalog.value.workspace.id, specificationId, refKind, refName, path, current?.etag);
+    specificationCodeBindings.value = { ...specificationCodeBindings.value, [specificationId]: saved };
+    return saved;
+  }
+
+  async function deleteSpecificationCodeBinding(specificationId: string) {
+    if (!catalog.value) return;
+    const current = specificationCodeBindingFor(specificationId);
+    if (!current) return;
+    await specxApi.deleteSpecificationCodeBinding(catalog.value.workspace.id, specificationId, current.etag);
+    specificationCodeBindings.value = { ...specificationCodeBindings.value, [specificationId]: null };
   }
 
   function specificationDraft(specificationId: string) {
@@ -444,6 +532,19 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     deleteCodeSource,
     createCodeBinding,
     deleteCodeBinding,
+    serviceRepositories,
+    loadServiceRepository,
+    serviceRepositoryFor,
+    linkServiceRepository,
+    unlinkServiceRepository,
+    specificationCodeBindings,
+    loadSpecificationCodeBinding,
+    specificationCodeBindingFor,
+    specificationSyncs,
+    specificationSyncFor,
+    syncSpecification,
+    setSpecificationCodeBinding,
+    deleteSpecificationCodeBinding,
     selectService,
     openOverview,
     openSpecification,

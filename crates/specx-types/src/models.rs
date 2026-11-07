@@ -131,6 +131,85 @@ pub struct CodeSource {
     pub archived: bool,
 }
 
+/// Existing Git repository registered in a workspace for reuse by services.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Repository {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    pub provider: String,
+    pub display_name: String,
+    pub canonical_url: String,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// A service's optional link to its single code repository.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceRepository {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    pub service_id: Id,
+    pub repository_id: Id,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A branch, tag, commit, or repository-default ref followed by a service.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceRefTrack {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    pub service_repository_id: Id,
+    pub ref_kind: ServiceRefKind,
+    pub ref_name: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A specification's source revision inside its service repository.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecificationCodeBinding {
+    pub id: Id,
+    pub tenant_id: Id,
+    pub workspace_id: Id,
+    pub specification_id: Id,
+    pub service_repository_id: Id,
+    /// POSIX path to the Markdown document relative to the repository root.
+    pub path: String,
+    pub ref_kind: SpecificationRefKind,
+    pub ref_name: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A ref selector configured for one service-repository relationship.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceRefKind {
+    DefaultBranch,
+    Branch,
+    Tag,
+    Commit,
+}
+
+/// Git revision selector owned by one specification binding.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecificationRefKind {
+    Branch,
+    Tag,
+    Commit,
+}
+
 /// Structural source types supported by the first binding workflow.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

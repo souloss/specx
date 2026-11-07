@@ -26,11 +26,14 @@
     "/services": {"get": ["200", "400", "401", "403", "429", "500"], "post": ["200", "400", "401", "403", "404", "409", "413", "415", "422", "429", "500"]},
     "/services/{service_id}": {"delete": ["204", "400", "401", "403", "404", "412", "428"], "patch": ["200", "400", "401", "403", "404", "412", "413", "415", "422", "429", "500"], "put": ["200", "400", "401", "403", "404", "409", "412", "413", "415", "422", "428", "429", "500"]},
     "/services/{service_id}/code-bindings": {"get": ["200"], "post": ["200"]},
+    "/services/{service_id}/repository": {"delete": ["204", "404", "409", "412", "428"], "get": ["200", "404"], "post": ["200", "409", "422"]},
     "/specifications": {"get": ["200", "400", "401", "403", "429"], "post": ["200", "400", "401", "403", "404", "409", "413", "415", "422", "429", "500"]},
-    "/specifications/{specification_id}": {"delete": ["204", "400", "401", "403", "404", "412", "428"], "put": ["200", "400", "401", "403", "404", "412", "413", "415", "422", "428", "429", "500"]},
+    "/specifications/{specification_id}": {"delete": ["204", "400", "401", "403", "404", "409", "412", "428"], "put": ["200", "400", "401", "403", "404", "409", "412", "413", "415", "422", "428", "429", "500"]},
+    "/specifications/{specification_id}/code-binding": {"delete": ["204", "404", "409", "412", "428"], "get": ["200", "404"], "put": ["200", "404", "409", "412", "422", "428"]},
     "/specifications/{specification_id}/revisions": {"get": ["200", "400", "401", "403", "404", "429", "500"]},
     "/specifications/{specification_id}/revisions/{version}": {"get": ["200", "400", "401", "403", "404", "429", "500"]},
-    "/specifications/{specification_id}/revisions/{version}/restore": {"post": ["200", "400", "401", "403", "404", "412", "428", "429", "500"]},
+    "/specifications/{specification_id}/revisions/{version}/restore": {"post": ["200", "400", "401", "403", "404", "409", "412", "428", "429", "500"]},
+    "/specifications/{specification_id}/sync": {"post": ["200", "404", "409", "502"]},
     "/tags": {"get": ["200", "400", "401", "403", "429"], "post": ["200", "400", "401", "403", "409", "413", "415", "422", "429", "500"]},
     "/tags/{tag_id}": {"delete": ["204", "400", "401", "403", "404", "409"], "put": ["200", "400", "401", "403", "404", "413", "415", "422"]},
     "/workspaces": {"get": ["200", "401", "429", "500"], "post": ["200", "400", "401", "403", "413", "415", "422", "429", "500"]},
@@ -46,17 +49,20 @@
     "/code-sources": {"post": ["Idempotency-Key"]},
     "/code-sources/{source_id}": {"delete": ["If-Match", "source_id"], "put": ["If-Match", "source_id"]},
     "/services/{service_id}/code-bindings": {"post": ["Idempotency-Key", "service_id"]},
+    "/services/{service_id}/repository": {"delete": ["If-Match", "service_id"], "get": ["service_id"], "post": ["Idempotency-Key", "service_id"]},
     "/code-bindings/{binding_id}": {"delete": ["If-Match", "binding_id"], "put": ["If-Match", "binding_id"]},
     "/members/{member_actor_id}": {"delete": ["member_actor_id"], "put": ["member_actor_id"]},
     "/invitations/{invitation_id}": {"delete": ["invitation_id"]},
     "/backups/{file_name}/restore": {"post": ["file_name"]},
     "/specifications": {"get": ["limit", "offset"], "post": ["Idempotency-Key"]},
     "/specifications/{specification_id}": {"delete": ["If-Match", "specification_id"], "put": ["If-Match", "specification_id"]},
+    "/specifications/{specification_id}/code-binding": {"delete": ["If-Match", "specification_id"], "get": ["specification_id"], "put": ["If-Match", "specification_id"]},
     "/tags/{tag_id}": {"delete": ["tag_id"], "put": ["tag_id"]},
     "/workspaces/{workspace_id}": {"delete": ["workspace_id"], "put": ["workspace_id"]}
     ,"/specifications/{specification_id}/revisions": {"get": ["limit", "offset", "specification_id"]}
     ,"/specifications/{specification_id}/revisions/{version}": {"get": ["specification_id", "version"]}
     ,"/specifications/{specification_id}/revisions/{version}/restore": {"post": ["If-Match", "specification_id", "version"]}
+    ,"/specifications/{specification_id}/sync": {"post": ["specification_id"]}
   },
   "responseHeaders": {
     "/services": {"post": {"200": ["ETag"]}},
@@ -64,9 +70,12 @@
     "/code-sources/{source_id}": {"put": {"200": ["ETag"]}},
     "/services/{service_id}": {"patch": {"200": ["ETag"]}, "put": {"200": ["ETag"]}},
     "/services/{service_id}/code-bindings": {"post": {"200": ["ETag"]}},
+    "/services/{service_id}/repository": {"get": {"200": ["ETag"]}, "post": {"200": ["ETag"]}},
     "/code-bindings/{binding_id}": {"put": {"200": ["ETag"]}},
     "/specifications": {"post": {"200": ["ETag"]}},
     "/specifications/{specification_id}": {"put": {"200": ["ETag"]}}
+    ,"/specifications/{specification_id}/code-binding": {"get": {"200": ["ETag"]}, "put": {"200": ["ETag"]}}
+    ,"/specifications/{specification_id}/sync": {"post": {"200": ["ETag"]}}
   },
   "schemas": {
     "ErrorResponse": {
@@ -123,11 +132,19 @@
     },
     "CreateSpecificationRequest": {
       "required": ["content", "id", "serviceId", "title"],
-      "properties": ["content", "id", "serviceId", "title"]
+      "properties": ["content", "id", "serviceId", "source", "title"]
+    },
+    "CreateSpecificationSourceRequest": {
+      "required": ["path", "refKind", "refName"],
+      "properties": ["path", "refKind", "refName"]
     },
     "SpecificationResponse": {
       "required": ["content", "contentHash", "etag", "id", "kind", "serviceId", "tenantId", "title", "updatedAt", "version", "workspaceId"],
       "properties": ["content", "contentHash", "etag", "id", "kind", "serviceId", "tenantId", "title", "updatedAt", "version", "workspaceId"]
+    },
+    "SpecificationSyncResponse": {
+      "required": ["changed", "contentHash", "providerVersion", "resolvedCommit", "specification", "syncedAt"],
+      "properties": ["changed", "contentHash", "providerVersion", "resolvedCommit", "specification", "syncedAt"]
     },
     "ServicePageResponse": {
       "required": ["items", "limit", "offset", "query", "tagIds", "total"],
@@ -196,6 +213,26 @@
     "UpdateCodeBindingRequest": {
       "required": ["entityKind", "revisionKind", "role"],
       "properties": ["entityKind", "path", "revision", "revisionKind", "role"]
+    },
+    "RepositorySummaryResponse": {
+      "required": ["canonicalUrl", "displayName", "id", "provider"],
+      "properties": ["canonicalUrl", "displayName", "id", "provider"]
+    },
+    "ServiceRepositoryResponse": {
+      "required": ["createdAt", "etag", "id", "repository", "updatedAt"],
+      "properties": ["createdAt", "etag", "id", "repository", "updatedAt"]
+    },
+    "LinkServiceRepositoryRequest": {
+      "required": ["repositoryUrl"],
+      "properties": ["repositoryUrl"]
+    },
+    "SpecificationCodeBindingResponse": {
+      "required": ["createdAt", "etag", "id", "path", "refKind", "refName", "repository", "specificationId", "updatedAt"],
+      "properties": ["createdAt", "etag", "id", "path", "refKind", "refName", "repository", "specificationId", "updatedAt"]
+    },
+    "SetSpecificationCodeBindingRequest": {
+      "required": ["refKind", "refName"],
+      "properties": ["path", "refKind", "refName"]
     },
     "UpdateServiceRequest": {
       "required": ["name", "slug"],

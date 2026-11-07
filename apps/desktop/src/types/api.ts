@@ -91,6 +91,28 @@ export type ServiceCodeBindingResponse = {
   etag: string;
 };
 export type ServiceCodeBindingPageResponse = { items: ServiceCodeBindingResponse[] };
+export type RepositorySummaryResponse = { id: string; provider: string; displayName: string; canonicalUrl: string };
+export type ServiceRepositoryResponse = { id: string; repository: RepositorySummaryResponse; createdAt: string; updatedAt: string; etag: string };
+export type SpecificationRefKind = "branch" | "tag" | "commit";
+export type SpecificationCodeBindingResponse = {
+  id: string;
+  specificationId: string;
+  repository: RepositorySummaryResponse;
+  path: string;
+  refKind: SpecificationRefKind;
+  refName: string;
+  createdAt: string;
+  updatedAt: string;
+  etag: string;
+};
+export type SpecificationSyncResponse = {
+  specification: SpecificationResponse;
+  resolvedCommit: string;
+  contentHash: string;
+  changed: boolean;
+  syncedAt: string;
+  providerVersion: string;
+};
 
 export type DesktopApiRequest = {
   method: string;

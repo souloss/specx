@@ -7,7 +7,11 @@ import type {
   CodeSourceResponse,
   ServiceCodeBindingPageResponse,
   ServiceCodeBindingResponse,
+  ServiceRepositoryResponse,
+  SpecificationCodeBindingResponse,
+  SpecificationRefKind,
   SpecificationResponse,
+  SpecificationSyncResponse,
   SpecificationRevisionPageResponse,
   SpecificationRevisionResponse,
   WorkspaceListResponse,
@@ -164,6 +168,27 @@ export const specxApi = {
   deleteCodeBinding(workspaceId: string, binding: ServiceCodeBindingResponse) {
     return request<void>(`/api/specx/code-bindings/${encodeURIComponent(binding.id)}`, { method: "DELETE", headers: { "if-match": binding.etag } }, workspaceId);
   },
+  getServiceRepository(workspaceId: string, serviceId: string) {
+    return request<ServiceRepositoryResponse>(`/api/specx/services/${encodeURIComponent(serviceId)}/repository`, {}, workspaceId);
+  },
+  linkServiceRepository(workspaceId: string, serviceId: string, repositoryUrl: string, key = idempotencyKey("service-repository")) {
+    return request<ServiceRepositoryResponse>(`/api/specx/services/${encodeURIComponent(serviceId)}/repository`, { method: "POST", headers: { "idempotency-key": key }, body: { repositoryUrl } }, workspaceId);
+  },
+  unlinkServiceRepository(workspaceId: string, serviceId: string, etag: string) {
+    return request<void>(`/api/specx/services/${encodeURIComponent(serviceId)}/repository`, { method: "DELETE", headers: { "if-match": etag } }, workspaceId);
+  },
+  getSpecificationCodeBinding(workspaceId: string, specificationId: string) {
+    return request<SpecificationCodeBindingResponse>(`/api/specx/specifications/${encodeURIComponent(specificationId)}/code-binding`, {}, workspaceId);
+  },
+  setSpecificationCodeBinding(workspaceId: string, specificationId: string, refKind: SpecificationRefKind, refName: string, path: string, etag?: string) {
+    return request<SpecificationCodeBindingResponse>(`/api/specx/specifications/${encodeURIComponent(specificationId)}/code-binding`, { method: "PUT", headers: etag ? { "if-match": etag } : {}, body: { path, refKind, refName } }, workspaceId);
+  },
+  deleteSpecificationCodeBinding(workspaceId: string, specificationId: string, etag: string) {
+    return request<void>(`/api/specx/specifications/${encodeURIComponent(specificationId)}/code-binding`, { method: "DELETE", headers: { "if-match": etag } }, workspaceId);
+  },
+  syncSpecification(workspaceId: string, specificationId: string) {
+    return request<SpecificationSyncResponse>(`/api/specx/specifications/${encodeURIComponent(specificationId)}/sync`, { method: "POST" }, workspaceId);
+  },
   createTag(workspaceId: string, tag: { id: string; name: string; color: string }) {
     return request<unknown>("/api/specx/tags", { method: "POST", headers: { "idempotency-key": idempotencyKey("tag") }, body: tag }, workspaceId);
   },
@@ -175,6 +200,7 @@ export const specxApi = {
       serviceId: string;
       title: string;
       content: string;
+      source?: { path: string; refKind: SpecificationRefKind; refName: string };
     },
   ) {
     return request<SpecificationResponse>(

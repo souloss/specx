@@ -37,6 +37,7 @@ rustls-pemfile = { version = "2.2", optional = true }
 tokio = { version = "1", features = ["macros", "rt", "sync"], optional = true }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"], optional = true }
 tokio-postgres-rustls = { version = "0.13", optional = true }
+url = "2"
 webpki-roots = { version = "0.26", optional = true }
 
 [dev-dependencies]

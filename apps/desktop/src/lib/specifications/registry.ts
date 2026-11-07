@@ -1,8 +1,15 @@
 import type { MessageKey } from "@/i18n";
 import type { SpecificationKind } from "@/types/domain";
+import type { SpecificationRefKind } from "@/types/api";
 
 export type SpecificationDraft = Record<string, string>;
-export type SpecificationRequest = { id: string; serviceId: string; title: string; content: string };
+export type SpecificationRequest = {
+  id: string;
+  serviceId: string;
+  title: string;
+  content: string;
+  source?: { path: string; refKind: SpecificationRefKind; refName: string };
+};
 
 export type SpecificationFieldDefinition = {
   id: string;

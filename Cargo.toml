@@ -6,6 +6,7 @@ members = [
     "crates/specx-platform",
     "crates/specx-formats",
     "crates/specx-api",
+    "crates/specx-controller",
     "crates/specx-web",
 ]
 

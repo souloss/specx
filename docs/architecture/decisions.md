@@ -31,13 +31,25 @@
 ## 尚未冻结的决策
 
 - 规范编辑和修订历史的完整交互。
-- 外部代码仓库采集的授权和去重规则；服务代码绑定的稳定模型见[服务代码绑定设计](code-bindings.md)。
-- 大文档和附件的对象存储策略。
+- 私有仓库授权、代码采集和外部 Provider 集成的具体协议。
+- 大文档和附件的物理存储实现与垃圾回收策略；存储后端由平台统一选择，不作为普通资源的用户配置。
 
-## 已冻结：服务与代码来源解耦
+## 已冻结：Service 与 Repository 解耦
 
-- `Service` 只表示工作区中的逻辑服务，不直接保存仓库 URL、目录、语言、凭据或 CI 信息。
-- `CodeSource` 表示可复用的 Git 或本地文件来源；`ServiceCodeBinding` 表示服务绑定到来源的根、目录、文件或模式。
-- 绑定保存相对路径和版本选择器，分析时再解析为不可变快照；同一仓库可以绑定多个服务。
-- 凭据属于独立的 integration/secret ref；本地绝对路径属于宿主机边界，Core 不读取文件或调用 Provider。
-- 第一版先实现来源和绑定的持久化、API 与桌面管理，快照、分析、CI 和规范导入沿用稳定绑定 ID 扩展。
+- `Service` 是规范与代码分析的治理主体；不直接保存 URL、路径、语言、凭据或 CI 信息。
+- `Repository` 是工作区内按规范化 Git URL 去重的可复用登记项；SpecX 不创建远程仓库。
+- 一个 Service 最多关联一个 Repository；Repository 可由多个 Service 复用。
+- `ServiceRepository` 只表达仓库关联，不带 root path；branch、tag、commit 和规范托管时的 Markdown 相对路径属于具体规范的 `SpecificationCodeBinding`，同一服务下不同规范可选择不同 ref。
+- 规范创建时明确选择 SpecX 维护或仓库同步。仓库同步规范的内容、路径、ref、恢复、删除和解除绑定由同步来源控制；语言/框架属于代码分析事实；凭据属于未来独立的 Integration/Secret 能力。
+- 旧 `CodeSource` / `ServiceCodeBinding` 表和 API 仅用于兼容过渡，不再扩展；旧数据回填规则见[旧代码绑定说明](code-bindings.md)。
+- 当前持久化、API 和桌面管理边界见[服务、仓库与代码资源管理](service-code-management.md)。
+
+## 目标决策：控制器驱动的能力组合
+
+- 平台统一定义内容存储策略。规范正文、附件、仓库快照、渲染缓存和分析产物通过内部 `ContentStore` 保存；业务资源只持有 `ContentRef`、hash 和恢复元数据。普通用户不创建 StorageClass、StorageClaim 或 StorageBinding。
+- 外部能力通过 Controller 组合。Controller 观察资源和上游不可变快照，调用 Provider，按 generation/幂等键写回状态和审计；Provider 不直接写 Core，也不直接调用下游领域 Controller。
+- 仓库同步先由通用 Repository Controller 负责仓库、ref、Webhook/轮询、resolved commit 和 `RepositorySnapshot`。Markdown Document Controller 只消费快照和 `SpecificationCodeBinding.path`，读取文件并追加规范修订。
+- Webhook、轮询和队列事件只是协调触发器，资源、快照和状态才是事实来源；事件丢失或重复不能破坏最终一致性。
+- Controller 先作为 Host 内的受控任务落地；在出现第二个真实消费者和明确隔离需求前，不引入通用插件市场、独立控制器集群或任意资源调度框架。
+
+控制器边界、快照模型和失败恢复约定见[控制器与同步链路](controller-model.md)。

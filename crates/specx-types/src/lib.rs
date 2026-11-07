@@ -5,9 +5,14 @@
 //! safely by future CLI, import, and integration clients.
 
 mod models;
+mod resource;
 
 pub use models::{
-    CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Id, Service,
-    ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, Specification, SpecificationKind, Tag, Workspace,
-    WorkspaceContext,
+    CodeBindingRole, CodeEntityKind, CodeExecutionScope, CodeRevisionKind, CodeSource, CodeSourceType, Id, Repository,
+    Service, ServiceCodeBinding, ServiceGroup, ServiceGroupOrder, ServiceRefKind, ServiceRefTrack, ServiceRepository,
+    Specification, SpecificationCodeBinding, SpecificationKind, SpecificationRefKind, Tag, Workspace, WorkspaceContext,
+};
+pub use resource::{
+    ConditionStatus, ContentRef, ResourceCondition, ResourceError, ResourceEvent, ResourceEventKind, ResourcePhase,
+    ResourceRef, ResourceStatus,
 };
