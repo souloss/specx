@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { ChevronsRight, Plus, FilePlus2, Settings, Sun, Moon, SunMoon, LogOut } from "@lucide/vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { ChevronsRight, Plus, FilePlus2, Settings, Sun, Moon, SunMoon, LogOut, Layers } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { SpecxLogo } from "@/components/brand";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -25,6 +25,8 @@ const { themeMode, setThemeMode, isDark } = useTheme();
 const t = translate;
 const shortcuts = useShortcutStore();
 const updates = useAppUpdateStore();
+const compactToolbar = ref(false);
+let viewportQuery: MediaQueryList | undefined;
 const { isDesktop, isMac, isLinux, isMaximized, isFullscreen, toggleMaximize, toggleFullscreen, minimize, close, startDragging } = useWindowControls();
 const themeIcon = computed(() => (themeMode.value === "system" ? SunMoon : isDark.value ? Moon : Sun));
 function cycleTheme() {
@@ -52,6 +54,15 @@ function onToolbarDoubleClick(event: MouseEvent) {
   if (target.closest("button, input, select, a, [role='button'], [data-window-controls]")) return;
   void toggleMaximize();
 }
+function updateCompactToolbar() {
+  if (viewportQuery) compactToolbar.value = viewportQuery.matches;
+}
+onMounted(() => {
+  viewportQuery = window.matchMedia("(max-width: 640px)");
+  updateCompactToolbar();
+  viewportQuery.addEventListener("change", updateCompactToolbar);
+});
+onBeforeUnmount(() => viewportQuery?.removeEventListener("change", updateCompactToolbar));
 </script>
 
 <template>
@@ -61,17 +72,24 @@ function onToolbarDoubleClick(event: MouseEvent) {
     <AppTooltip v-if="settings.sidebarCollapsed" :text="shortcuts.hint(t('toolbar.expandSidebar'), 'sidebar')"
       ><Button variant="ghost" size="icon" class="h-8 w-8" :aria-label="shortcuts.hint(t('sidebar.expand'), 'sidebar')" @click="settings.sidebarCollapsed = false"><ChevronsRight class="h-4 w-4" /></Button
     ></AppTooltip>
-    <Button variant="ghost" size="sm" class="h-8 gap-1 px-2 text-xs" @click="emit('newService')"><Plus class="h-3.5 w-3.5" />{{ t("toolbar.createService") }}</Button>
-    <Button variant="ghost" size="sm" class="h-8 gap-1 px-2 text-xs" :disabled="!workspace.activeService" @click="emit('newSpecification')"
+    <Button variant="ghost" size="sm" class="h-8 gap-1 px-2 text-xs max-sm:px-1" :aria-label="t('toolbar.createService')" :title="t('toolbar.createService')" @click="emit('newService')"
+      ><Plus class="h-3.5 w-3.5" /><span class="max-sm:hidden">{{ t("toolbar.createService") }}</span></Button
+    >
+    <Button variant="ghost" size="sm" class="h-8 gap-1 px-2 text-xs" :aria-label="t('toolbar.createSpecification')" :title="t('toolbar.createSpecification')" :disabled="!workspace.activeService" @click="emit('newSpecification')"
       ><FilePlus2 class="h-3.5 w-3.5" /><span class="max-sm:hidden">{{ t("toolbar.createSpecification") }}</span></Button
     >
-    <span class="mx-1 h-4 border-l border-border" />
+    <span class="mx-1 h-4 border-l border-border max-sm:hidden" />
     <LightDropdown
       :model-value="workspace.catalog?.workspace.id ?? ''"
       :disabled="navigation.busy || Boolean(navigation.naming)"
       :items="workspace.workspaces.map((item) => ({ value: item.id, label: item.name }))"
       :aria-label="t('toolbar.switchWorkspace')"
-      trigger-class="inline-flex h-7 min-w-0 max-w-48 items-center gap-1 rounded px-2 text-xs hover:bg-muted"
+      :trigger-title="workspace.catalog?.workspace.name"
+      :trigger-icon="Layers"
+      :show-trigger-label="!compactToolbar"
+      :show-chevron="!compactToolbar"
+      :trigger-class="compactToolbar ? 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded hover:bg-muted' : 'inline-flex h-7 min-w-0 max-w-48 items-center gap-1 rounded px-2 text-xs hover:bg-muted'"
+      :trigger-icon-class="compactToolbar ? 'h-4 w-4' : 'h-3 w-3'"
       content-class="w-52"
       @update:model-value="switchWorkspace"
     />

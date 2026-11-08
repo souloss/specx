@@ -149,6 +149,10 @@
   gap: 28px;
   margin-top: 28px;
 }
+.spec-layout-openapi {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
 .spec-meta {
   display: flex;
   flex-direction: column;

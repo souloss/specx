@@ -4,10 +4,13 @@ import { Eye, FileEdit, Save, Split, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import MarkdownPreview from "./MarkdownPreview.vue";
+import OpenApiPreview from "./OpenApiPreview.vue";
+import OpenApiCodeEditor from "./OpenApiCodeEditor.vue";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { Specification } from "@/types/domain";
 import { formatDate } from "@/lib/core";
 import { i18n, translate } from "@/i18n";
+import { parseOpenApiContent } from "@/lib/openapi";
 
 const props = defineProps<{ specification: Specification }>();
 const emit = defineEmits<{ close: []; saved: [] }>();
@@ -15,6 +18,7 @@ const workspace = useWorkspaceStore();
 const t = translate;
 const title = ref("");
 const content = ref("");
+const openapiFormat = ref<"json" | "yaml">("yaml");
 const mode = ref<"edit" | "split" | "preview">("split");
 const ready = ref(false);
 const titleInput = ref<HTMLInputElement>();
@@ -25,7 +29,7 @@ const draft = computed(() => workspace.specificationDraft(props.specification.id
 const dirty = computed(() => workspace.hasUnsavedSpecification(props.specification.id));
 const status = computed(() => draft.value?.status ?? "saved");
 const remote = computed(() => draft.value?.remote);
-const canSave = computed(() => dirty.value && Boolean(title.value.trim()) && Boolean(content.value.trim()) && status.value !== "saving");
+const canSave = computed(() => dirty.value && Boolean(title.value.trim()) && Boolean(content.value.trim()) && (props.specification.kind !== "openapi" || Boolean(parseOpenApiContent(content.value))) && status.value !== "saving");
 const wordCount = computed(() => content.value.trim().split(/\s+/).filter(Boolean).length);
 const lineCount = computed(() => (content.value ? content.value.split("\n").length : 0));
 
@@ -33,6 +37,7 @@ function syncFromStore() {
   const saved = workspace.beginSpecificationEdit(props.specification.id);
   title.value = saved?.title ?? props.specification.title;
   content.value = saved?.content ?? props.specification.content;
+  openapiFormat.value = content.value.trimStart().startsWith("{") ? "json" : "yaml";
   ready.value = true;
 }
 
@@ -152,13 +157,14 @@ function discardAndClose() {
     </div>
     <div v-if="status === 'conflict' && remote" class="min-h-0 rounded-md border border-amber-300 bg-amber-50/40 p-3 dark:border-amber-700 dark:bg-amber-950/10">
       <div class="mb-2 text-xs font-medium text-muted-foreground">{{ t("specification.remoteVersion", { version: remote.version }) }}</div>
-      <div class="max-h-48 overflow-y-auto rounded border border-border bg-background p-3"><MarkdownPreview :content="remote.content" /></div>
+      <div class="max-h-48 overflow-y-auto rounded border border-border bg-background p-3"><OpenApiPreview v-if="specification.kind === 'openapi'" :content="remote.content" /><MarkdownPreview v-else :content="remote.content" /></div>
     </div>
     <p v-if="status === 'error'" role="alert" class="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">{{ draft?.error || t("specification.saveFailed") }}</p>
 
     <div class="grid min-h-0 flex-1 gap-3" :class="mode === 'split' ? 'lg:grid-cols-2' : 'grid-cols-1'">
+      <OpenApiCodeEditor v-if="specification.kind === 'openapi' && mode !== 'preview'" v-model="content" :label="t('specification.openapiContent')" :format="openapiFormat" @update:format="openapiFormat = $event" />
       <textarea
-        v-if="mode !== 'preview'"
+        v-else-if="mode !== 'preview'"
         v-model="content"
         name="content"
         autocomplete="off"
@@ -167,7 +173,8 @@ function discardAndClose() {
         spellcheck="false"
       />
       <div v-if="mode !== 'edit'" class="min-h-[360px] min-w-0 overflow-auto rounded-md border border-border bg-background p-4">
-        <MarkdownPreview :content="content" />
+        <OpenApiPreview v-if="specification.kind === 'openapi'" :content="content" />
+        <MarkdownPreview v-else :content="content" />
       </div>
     </div>
     <footer class="flex items-center justify-between text-xs text-muted-foreground" role="status" aria-live="polite">

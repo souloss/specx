@@ -4,6 +4,7 @@ import { CircleCheck, Edit3, FileText, GitBranch, History, Plus, RefreshCw, Tras
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import MarkdownPreview from "./MarkdownPreview.vue";
+import OpenApiPreview from "./OpenApiPreview.vue";
 import SpecificationEditor from "./SpecificationEditor.vue";
 import SpecificationHistory from "./SpecificationHistory.vue";
 import CodeBindingDialog from "./CodeBindingDialog.vue";
@@ -42,7 +43,10 @@ let sourceLoadRevision = 0;
 let repositoryLoadRevision = 0;
 
 function specificationKindLabel(kind: string) {
-  return kind.toLocaleLowerCase() === "markdown" ? t("specification.kinds.markdown") : kind;
+  const normalized = kind.toLocaleLowerCase();
+  if (normalized === "markdown") return t("specification.kinds.markdown");
+  if (normalized === "openapi") return t("specification.kinds.openapi");
+  return kind;
 }
 
 watch(
@@ -127,8 +131,8 @@ async function synchronizeSpecification() {
     <header v-if="!editing" class="spec-toolbar">
       <div>
         <span class="eyebrow">{{ t("service.specificationHeading") }}</span>
-        <h2>{{ activeSpecification.title }}</h2>
-        <span class="muted">{{ service.name }} · {{ t("service.updatedAt", { date: formatDate(activeSpecification.updatedAt, locale) }) }} · {{ t("specification.currentVersion", { version: activeSpecification.version }) }}</span>
+        <h2>{{ props.tab.operationKey ? props.tab.title : activeSpecification.title }}</h2>
+        <span class="muted">{{ props.tab.operationKey ? `${activeSpecification.title} · ` : `${service.name} · ` }}{{ t("service.updatedAt", { date: formatDate(activeSpecification.updatedAt, locale) }) }} · {{ t("specification.currentVersion", { version: activeSpecification.version }) }}</span>
       </div>
       <div v-if="!editing" class="flex flex-wrap items-center gap-2">
         <span v-if="sourceMetadataLoading" class="text-xs text-muted-foreground">{{ t("common.loading") }}</span>
@@ -136,7 +140,7 @@ async function synchronizeSpecification() {
         <Button v-if="!repositoryManaged" size="sm" variant="outline" :disabled="sourceMetadataLoading" @click="specificationCodeBindingOpen = true"><GitBranch class="h-3.5 w-3.5" />{{ t("specification.bindCodeVersion") }}</Button>
         <Button v-if="!repositoryManaged" size="sm" :disabled="sourceMetadataLoading" @click="editing = true"><Edit3 class="h-3.5 w-3.5" />{{ t("service.editSpecification") }}</Button>
         <Button size="sm" variant="outline" :disabled="sourceMetadataLoading" @click="historyOpen = true"><History class="h-3.5 w-3.5" />{{ t("service.specificationHistory") }}</Button>
-        <Button v-if="!repositoryManaged" size="sm" variant="ghost" :disabled="sourceMetadataLoading" class="text-destructive hover:bg-destructive/10 hover:text-destructive" @click="deleteOpen = true"><Trash2 class="h-3.5 w-3.5" />{{ t("service.deleteSpecification") }}</Button>
+        <Button v-if="!repositoryManaged" size="sm" variant="destructive" :disabled="sourceMetadataLoading" @click="deleteOpen = true"><Trash2 class="h-3.5 w-3.5" />{{ t("service.deleteSpecification") }}</Button>
       </div>
     </header>
     <div v-if="repositoryManaged" class="mb-4 flex items-start gap-3 rounded-md border border-primary/30 bg-primary/5 p-3 text-sm">
@@ -154,9 +158,10 @@ async function synchronizeSpecification() {
     </div>
     <p v-if="error" role="alert" class="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{{ error }}</p>
     <SpecificationEditor v-if="editing && !repositoryManaged" :specification="activeSpecification" @close="editing = false" />
-    <div v-else class="spec-layout">
-      <MarkdownPreview :content="activeSpecification.content" />
-      <aside class="spec-meta">
+    <div v-else class="spec-layout" :class="{ 'spec-layout-openapi': activeSpecification.kind === 'openapi' }">
+      <OpenApiPreview v-if="activeSpecification.kind === 'openapi'" :content="activeSpecification.content" :focus-operation-key="props.tab.operationKey" />
+      <MarkdownPreview v-else :content="activeSpecification.content" />
+      <aside v-if="activeSpecification.kind !== 'openapi'" class="spec-meta">
         <span class="eyebrow">{{ t("service.serviceLabel") }}</span
         ><strong>{{ service.name }}</strong
         ><span>{{ service.slug }}</span>

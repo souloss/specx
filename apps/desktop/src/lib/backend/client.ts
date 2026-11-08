@@ -50,7 +50,6 @@ function toCatalog(workspace: WorkspaceResponse, catalog: CatalogResponse): Cata
   const services = catalog.services.map(toService);
   const specifications: Specification[] = catalog.specifications.map((specification) => ({
     ...specification,
-    kind: "markdown",
   }));
   return {
     workspace: { id: workspace.id, name: workspace.name, tenantName: workspace.tenantId },
@@ -232,6 +231,7 @@ export const specxApi = {
       serviceId: string;
       title: string;
       content: string;
+      kind?: "markdown" | "openapi";
       source?: { path: string; refKind: SpecificationRefKind; refName: string };
     },
   ) {

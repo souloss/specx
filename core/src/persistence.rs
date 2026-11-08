@@ -2849,6 +2849,7 @@ fn ensure_upsert_scope(changed: usize, entity: &str) -> Result<(), PersistenceEr
 fn kind_name(kind: SpecificationKind) -> &'static str {
     match kind {
         SpecificationKind::Markdown => "markdown",
+        SpecificationKind::OpenApi => "openapi",
     }
 }
 
@@ -2963,6 +2964,7 @@ fn parse_revision_kind(value: &str) -> Result<CodeRevisionKind, rusqlite::Error>
 fn parse_kind(kind: &str) -> rusqlite::Result<SpecificationKind> {
     match kind {
         "markdown" => Ok(SpecificationKind::Markdown),
+        "openapi" => Ok(SpecificationKind::OpenApi),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }

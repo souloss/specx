@@ -4,6 +4,49 @@
   },
   "releases": [
     {
+      "tag": "v0.3.0",
+      "name": "specX 0.3.0",
+      "date": "2026-11-08",
+      "sections": [
+        {
+          "type": "added",
+          "title": "OpenAPI specifications and provider directories",
+          "items": [
+            {
+              "title": "OpenAPI specification lifecycle",
+              "desc": "Create, import, edit, revise, restore and synchronize OpenAPI specifications, then browse them by tag and API operation."
+            },
+            {
+              "title": "Specification provider directories",
+              "desc": "Each specification type is grouped under an icon-backed provider directory, so multiple specifications of the same type stay organized under a service."
+            },
+            {
+              "title": "Local specification import",
+              "desc": "New Markdown and OpenAPI specifications default to local file import with file type, size and OpenAPI format validation before saving."
+            }
+          ]
+        },
+        {
+          "type": "improved",
+          "title": "Specification navigation and editing",
+          "items": [
+            {
+              "title": "Expandable service specification tree",
+              "desc": "Services, specification directories, tag directories and API definitions can be expanded and opened independently, while specification context menus no longer show service actions."
+            },
+            {
+              "title": "JSON/YAML editing and preview",
+              "desc": "The OpenAPI editor provides JSON/YAML highlighting, formatting and focused single-operation views."
+            },
+            {
+              "title": "Consistent destructive actions",
+              "desc": "Deleting a specification and other destructive actions now use the shared design-system button variant."
+            }
+          ]
+        }
+      ]
+    },
+    {
       "tag": "v0.2.0",
       "name": "specX 0.2.0",
       "date": "2026-11-08",

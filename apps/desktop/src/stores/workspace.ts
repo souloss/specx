@@ -497,8 +497,8 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     persistDrafts();
     try {
       const saved = await specxApi.updateSpecification(catalogValue.workspace.id, specificationId, { title: draft.title.trim(), content: draft.content }, draft.baseEtag);
-      catalogValue.specifications = catalogValue.specifications.map((item) => (item.id === specificationId ? { ...item, ...saved, kind: "markdown" } : item));
-      tabs.value = tabs.value.map((tab) => (tab.specificationId === specificationId ? { ...tab, title: saved.title } : tab));
+      catalogValue.specifications = catalogValue.specifications.map((item) => (item.id === specificationId ? { ...item, ...saved, kind: item.kind } : item));
+      tabs.value = tabs.value.map((tab) => (tab.specificationId === specificationId && !tab.operationKey ? { ...tab, title: saved.title } : tab));
       delete drafts.value[specificationId];
       drafts.value = { ...drafts.value };
       draftRevision.value++;
@@ -598,12 +598,12 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     activeTabId.value = id;
   }
 
-  function openSpecification(specificationId: string) {
+  function openSpecification(specificationId: string, operationKey?: string, operationTitle?: string) {
     const specification = catalog.value?.specifications.find((item) => item.id === specificationId);
     if (!specification) return;
-    const id = `specification-${specification.id}`;
+    const id = `specification-${specification.id}${operationKey ? `-${encodeURIComponent(operationKey)}` : ""}`;
     if (!tabs.value.some((tab) => tab.id === id)) {
-      tabs.value.push({ id, kind: "specification", serviceId: specification.serviceId, specificationId, title: specification.title });
+      tabs.value.push({ id, kind: "specification", serviceId: specification.serviceId, specificationId, operationKey, title: operationTitle ?? specification.title });
     }
     activeServiceId.value = specification.serviceId;
     activeTabId.value = id;

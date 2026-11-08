@@ -28,7 +28,7 @@ export type CatalogResponse = {
     id: string;
     serviceId: string;
     title: string;
-    kind: string;
+    kind: "markdown" | "openapi";
     content: string;
     version: number;
     contentHash: string;

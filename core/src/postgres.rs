@@ -2778,11 +2778,13 @@ fn pg_error(error: tokio_postgres::Error) -> PersistenceError {
 fn kind_name(kind: SpecificationKind) -> &'static str {
     match kind {
         SpecificationKind::Markdown => "markdown",
+        SpecificationKind::OpenApi => "openapi",
     }
 }
 fn parse_kind(kind: &str) -> Result<SpecificationKind, PersistenceError> {
     match kind {
         "markdown" => Ok(SpecificationKind::Markdown),
+        "openapi" => Ok(SpecificationKind::OpenApi),
         _ => Err(PersistenceError::new(format!("unsupported specification kind: {kind}"))),
     }
 }

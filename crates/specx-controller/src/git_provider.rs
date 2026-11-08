@@ -442,6 +442,23 @@ pub fn validate_markdown_path(path: &str) -> Result<(), GitProviderError> {
     Ok(())
 }
 
+pub fn validate_openapi_path(path: &str) -> Result<(), GitProviderError> {
+    let lower = path.to_ascii_lowercase();
+    if path.trim().is_empty()
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || path.ends_with('/')
+        || path.contains('\\')
+        || path.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || path.chars().any(char::is_control)
+        || path.chars().any(|character| matches!(character, '~' | '^' | ':' | '?' | '*' | '['))
+        || !(lower.ends_with(".json") || lower.ends_with(".yaml") || lower.ends_with(".yml"))
+    {
+        return Err(GitProviderError::InvalidRequest);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,6 +472,14 @@ mod tests {
         assert!(validate_markdown_path("docs/spec*.md").is_err());
         assert!(validate_markdown_path("docs/spec:latest.md").is_err());
         assert!(validate_markdown_path("docs/spec.txt").is_err());
+    }
+
+    #[test]
+    fn validates_relative_openapi_paths() {
+        assert!(validate_openapi_path("docs/openapi.yaml").is_ok());
+        assert!(validate_openapi_path("docs/openapi.json").is_ok());
+        assert!(validate_openapi_path("../openapi.yaml").is_err());
+        assert!(validate_openapi_path("docs/openapi.md").is_err());
     }
 
     #[test]

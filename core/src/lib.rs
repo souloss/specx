@@ -834,6 +834,14 @@ impl Core {
     pub fn create_markdown_specification(
         &mut self,
         context: &WorkspaceContext,
+        specification: Specification,
+    ) -> Result<Specification, CoreError> {
+        self.create_specification(context, specification)
+    }
+
+    pub fn create_specification(
+        &mut self,
+        context: &WorkspaceContext,
         mut specification: Specification,
     ) -> Result<Specification, CoreError> {
         if specification.title.trim().is_empty() {
@@ -847,12 +855,24 @@ impl Core {
         let service = self.services.get(&specification.service_id).ok_or(CoreError::NotFound("service"))?;
         ensure_tenant(context, &service.tenant_id)?;
         ensure_workspace(context, &service.workspace_id)?;
-        specification.content = specx_formats::normalize_line_endings(&specification.content);
+        if specification.kind == SpecificationKind::Markdown {
+            specification.content = specx_formats::normalize_line_endings(&specification.content);
+        }
         self.specifications.insert(specification.id.clone(), specification.clone());
         Ok(specification)
     }
 
     pub fn update_markdown_specification(
+        &mut self,
+        context: &WorkspaceContext,
+        specification_id: &str,
+        title: String,
+        content: String,
+    ) -> Result<Specification, CoreError> {
+        self.update_specification(context, specification_id, title, content)
+    }
+
+    pub fn update_specification(
         &mut self,
         context: &WorkspaceContext,
         specification_id: &str,
@@ -873,7 +893,11 @@ impl Core {
             return Err(CoreError::ManagedSpecification);
         }
         specification.title = title;
-        specification.content = specx_formats::normalize_line_endings(&content);
+        specification.content = if specification.kind == SpecificationKind::Markdown {
+            specx_formats::normalize_line_endings(&content)
+        } else {
+            content
+        };
         specification.updated_at = chrono::Utc::now().to_rfc3339();
         self.specifications.insert(specification.id.clone(), specification.clone());
         Ok(specification)
@@ -902,7 +926,11 @@ impl Core {
         if binding.path.is_empty() {
             return Err(CoreError::InvalidSpecificationCodeBinding);
         }
-        specification.content = specx_formats::normalize_line_endings(&content);
+        specification.content = if specification.kind == SpecificationKind::Markdown {
+            specx_formats::normalize_line_endings(&content)
+        } else {
+            content
+        };
         specification.updated_at = chrono::Utc::now().to_rfc3339();
         self.specifications.insert(specification.id.clone(), specification.clone());
         Ok(specification)

@@ -52,6 +52,7 @@ useAppShortcuts(
 );
 onMounted(() => {
   window.addEventListener("beforeunload", beforeUnload);
+  if (window.matchMedia("(max-width: 640px)").matches) settings.sidebarCollapsed = true;
   void workspace.initialize();
   void updates.initialize().then(() => {
     if (updates.autoCheck) return updates.check();
@@ -113,7 +114,7 @@ async function resolvePendingClose(action: "save" | "discard" | "cancel") {
   </main>
   <div v-else-if="workspace.catalog" data-app-shell class="app-shell flex flex-col overflow-hidden bg-background text-foreground">
     <AppToolbar @new-service="newService" @new-specification="showSpecification = true" @logout="logout" />
-    <div class="flex min-h-0 flex-1" :class="settings.appLayout === 'classic' ? 'app-layout-classic' : 'app-panel-gutter gap-1 p-1'">
+    <div class="app-content-row flex min-h-0 flex-1" :class="settings.appLayout === 'classic' ? 'app-layout-classic' : 'app-panel-gutter gap-1 p-1'">
       <AppSidebar v-if="!settings.sidebarCollapsed" ref="sidebar" :sidebar-width="sidebarWidth" @start-resize="startSidebarResize" @collapse="settings.sidebarCollapsed = true" @remove="pendingDelete = $event" @create-service="newService" @edit-service="editService" />
       <main class="flex min-w-0 flex-1 flex-col overflow-hidden bg-background" :class="{ 'specx-panel': settings.appLayout === 'separated' }">
         <AppTabBar v-if="workspace.tabs.length || settings.showSettingsPage" />

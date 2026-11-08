@@ -110,4 +110,37 @@ describe("ServicePanel repository-managed specification", () => {
     expect(wrapper.text()).toContain("清单 sha256:manifes");
     wrapper.unmount();
   });
+
+  it("uses the shared destructive button variant for specification deletion", async () => {
+    const catalog = catalogFixture();
+    mockWorkspace.specificationCodeBindingFor.mockReturnValue(null);
+    mockWorkspace.specificationSyncFor.mockReturnValue(null);
+    mockWorkspace.loadSpecificationCodeBinding.mockResolvedValue(null);
+    const wrapper = mount(ServicePanel, {
+      props: {
+        catalog,
+        serviceId: "svc-a",
+        tab: { id: "specification-spec", kind: "specification", serviceId: "svc-a", specificationId: "spec", title: "访问约定" },
+      },
+      global: {
+        stubs: {
+          MarkdownPreview: { template: "<div />" },
+          SpecificationEditor: { template: "<div />" },
+          SpecificationHistory: { template: "<div />" },
+          SpecificationCodeBindingDialog: { template: "<div />" },
+          CodeBindingDialog: { template: "<div />" },
+          Dialog: { template: "<div><slot /></div>" },
+          DialogContent: { template: "<div><slot /></div>" },
+          DialogFooter: { template: "<div><slot /></div>" },
+          DialogHeader: { template: "<div><slot /></div>" },
+          DialogTitle: { template: "<div><slot /></div>" },
+        },
+      },
+    });
+    await flushPromises();
+
+    const deleteButton = wrapper.findAll("button").find((button) => button.text().includes("删除规范"));
+    expect(deleteButton?.attributes("data-variant")).toBe("destructive");
+    wrapper.unmount();
+  });
 });
