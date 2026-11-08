@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { ArrowLeft, ArrowRight, Check, FileText, Grid2X2, List, Search } from "@lucide/vue";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { specxApi } from "@/lib/backend/client";
@@ -167,11 +168,11 @@ async function save() {
 
 <template>
   <Dialog :open="open" @update:open="(value) => !busy && (open = value)">
-    <DialogContent class="sm:max-w-4xl sm:grid-rows-[auto_minmax(0,1fr)]" :show-close-button="!busy" @escape-key-down="busy && $event.preventDefault()" @pointer-down-outside="busy && $event.preventDefault()">
+    <DialogContent class="grid-rows-[auto_minmax(0,1fr)] sm:max-w-4xl" :show-close-button="!busy" @escape-key-down="busy && $event.preventDefault()" @pointer-down-outside="busy && $event.preventDefault()">
       <DialogHeader>
         <DialogTitle>{{ t("specification.createTitle") }}</DialogTitle>
       </DialogHeader>
-      <form class="flex min-h-0 flex-col gap-4" @submit.prevent="step === selectedType.steps.length ? save() : next()">
+      <form class="flex min-h-0 flex-col gap-4 overflow-hidden" @submit.prevent="step === selectedType.steps.length ? save() : next()">
         <section v-if="currentStep.kind === 'type-picker'" class="flex min-h-0 flex-1 flex-col gap-3">
           <div class="flex shrink-0 items-center gap-2">
             <div class="relative min-w-0 flex-1">
@@ -252,16 +253,22 @@ async function save() {
               <div v-else class="grid gap-3 sm:grid-cols-[minmax(0,9rem)_minmax(0,1fr)]">
                 <label class="settings-field"
                   >{{ t("specification.refKind")
-                  }}<select v-model="refKind" class="settings-input">
-                    <option value="branch">{{ t("specification.refKindBranch") }}</option>
-                    <option value="tag">{{ t("specification.refKindTag") }}</option>
-                  </select></label
+                  }}<Select v-model="refKind">
+                    <SelectTrigger class="settings-input h-9 w-full"><SelectValue :placeholder="t('specification.refKind')" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="branch">{{ t("specification.refKindBranch") }}</SelectItem>
+                      <SelectItem value="tag">{{ t("specification.refKindTag") }}</SelectItem>
+                    </SelectContent>
+                  </Select></label
                 >
                 <label class="settings-field"
                   >{{ t("specification.refName")
-                  }}<select v-model="refName" class="settings-input">
-                    <option v-for="ref in availableRefs" :key="ref" :value="ref">{{ ref }}</option>
-                  </select></label
+                  }}<Select v-model="refName">
+                    <SelectTrigger class="settings-input h-9 w-full"><SelectValue :placeholder="t('specification.refName')" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="ref in availableRefs" :key="ref" :value="ref">{{ ref }}</SelectItem>
+                    </SelectContent>
+                  </Select></label
                 >
               </div>
               <label class="settings-field"

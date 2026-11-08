@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { ChevronsDownUp, FolderPlus, RefreshCw, ChevronsLeft, Search, X, Plus, MoreHorizontal } from "@lucide/vue";
-import { Button } from "@/components/ui/button";
+import { ChevronsDownUp, FolderPlus, RefreshCw, ChevronsLeft, Search, X, MoreHorizontal } from "@lucide/vue";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import SidebarLocateButton from "@/components/sidebar/SidebarLocateButton.vue";
 import SidebarRegexToggleButton from "@/components/sidebar/SidebarRegexToggleButton.vue";
@@ -12,18 +11,15 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { ResourceTreeNode } from "@/types/navigation";
 import { useToast } from "@/composables/useToast";
-import { useCreateQueueStore } from "@/stores/createQueueStore";
 import { translate } from "@/i18n";
 
 defineProps<{ sidebarWidth: number }>();
-const emit = defineEmits<{ startResize: [event: PointerEvent]; collapse: []; remove: [node: ResourceTreeNode] }>();
+const emit = defineEmits<{ startResize: [event: PointerEvent]; collapse: []; remove: [node: ResourceTreeNode]; createService: [parentId: string | null] }>();
 const navigation = useNavigationStore();
 const settings = useSettingsStore();
 const workspace = useWorkspaceStore();
 const { toast } = useToast();
 const t = translate;
-const creations = useCreateQueueStore();
-const parentSaving = computed(() => creations.current.some((item) => item.id === navigation.selectedId && item.kind === "group"));
 const searchInput = ref<HTMLInputElement>();
 const options = computed(() => [
   { value: "sort:manual", label: t("sidebar.manualSort") },
@@ -131,12 +127,9 @@ defineExpose({ focusSearch });
       <div v-if="navigation.tagId" class="px-3 pb-1 text-[10px] text-muted-foreground">
         {{ t("sidebar.tag", { name: workspace.catalog?.tags.find((tag) => tag.id === navigation.tagId)?.name ?? "" }) }}<button class="ml-2 underline" @click="navigation.tagId = ''">{{ t("sidebar.clear") }}</button>
       </div>
-      <ResourceTree @remove="emit('remove', $event)" />
+      <ResourceTree @remove="emit('remove', $event)" @create-service="emit('createService', $event)" />
       <div class="flex items-center justify-between border-t border-border px-2 py-1 text-[11px] text-muted-foreground">
-        <span>{{ t("sidebar.serviceCount", { count: workspace.catalog?.services.length ?? 0 }) }}</span
-        ><Button variant="ghost" size="sm" class="h-6 text-xs" :disabled="navigation.busy || parentSaving" @click="navigation.beginCreate('resource', workspace.catalog?.groups.some((group) => group.id === navigation.selectedId) ? navigation.selectedId : null)"
-          ><Plus class="h-3 w-3" />{{ t("sidebar.createService") }}</Button
-        >
+        <span>{{ t("sidebar.serviceCount", { count: workspace.catalog?.services.length ?? 0 }) }}</span>
       </div>
     </div>
     <div class="panel-resize-handle panel-resize-handle--right" @pointerdown="emit('startResize', $event)" />

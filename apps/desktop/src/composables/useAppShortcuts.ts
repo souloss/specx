@@ -6,7 +6,7 @@ import { useWorkspaceStore } from "@/stores/workspace";
 import { useNavigationStore } from "@/stores/navigationStore";
 
 /** Register once at the application boundary. Tree editing keeps its own keys. */
-export function useAppShortcuts(focusSearch: () => void) {
+export function useAppShortcuts(focusSearch: () => void, openNewService?: () => void) {
   const shortcuts = useShortcutStore();
   const settings = useSettingsStore();
   const workspace = useWorkspaceStore();
@@ -27,7 +27,8 @@ export function useAppShortcuts(focusSearch: () => void) {
       navigation.locateActive();
     } else if (action === "newService") {
       settings.sidebarCollapsed = false;
-      navigation.beginCreate("resource");
+      if (openNewService) openNewService();
+      else navigation.beginCreate("resource");
     } else if (action === "saveSpecification") {
       const tab = workspace.activeTab;
       if (tab?.kind !== "specification" || !tab.specificationId) return;

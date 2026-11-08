@@ -227,6 +227,18 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     codeSources.value = codeSources.value.filter((item) => item.id !== source.id);
   }
 
+  async function createService(input: { id: string; name: string; description: string; groupId: string | null; tagIds: string[]; repositoryUrl?: string }) {
+    if (!catalog.value) throw new Error(translate("apiError.forbidden"));
+    const { repositoryUrl, ...serviceInput } = input;
+    const created = await specxApi.createService(catalog.value.workspace.id, { ...serviceInput, slug: input.id });
+    try {
+      if (repositoryUrl?.trim()) await specxApi.linkServiceRepository(catalog.value.workspace.id, created.id, repositoryUrl.trim());
+    } finally {
+      await refresh(created.id);
+    }
+    return created;
+  }
+
   async function createCodeBinding(serviceId: string, input: Pick<ServiceCodeBindingResponse, "id" | "sourceId" | "role" | "entityKind" | "path" | "revisionKind" | "revision">) {
     if (!catalog.value) throw new Error(translate("apiError.forbidden"));
     const created = await specxApi.createCodeBinding(catalog.value.workspace.id, serviceId, input);
@@ -599,6 +611,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     loadCodeBindings,
     bindingsForService,
     createCodeSource,
+    createService,
     deleteCodeSource,
     createCodeBinding,
     deleteCodeBinding,

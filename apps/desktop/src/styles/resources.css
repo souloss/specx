@@ -115,7 +115,7 @@
 }
 .facts-list {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 15px;
   margin: 18px 0;
 }

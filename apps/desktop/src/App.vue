@@ -6,6 +6,7 @@ import AppToolbar from "@/components/layout/AppToolbar.vue";
 import AppSidebar from "@/components/layout/AppSidebar.vue";
 import AppTabBar from "@/components/layout/AppTabBar.vue";
 import SpecificationDialog from "@/components/layout/SpecificationDialog.vue";
+import ServiceDialog from "@/components/layout/ServiceDialog.vue";
 import SettingsPage from "@/components/settings/SettingsPage.vue";
 import ServicePanel from "@/components/ServicePanel.vue";
 import LoginPanel from "@/components/auth/LoginPanel.vue";
@@ -36,12 +37,17 @@ const { message, visible, action, toast, dismissToast } = useToast();
 useUiFontFamily();
 const sidebar = ref<InstanceType<typeof AppSidebar>>();
 const showSpecification = ref(false);
+const showService = ref(false);
+const serviceParentId = ref<string | null>(null);
 const pendingDelete = ref<ResourceTreeNode | null>(null);
 const deleting = ref(false);
 const pendingCloseTab = computed(() => workspace.tabs.find((tab) => tab.id === workspace.pendingCloseTabId));
-useAppShortcuts(() => {
-  void nextTick(() => sidebar.value?.focusSearch());
-});
+useAppShortcuts(
+  () => {
+    void nextTick(() => sidebar.value?.focusSearch());
+  },
+  () => newService(),
+);
 onMounted(() => {
   window.addEventListener("beforeunload", beforeUnload);
   void workspace.initialize();
@@ -55,9 +61,10 @@ function beforeUnload(event: BeforeUnloadEvent) {
   event.returnValue = "";
 }
 onBeforeUnmount(() => window.removeEventListener("beforeunload", beforeUnload));
-function newService() {
+function newService(parentId: string | null = null) {
   settings.sidebarCollapsed = false;
-  navigation.beginCreate("resource");
+  serviceParentId.value = parentId;
+  showService.value = true;
 }
 async function remove() {
   if (!pendingDelete.value || deleting.value) return;
@@ -97,7 +104,7 @@ async function resolvePendingClose(action: "save" | "discard" | "cancel") {
   <div v-else-if="workspace.catalog" data-app-shell class="app-shell flex flex-col overflow-hidden bg-background text-foreground">
     <AppToolbar @new-service="newService" @new-specification="showSpecification = true" @logout="logout" />
     <div class="flex min-h-0 flex-1" :class="settings.appLayout === 'classic' ? 'app-layout-classic' : 'app-panel-gutter gap-1 p-1'">
-      <AppSidebar v-if="!settings.sidebarCollapsed" ref="sidebar" :sidebar-width="sidebarWidth" @start-resize="startSidebarResize" @collapse="settings.sidebarCollapsed = true" @remove="pendingDelete = $event" />
+      <AppSidebar v-if="!settings.sidebarCollapsed" ref="sidebar" :sidebar-width="sidebarWidth" @start-resize="startSidebarResize" @collapse="settings.sidebarCollapsed = true" @remove="pendingDelete = $event" @create-service="newService" />
       <main class="flex min-w-0 flex-1 flex-col overflow-hidden bg-background" :class="{ 'specx-panel': settings.appLayout === 'separated' }">
         <AppTabBar v-if="workspace.tabs.length || settings.showSettingsPage" />
         <SettingsPage v-if="settings.showSettingsPage" />
@@ -124,6 +131,7 @@ async function resolvePendingClose(action: "save" | "discard" | "cancel") {
       </main>
     </div>
     <SpecificationDialog v-model:open="showSpecification" />
+    <ServiceDialog v-model:open="showService" :parent-id="serviceParentId" />
     <Dialog :open="updates.phase === 'installing' || updates.phase === 'restart'">
       <DialogContent :show-close-button="false" @escape-key-down.prevent @interact-outside.prevent>
         <DialogHeader

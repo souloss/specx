@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Code2, Edit3, FileText, GitBranch, History, Plus, RefreshCw, Trash2 } from "@lucide/vue";
+import { Edit3, FileText, GitBranch, History, Plus, RefreshCw, Trash2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import MarkdownPreview from "./MarkdownPreview.vue";
@@ -37,7 +37,6 @@ const syncing = ref(false);
 const repositoryLoading = ref(false);
 const repositoryLoadError = ref("");
 const serviceRepository = computed(() => workspace.serviceRepositoryFor(props.serviceId));
-const specificationFormats = computed(() => [...new Set(specifications.value.map((specification) => specification.kind))]);
 let sourceLoadRevision = 0;
 let repositoryLoadRevision = 0;
 
@@ -194,20 +193,24 @@ async function synchronizeSpecification() {
             >{{ groupPath(catalog.groups, service.groupId).join(" / ") || t("common.ungrouped") }}</span
           >
         </div>
-        <div class="mt-4 flex min-w-0 items-center gap-2 text-sm" aria-live="polite">
+        <div class="mt-4 flex min-w-0 flex-wrap items-center gap-2 text-sm" aria-live="polite">
           <GitBranch class="h-4 w-4 shrink-0 text-primary" />
           <span v-if="repositoryLoading" class="text-muted-foreground">{{ t("service.repositoryLoading") }}</span>
           <span v-else-if="repositoryLoadError" class="truncate text-destructive">{{ repositoryLoadError }}</span>
           <template v-else-if="serviceRepository">
             <span class="text-muted-foreground">{{ t("service.repositoryLinked") }}</span>
-            <strong class="truncate">{{ serviceRepository.repository.displayName }}</strong>
+            <strong class="min-w-0 flex-1 truncate">{{ serviceRepository.repository.displayName }}</strong>
             <span class="shrink-0 rounded-sm bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">{{ serviceRepository.repository.provider }}</span>
+            <Button size="sm" variant="outline" class="ml-auto shrink-0" @click="codeBindingsOpen = true"><GitBranch class="size-3.5" />{{ t("service.repositoryDetails") }}</Button>
           </template>
-          <span v-else class="text-muted-foreground">{{ t("service.repositoryNotLinked") }}</span>
+          <template v-else>
+            <span class="text-muted-foreground">{{ t("service.repositoryNotLinked") }}</span>
+            <Button size="sm" variant="outline" class="ml-auto shrink-0" @click="codeBindingsOpen = true"><GitBranch class="size-3.5" />{{ t("service.codeBindings") }}</Button>
+          </template>
         </div>
       </div>
       <div class="flex flex-wrap items-center gap-2">
-        <button class="button" @click="codeBindingsOpen = true"><Code2 :size="16" />{{ t("service.codeBindings") }}</button><button class="button primary" @click="emit('newSpecification')"><Plus :size="16" />{{ t("service.createSpecification") }}</button>
+        <button class="button primary" type="button" @click="emit('newSpecification')"><Plus :size="16" />{{ t("service.createSpecification") }}</button>
       </div>
     </header>
     <section class="content-section">
@@ -218,7 +221,7 @@ async function synchronizeSpecification() {
             {{ t("service.specifications") }} <small>{{ specifications.length }}</small>
           </h3>
         </div>
-        <button class="text-button" @click="emit('newSpecification')"><Plus :size="14" />{{ t("service.create") }}</button>
+        <button class="text-button" type="button" @click="emit('newSpecification')"><Plus :size="14" />{{ t("service.create") }}</button>
       </div>
       <div v-if="!specifications.length" class="section-empty">
         <FileText :size="22" /><strong>{{ t("service.noSpecifications") }}</strong
@@ -240,10 +243,6 @@ async function synchronizeSpecification() {
         <div>
           <span>{{ t("service.lastUpdated") }}</span
           ><strong>{{ formatDate(service.updatedAt, locale) }}</strong>
-        </div>
-        <div>
-          <span>{{ t("service.format") }}</span
-          ><strong>{{ specificationFormats.length ? specificationFormats.map(specificationKindLabel).join(", ") : t("service.noSpecifications") }}</strong>
         </div>
       </div>
       <div class="tag-list">
