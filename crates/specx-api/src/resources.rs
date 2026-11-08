@@ -3391,7 +3391,7 @@ fn upsert_repository_schedule(
     delete,
     path = "/specifications/{specification_id}/code-binding",
     params(("specification_id" = String, Path), ("If-Match" = String, Header)),
-    responses((status = 204), (status = 404, body = ErrorResponse), (status = 409, body = ErrorResponse), (status = 412, body = ErrorResponse), (status = 428, body = ErrorResponse)),
+    responses((status = 204), (status = 404, body = ErrorResponse), (status = 412, body = ErrorResponse), (status = 428, body = ErrorResponse)),
     tag = "code"
 )]
 async fn delete_specification_code_binding(
@@ -3734,7 +3734,7 @@ async fn link_service_repository(
     delete,
     path = "/services/{service_id}/repository",
     params(("service_id" = String, Path), ("If-Match" = String, Header)),
-    responses((status = 204), (status = 404, body = ErrorResponse), (status = 409, body = ErrorResponse), (status = 412, body = ErrorResponse), (status = 428, body = ErrorResponse)),
+    responses((status = 204), (status = 404, body = ErrorResponse), (status = 412, body = ErrorResponse), (status = 428, body = ErrorResponse)),
     tag = "code"
 )]
 async fn unlink_service_repository(

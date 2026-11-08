@@ -108,7 +108,7 @@ async function discoverFiles() {
 }
 
 async function remove() {
-  if (!binding.value || busy.value || managed.value) return;
+  if (!binding.value || busy.value) return;
   busy.value = true;
   error.value = "";
   try {
@@ -188,12 +188,12 @@ async function remove() {
             </div>
           </div>
           <p v-if="binding" class="text-xs text-muted-foreground">{{ t("specification.codeVersionBound", { kind: refLabel(binding.refKind), name: binding.refName }) }}</p>
-          <p v-if="managed" class="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">{{ t("specification.managedReadOnlyDescription") }}</p>
+          <p v-if="managed" class="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">{{ t("specification.managedReadOnlyDescription") }} {{ t("specification.managedUnbindDescription") }}</p>
         </template>
       </div>
       <DialogFooter class="mx-0 mb-0 border-t border-border bg-muted/30 px-5 py-3 sm:flex-row">
         <Button variant="outline" :disabled="busy" @click="open = false">{{ t("common.cancel") }}</Button>
-        <Button v-if="binding && !managed" variant="destructive" :disabled="busy" @click="confirmRemove = true"><Trash2 class="size-4" />{{ t("specification.removeCodeVersion") }}</Button>
+        <Button v-if="binding" variant="destructive" :disabled="busy" @click="confirmRemove = true"><Trash2 class="size-4" />{{ t("specification.removeCodeVersion") }}</Button>
         <Button v-if="!managed" :disabled="!canSave" @click="save"><Save class="size-4" />{{ t("common.save") }}</Button>
       </DialogFooter>
     </DialogScrollContent>

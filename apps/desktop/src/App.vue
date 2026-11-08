@@ -39,8 +39,10 @@ const sidebar = ref<InstanceType<typeof AppSidebar>>();
 const showSpecification = ref(false);
 const showService = ref(false);
 const serviceParentId = ref<string | null>(null);
+const editingServiceId = ref<string | null>(null);
 const pendingDelete = ref<ResourceTreeNode | null>(null);
 const deleting = ref(false);
+const editingService = computed(() => (editingServiceId.value ? (workspace.catalog?.services.find((service) => service.id === editingServiceId.value) ?? null) : null));
 const pendingCloseTab = computed(() => workspace.tabs.find((tab) => tab.id === workspace.pendingCloseTabId));
 useAppShortcuts(
   () => {
@@ -63,7 +65,15 @@ function beforeUnload(event: BeforeUnloadEvent) {
 onBeforeUnmount(() => window.removeEventListener("beforeunload", beforeUnload));
 function newService(parentId: string | null = null) {
   settings.sidebarCollapsed = false;
+  editingServiceId.value = null;
   serviceParentId.value = parentId;
+  showService.value = true;
+}
+function editService(serviceId: string) {
+  if (!workspace.catalog?.services.some((service) => service.id === serviceId)) return;
+  settings.sidebarCollapsed = false;
+  editingServiceId.value = serviceId;
+  serviceParentId.value = null;
   showService.value = true;
 }
 async function remove() {
@@ -104,7 +114,7 @@ async function resolvePendingClose(action: "save" | "discard" | "cancel") {
   <div v-else-if="workspace.catalog" data-app-shell class="app-shell flex flex-col overflow-hidden bg-background text-foreground">
     <AppToolbar @new-service="newService" @new-specification="showSpecification = true" @logout="logout" />
     <div class="flex min-h-0 flex-1" :class="settings.appLayout === 'classic' ? 'app-layout-classic' : 'app-panel-gutter gap-1 p-1'">
-      <AppSidebar v-if="!settings.sidebarCollapsed" ref="sidebar" :sidebar-width="sidebarWidth" @start-resize="startSidebarResize" @collapse="settings.sidebarCollapsed = true" @remove="pendingDelete = $event" @create-service="newService" />
+      <AppSidebar v-if="!settings.sidebarCollapsed" ref="sidebar" :sidebar-width="sidebarWidth" @start-resize="startSidebarResize" @collapse="settings.sidebarCollapsed = true" @remove="pendingDelete = $event" @create-service="newService" @edit-service="editService" />
       <main class="flex min-w-0 flex-1 flex-col overflow-hidden bg-background" :class="{ 'specx-panel': settings.appLayout === 'separated' }">
         <AppTabBar v-if="workspace.tabs.length || settings.showSettingsPage" />
         <SettingsPage v-if="settings.showSettingsPage" />
@@ -131,7 +141,7 @@ async function resolvePendingClose(action: "save" | "discard" | "cancel") {
       </main>
     </div>
     <SpecificationDialog v-model:open="showSpecification" />
-    <ServiceDialog v-model:open="showService" :parent-id="serviceParentId" />
+    <ServiceDialog v-model:open="showService" :parent-id="serviceParentId" :service="editingService" />
     <Dialog :open="updates.phase === 'installing' || updates.phase === 'restart'">
       <DialogContent :show-close-button="false" @escape-key-down.prevent @interact-outside.prevent>
         <DialogHeader

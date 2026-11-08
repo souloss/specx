@@ -22,6 +22,14 @@ beforeEach(() => {
 });
 afterEach(() => wrapper?.unmount());
 describe("resource tree interactions", () => {
+  it("opens the full service editor from the context menu", async () => {
+    await wrapper.get('[data-tree-node="svc-a"]').trigger("contextmenu", { clientX: 60, clientY: 80 });
+    const edit = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("编辑服务"));
+    expect(edit).toBeTruthy();
+    edit!.click();
+    expect(wrapper.emitted("editService")).toEqual([["svc-a"]]);
+  });
+
   it("opens the migrated context menu and renames inline with Enter", async () => {
     await wrapper.get('[data-tree-node="svc-a"]').trigger("contextmenu", { clientX: 60, clientY: 80 });
     const rename = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("重命名"));

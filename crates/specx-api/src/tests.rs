@@ -378,13 +378,22 @@ async fn repository_managed_specifications_are_created_with_an_immutable_source(
         .header(IF_MATCH, binding_etag)
         .body(Body::empty())
         .unwrap();
-    assert_eq!(app.clone().oneshot(remove).await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(app.clone().oneshot(remove).await.unwrap().status(), StatusCode::NO_CONTENT);
+
+    let update = headers(axum::http::Request::put("/specifications/spec-managed"))
+        .header(IF_MATCH, &specification_etag)
+        .header("content-type", "application/json")
+        .body(Body::from(r##"{"title":"Changed after unbind","content":"# Changed after unbind"}"##))
+        .unwrap();
+    let response = app.clone().oneshot(update).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated_etag = response.headers().get(ETAG).unwrap().clone();
 
     let delete = headers(axum::http::Request::delete("/specifications/spec-managed"))
-        .header(IF_MATCH, &specification_etag)
+        .header(IF_MATCH, &updated_etag)
         .body(Body::empty())
         .unwrap();
-    assert_eq!(app.oneshot(delete).await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(app.oneshot(delete).await.unwrap().status(), StatusCode::NO_CONTENT);
 }
 
 #[cfg(unix)]

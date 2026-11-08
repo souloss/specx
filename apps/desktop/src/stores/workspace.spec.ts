@@ -13,6 +13,7 @@ vi.mock("@/lib/backend/client", () => ({
     listWorkspaces: vi.fn(),
     loadCatalog: vi.fn(),
     updateSpecification: vi.fn(),
+    updateService: vi.fn(),
     listSpecificationRevisions: vi.fn(),
     restoreSpecificationRevision: vi.fn(),
     deleteSpecification: vi.fn(),
@@ -20,6 +21,7 @@ vi.mock("@/lib/backend/client", () => ({
     setSpecificationCodeBinding: vi.fn(),
     deleteSpecificationCodeBinding: vi.fn(),
   },
+  toService: (service: Record<string, unknown>) => ({ ...service, groupId: service.groupId ?? "ungrouped", createdAt: service.updatedAt }),
 }));
 beforeEach(() => {
   installMemoryStorage();
@@ -29,6 +31,19 @@ beforeEach(() => {
   vi.mocked(specxApi.listWorkspaces).mockResolvedValue({ items: [] });
 });
 describe("catalog loading", () => {
+  it("updates service metadata through the ETag guarded client and keeps the open tab label current", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    workspace.openOverview("svc-a");
+    vi.mocked(specxApi.updateService).mockResolvedValue({ ...workspace.catalog.services[1], name: "Accounts API", description: "账户服务", tagIds: ["critical"], updatedAt: "2026-11-08", groupId: "auth", archived: false, etag: '"v3"' });
+
+    await workspace.updateService({ ...workspace.catalog.services[1], name: "Accounts API", description: "账户服务", tagIds: ["critical"] });
+
+    expect(specxApi.updateService).toHaveBeenCalledWith("workspace", expect.objectContaining({ id: "svc-a", name: "Accounts API", description: "账户服务", tagIds: ["critical"] }));
+    expect(workspace.catalog.services.find((service) => service.id === "svc-a")).toMatchObject({ name: "Accounts API", description: "账户服务", tagIds: ["critical"] });
+    expect(workspace.tabs.find((tab) => tab.serviceId === "svc-a")?.title).toBe("Accounts API");
+  });
+
   it("uses one workspace list and preserves creates confirmed during an earlier refresh", async () => {
     const workspace = useWorkspaceStore();
     workspace.catalog = catalogFixture();

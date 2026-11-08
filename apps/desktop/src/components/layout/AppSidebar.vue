@@ -14,7 +14,7 @@ import { useToast } from "@/composables/useToast";
 import { translate } from "@/i18n";
 
 defineProps<{ sidebarWidth: number }>();
-const emit = defineEmits<{ startResize: [event: PointerEvent]; collapse: []; remove: [node: ResourceTreeNode]; createService: [parentId: string | null] }>();
+const emit = defineEmits<{ startResize: [event: PointerEvent]; collapse: []; remove: [node: ResourceTreeNode]; createService: [parentId: string | null]; editService: [serviceId: string] }>();
 const navigation = useNavigationStore();
 const settings = useSettingsStore();
 const workspace = useWorkspaceStore();
@@ -127,7 +127,7 @@ defineExpose({ focusSearch });
       <div v-if="navigation.tagId" class="px-3 pb-1 text-[10px] text-muted-foreground">
         {{ t("sidebar.tag", { name: workspace.catalog?.tags.find((tag) => tag.id === navigation.tagId)?.name ?? "" }) }}<button class="ml-2 underline" @click="navigation.tagId = ''">{{ t("sidebar.clear") }}</button>
       </div>
-      <ResourceTree @remove="emit('remove', $event)" @create-service="emit('createService', $event)" />
+      <ResourceTree @remove="emit('remove', $event)" @create-service="emit('createService', $event)" @edit-service="emit('editService', $event)" />
       <div class="flex items-center justify-between border-t border-border px-2 py-1 text-[11px] text-muted-foreground">
         <span>{{ t("sidebar.serviceCount", { count: workspace.catalog?.services.length ?? 0 }) }}</span>
       </div>

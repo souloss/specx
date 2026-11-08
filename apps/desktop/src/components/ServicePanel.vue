@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Edit3, FileText, GitBranch, History, Plus, RefreshCw, Trash2 } from "@lucide/vue";
+import { CircleCheck, Edit3, FileText, GitBranch, History, Plus, RefreshCw, Trash2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import MarkdownPreview from "./MarkdownPreview.vue";
@@ -8,6 +8,7 @@ import SpecificationEditor from "./SpecificationEditor.vue";
 import SpecificationHistory from "./SpecificationHistory.vue";
 import CodeBindingDialog from "./CodeBindingDialog.vue";
 import SpecificationCodeBindingDialog from "./SpecificationCodeBindingDialog.vue";
+import TagBadge from "./TagBadge.vue";
 import { formatDate, groupPath } from "../lib/core";
 import { i18n, translate } from "@/i18n";
 import { useWorkspaceStore } from "@/stores/workspace";
@@ -193,24 +194,17 @@ async function synchronizeSpecification() {
             >{{ groupPath(catalog.groups, service.groupId).join(" / ") || t("common.ungrouped") }}</span
           >
         </div>
-        <div class="mt-4 flex min-w-0 flex-wrap items-center gap-2 text-sm" aria-live="polite">
-          <GitBranch class="h-4 w-4 shrink-0 text-primary" />
-          <span v-if="repositoryLoading" class="text-muted-foreground">{{ t("service.repositoryLoading") }}</span>
-          <span v-else-if="repositoryLoadError" class="truncate text-destructive">{{ repositoryLoadError }}</span>
-          <template v-else-if="serviceRepository">
-            <span class="text-muted-foreground">{{ t("service.repositoryLinked") }}</span>
-            <strong class="min-w-0 flex-1 truncate">{{ serviceRepository.repository.displayName }}</strong>
-            <span class="shrink-0 rounded-sm bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">{{ serviceRepository.repository.provider }}</span>
-            <Button size="sm" variant="outline" class="ml-auto shrink-0" @click="codeBindingsOpen = true"><GitBranch class="size-3.5" />{{ t("service.repositoryDetails") }}</Button>
-          </template>
-          <template v-else>
-            <span class="text-muted-foreground">{{ t("service.repositoryNotLinked") }}</span>
-            <Button size="sm" variant="outline" class="ml-auto shrink-0" @click="codeBindingsOpen = true"><GitBranch class="size-3.5" />{{ t("service.codeBindings") }}</Button>
-          </template>
-        </div>
       </div>
       <div class="flex flex-wrap items-center gap-2">
-        <button class="button primary" type="button" @click="emit('newSpecification')"><Plus :size="16" />{{ t("service.createSpecification") }}</button>
+        <span v-if="repositoryLoading" class="text-xs text-muted-foreground">{{ t("service.repositoryLoading") }}</span>
+        <span v-else-if="repositoryLoadError" class="max-w-48 truncate text-xs text-destructive">{{ repositoryLoadError }}</span>
+        <Button v-else-if="serviceRepository" size="sm" variant="outline" class="max-w-64" :title="`${serviceRepository.repository.displayName} · ${serviceRepository.repository.provider}`" @click="codeBindingsOpen = true">
+          <CircleCheck class="size-3.5 shrink-0 text-emerald-600" aria-hidden="true" />
+          <span class="min-w-0 truncate">{{ serviceRepository.repository.displayName }}</span>
+          <span class="shrink-0 text-xs text-muted-foreground">{{ serviceRepository.repository.provider }}</span>
+        </Button>
+        <Button v-else size="sm" variant="outline" @click="codeBindingsOpen = true"><GitBranch class="size-3.5" />{{ t("service.codeBindings") }}</Button>
+        <Button size="sm" @click="emit('newSpecification')"><Plus class="size-3.5" />{{ t("service.createSpecification") }}</Button>
       </div>
     </header>
     <section class="content-section">
@@ -246,8 +240,8 @@ async function synchronizeSpecification() {
         </div>
       </div>
       <div class="tag-list">
-        <span v-for="tag in tags" :key="tag!.id" class="tag-chip"><i :style="{ backgroundColor: tag!.color }" />{{ tag!.name }}</span
-        ><span v-if="!tags.length" class="muted">{{ t("service.noTags") }}</span>
+        <TagBadge v-for="tag in tags" :key="tag!.id" :tag="tag!" />
+        <span v-if="!tags.length" class="muted">{{ t("service.noTags") }}</span>
       </div>
     </section>
     <CodeBindingDialog v-model:open="codeBindingsOpen" :service-id="serviceId" />

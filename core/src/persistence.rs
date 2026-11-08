@@ -1302,6 +1302,10 @@ impl SqliteStore {
     ) -> Result<(), PersistenceError> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
+            "DELETE FROM specification_code_bindings WHERE tenant_id=?1 AND workspace_id=?2 AND service_repository_id=?3",
+            params![context.tenant_id, context.workspace_id, service_repository_id],
+        )?;
+        transaction.execute(
             "DELETE FROM service_repositories WHERE tenant_id=?1 AND workspace_id=?2 AND id=?3",
             params![context.tenant_id, context.workspace_id, service_repository_id],
         )?;

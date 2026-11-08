@@ -681,13 +681,6 @@ impl Core {
             .ok_or(CoreError::NotFound("service_repository"))?;
         ensure_tenant(context, &relation.tenant_id)?;
         ensure_workspace(context, &relation.workspace_id)?;
-        if self
-            .specification_code_bindings
-            .values()
-            .any(|binding| binding.service_repository_id == service_repository_id && !binding.path.is_empty())
-        {
-            return Err(CoreError::ManagedSpecification);
-        }
         self.ref_tracks.retain(|_, track| track.service_repository_id != service_repository_id);
         self.specification_code_bindings.retain(|_, binding| binding.service_repository_id != service_repository_id);
         self.service_repositories.remove(service_repository_id);
@@ -993,9 +986,6 @@ impl Core {
             .ok_or(CoreError::NotFound("specification_code_binding"))?;
         ensure_tenant(context, &binding.tenant_id)?;
         ensure_workspace(context, &binding.workspace_id)?;
-        if !binding.path.is_empty() {
-            return Err(CoreError::ManagedSpecification);
-        }
         self.specification_code_bindings.remove(&binding.id);
         Ok(binding)
     }

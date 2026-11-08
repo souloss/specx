@@ -37,6 +37,8 @@ export type CatalogResponse = {
   }>;
 };
 
+export type TagResponse = CatalogResponse["tags"][number];
+
 export type SpecificationResponse = CatalogResponse["specifications"][number];
 export type SpecificationRevisionResponse = {
   specificationId: string;

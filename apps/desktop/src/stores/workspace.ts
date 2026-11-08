@@ -1,10 +1,10 @@
 import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
 import { createId, loadPanelSession } from "../lib/core";
-import { specxApi } from "../lib/backend/client";
+import { specxApi, toService } from "../lib/backend/client";
 import { ApiError } from "../lib/backend/types";
 import type { WorkspaceResponse } from "../types/api";
-import type { Catalog, CodeSource, PanelTab, ServiceCodeBinding, ServiceRepository, Specification, SpecificationRevision } from "../types/domain";
+import type { Catalog, CodeSource, PanelTab, Service, ServiceCodeBinding, ServiceRepository, Specification, SpecificationRevision } from "../types/domain";
 import type { CodeSourceResponse, IntegrationResponse, SecretResponse, ServiceCodeBindingResponse, SpecificationRefKind, SpecificationSyncResponse } from "../types/api";
 import { translate } from "@/i18n";
 
@@ -41,6 +41,17 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const specificationSyncs = ref<Record<string, SpecificationSyncResponse>>({});
   const secrets = ref<SecretResponse[]>([]);
   const integrations = ref<IntegrationResponse[]>([]);
+  const defaultTags = [
+    { id: "tag-language-typescript", name: "TypeScript", color: "#3178c6" },
+    { id: "tag-language-javascript", name: "JavaScript", color: "#d6b800" },
+    { id: "tag-language-rust", name: "Rust", color: "#dea584" },
+    { id: "tag-language-python", name: "Python", color: "#3776ab" },
+    { id: "tag-framework-vue", name: "Vue", color: "#42b883" },
+    { id: "tag-framework-react", name: "React", color: "#149eca" },
+    { id: "tag-framework-kubernetes", name: "Kubernetes", color: "#326ce5" },
+    { id: "tag-spec-markdown", name: "Markdown", color: "#475569" },
+    { id: "tag-spec-api", name: "API", color: "#0891b2" },
+  ] as const;
   let loadRevision = 0;
   watch(
     authenticated,
@@ -145,6 +156,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       secrets.value = [];
       integrations.value = [];
       restoreDrafts(next);
+      void ensureDefaultTags();
       if (sameWorkspace) {
         tabs.value = previousTabs.map((tab) => ({ ...tab, title: tab.kind === "specification" ? next.specifications.find((item) => item.id === tab.specificationId)!.title : next.services.find((item) => item.id === tab.serviceId)!.name }));
         if (!tabs.value.some((tab) => tab.id === activeTabId.value)) activeTabId.value = tabs.value[0]?.id ?? "";
@@ -239,6 +251,37 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     return created;
   }
 
+  async function updateService(service: Service) {
+    if (!catalog.value) throw new Error(translate("apiError.forbidden"));
+    const updated = toService(await specxApi.updateService(catalog.value.workspace.id, service));
+    catalog.value = {
+      ...catalog.value,
+      services: catalog.value.services.map((item) => (item.id === updated.id ? updated : item)),
+    };
+    tabs.value = tabs.value.map((tab) => (tab.serviceId === updated.id && tab.kind === "overview" ? { ...tab, title: updated.name } : tab));
+    return updated;
+  }
+
+  async function createTag(input: { id: string; name: string; color: string }) {
+    if (!catalog.value) throw new Error(translate("apiError.forbidden"));
+    const created = await specxApi.createTag(catalog.value.workspace.id, input);
+    catalog.value = { ...catalog.value, tags: [...catalog.value.tags.filter((tag) => tag.id !== created.id), created] };
+    return created;
+  }
+
+  async function ensureDefaultTags() {
+    if (!catalog.value) return;
+    const existing = new Set(catalog.value.tags.map((tag) => tag.id));
+    for (const tag of defaultTags) {
+      if (existing.has(tag.id)) continue;
+      try {
+        await createTag(tag);
+      } catch {
+        // A read-only workspace or another session may already own this default.
+      }
+    }
+  }
+
   async function createCodeBinding(serviceId: string, input: Pick<ServiceCodeBindingResponse, "id" | "sourceId" | "role" | "entityKind" | "path" | "revisionKind" | "revision">) {
     if (!catalog.value) throw new Error(translate("apiError.forbidden"));
     const created = await specxApi.createCodeBinding(catalog.value.workspace.id, serviceId, input);
@@ -283,6 +326,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     if (!catalog.value) return;
     await specxApi.unlinkServiceRepository(catalog.value.workspace.id, serviceId, etag);
     serviceRepositories.value = { ...serviceRepositories.value, [serviceId]: null };
+    const specificationIds = new Set(catalog.value.specifications.filter((specification) => specification.serviceId === serviceId).map((specification) => specification.id));
+    specificationCodeBindings.value = Object.fromEntries(Object.entries(specificationCodeBindings.value).filter(([id]) => !specificationIds.has(id)));
+    specificationSyncs.value = Object.fromEntries(Object.entries(specificationSyncs.value).filter(([id]) => !specificationIds.has(id)));
   }
 
   async function loadSpecificationCodeBinding(specificationId: string) {
@@ -612,6 +658,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     bindingsForService,
     createCodeSource,
     createService,
+    updateService,
+    createTag,
+    ensureDefaultTags,
     deleteCodeSource,
     createCodeBinding,
     deleteCodeBinding,

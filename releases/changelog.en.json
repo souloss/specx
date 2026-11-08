@@ -4,6 +4,49 @@
   },
   "releases": [
     {
+      "tag": "v0.2.0",
+      "name": "specX 0.2.0",
+      "date": "2026-11-08",
+      "sections": [
+        {
+          "type": "added",
+          "title": "Service catalog and tags",
+          "items": [
+            {
+              "title": "Create services from the current group",
+              "desc": "Create a service directly from its group context without choosing the group again in the dialog."
+            },
+            {
+              "title": "Built-in and custom tags",
+              "desc": "Use common language, framework and specification tags, or create custom tags with colors and marks."
+            },
+            {
+              "title": "Edit service details",
+              "desc": "Edit a service name, description and tags from its context menu, with changes reflected immediately in the catalog and overview."
+            }
+          ]
+        },
+        {
+          "type": "improved",
+          "title": "Repository links and responsive UI",
+          "items": [
+            {
+              "title": "Make repository status visible",
+              "desc": "The service overview shows a green success state, repository name and provider beside New specification."
+            },
+            {
+              "title": "Safely remove source bindings",
+              "desc": "Unlink a service repository or specification source while preserving document content and restoring the appropriate editing actions."
+            },
+            {
+              "title": "Improve narrow-window layouts",
+              "desc": "Dialogs, buttons and tag pills now share a consistent style without horizontal overflow in narrow service workflows."
+            }
+          ]
+        }
+      ]
+    },
+    {
       "tag": "v0.1.0",
       "name": "specX 0.1.0",
       "date": "2026-11-06",

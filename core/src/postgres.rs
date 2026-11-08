@@ -2333,6 +2333,13 @@ impl PostgresStore {
         lock_workspace(&transaction, context).await?;
         transaction
             .execute(
+                "DELETE FROM specification_code_bindings WHERE tenant_id=$1 AND workspace_id=$2 AND service_repository_id=$3",
+                &[&context.tenant_id, &context.workspace_id, &service_repository_id],
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute(
                 "DELETE FROM service_repositories WHERE tenant_id=$1 AND workspace_id=$2 AND id=$3",
                 &[&context.tenant_id, &context.workspace_id, &service_repository_id],
             )

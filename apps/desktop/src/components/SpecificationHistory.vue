@@ -94,7 +94,7 @@ async function restore() {
               >
             </div>
             <p v-if="hasDraft" class="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-950 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-100">{{ t("specification.saveBeforeRestore") }}</p>
-            <p v-else-if="managed" class="rounded-md border border-primary/30 bg-primary/5 p-2 text-xs text-muted-foreground">{{ t("specification.managedReadOnlyDescription") }}</p>
+            <p v-else-if="managed" class="rounded-md border border-primary/30 bg-primary/5 p-2 text-xs text-muted-foreground">{{ t("specification.managedReadOnlyDescription") }} {{ t("specification.managedUnbindDescription") }}</p>
             <div class="grid gap-3 lg:grid-cols-2">
               <div>
                 <div class="mb-2 flex items-center gap-1 text-xs font-medium text-muted-foreground"><Eye class="h-3.5 w-3.5" />{{ t("specification.revision", { version: selected.version }) }}</div>

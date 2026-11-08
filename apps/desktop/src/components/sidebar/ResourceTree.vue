@@ -15,7 +15,7 @@ import { useShortcutStore } from "@/stores/shortcutStore";
 import { useCreateQueueStore } from "@/stores/createQueueStore";
 import { translate } from "@/i18n";
 
-const emit = defineEmits<{ remove: [node: ResourceTreeNode]; createService: [parentId: string | null] }>();
+const emit = defineEmits<{ remove: [node: ResourceTreeNode]; createService: [parentId: string | null]; editService: [serviceId: string] }>();
 const navigation = useNavigationStore();
 const workspace = useWorkspaceStore();
 const settings = useSettingsStore();
@@ -95,6 +95,7 @@ function menuItems(node: ResourceTreeNode): ContextMenuItem[] {
       ]
     : [
         { label: t("tree.openService"), icon: Box, action: () => navigation.select(node) },
+        { label: t("tree.editService"), icon: Pencil, action: () => emit("editService", node.id) },
         {
           label: t("tree.moveToGroup"),
           icon: FolderInput,

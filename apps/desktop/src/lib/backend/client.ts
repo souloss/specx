@@ -3,6 +3,7 @@ import type { Catalog, Group, Service, Specification } from "../../types/domain"
 import type {
   AuthResponse,
   CatalogResponse,
+  TagResponse,
   CodeSourcePageResponse,
   CodeSourceResponse,
   ServiceCodeBindingPageResponse,
@@ -129,7 +130,7 @@ export const specxApi = {
     return request<void>(`/api/specx/groups/${encodeURIComponent(id)}`, { method: "DELETE" }, workspaceId);
   },
   updateService(workspaceId: string, service: Service) {
-    return request<unknown>(
+    return request<CatalogResponse["services"][number]>(
       `/api/specx/services/${encodeURIComponent(service.id)}`,
       {
         method: "PUT",
@@ -221,7 +222,7 @@ export const specxApi = {
     return request<IntegrationResponse>("/api/specx/integrations", { method: "POST", body: input }, workspaceId);
   },
   createTag(workspaceId: string, tag: { id: string; name: string; color: string }) {
-    return request<unknown>("/api/specx/tags", { method: "POST", headers: { "idempotency-key": idempotencyKey("tag") }, body: tag }, workspaceId);
+    return request<TagResponse>("/api/specx/tags", { method: "POST", headers: { "idempotency-key": idempotencyKey("tag") }, body: tag }, workspaceId);
   },
 
   createSpecification(
