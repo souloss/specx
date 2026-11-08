@@ -171,7 +171,7 @@ ContentRef
 
 用户不需要创建 StorageClass、StorageClaim 或 StorageBinding。平台管理员可以通过部署配置选择默认存储策略，但该选择不进入 Service、Specification 或业务 API 的普通 `spec`。缓存可以被清理和重建；规范正文、仓库快照和分析产物是否保留，由平台生命周期策略和资源引用决定。
 
-外部 Git 凭据是另一类问题。它们不属于内容存储，也不应进入 Repository 或普通 Specification 配置；需要私有仓库时，由管理员配置 `Integration/Secret`，控制器向 Provider 传递短生命周期、最小权限的引用。若当前部署只支持公开仓库，则不提前实现完整 Secret 资源。
+外部 Git 凭据是另一类问题。它们不属于内容存储，也不应进入 Repository 或普通 Specification 配置；需要私有仓库时，由管理员在设置中配置 `Integration/Secret`，控制器向 Provider 传递短生命周期、最小权限的引用。设置页只提供托管平台只读令牌的配置入口，Secret 仍由服务端加密保存。
 
 ## 7. 一致性、失败和恢复
 

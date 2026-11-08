@@ -49,7 +49,7 @@ Repository
 - created_at, updated_at
 ```
 
-工作区内 `canonical_url` 唯一。规范化会统一主机名大小写、去除尾部斜线和 `.git` 后缀；Provider 从主机名识别。仓库只登记身份，不保存 Git 凭据。私有仓库凭据及授权属于未来的 Integration/Secret 能力。
+工作区内 `canonical_url` 唯一。规范化会统一主机名大小写、去除尾部斜线和 `.git` 后缀；Provider 从主机名识别。仓库只登记身份，不保存 Git 凭据。私有仓库凭据及授权通过设置中的 Integration/Secret 能力配置，服务端只向控制器传递最小权限引用。
 
 SpecX 不负责创建远程仓库。用户先在 GitHub、GitLab 或其他 Git 服务创建仓库，再在 Service 详情中粘贴已有 URL。粘贴同一 URL（包括 `.git` 后缀差异）会复用工作区内已登记的 Repository。
 
@@ -151,9 +151,16 @@ Asset 是服务下 `kind + name` 唯一的可治理对象。`SourceSpec` 属于 
 GET    /services/{serviceId}/repository
 POST   /services/{serviceId}/repository
 DELETE /services/{serviceId}/repository
+GET    /repositories/{repositoryId}/refs
+GET    /repositories/{repositoryId}/files
 GET    /specifications/{specificationId}/code-binding
 PUT    /specifications/{specificationId}/code-binding
 DELETE /specifications/{specificationId}/code-binding
+GET    /secrets
+POST   /secrets
+PUT    /secrets/{secretId}
+GET    /integrations
+POST   /integrations
 ```
 
 仓库 `POST` 接受 URL，不接受用户指定 repository ID；URL 写入按工作区唯一身份自动复用。规范绑定 `PUT` 接受 `path`、`refKind` 和 `refName`，仓库从规范所属服务的唯一 ServiceRepository 推导；首次绑定不要求 ETag，更新和删除要求当前 ETag。path 非空的仓库托管规范不能更新或删除绑定。写操作沿用审计和统一错误 envelope。跨租户/工作区请求按 404/403 现有策略处理，不泄露其他范围实体。
@@ -162,6 +169,6 @@ HTTP 与 Tauri 共用同一 API Router。Pinia 只保存当前界面需要的服
 
 ## 6. 一期边界与后续扩展
 
-当前实现包括 Repository/ServiceRepository/SpecificationCodeBinding（含 Markdown 路径）的 SQLite 与 PostgreSQL 持久化、旧 Git 绑定数据回填、服务仓库 API、规范代码版本 API、两种规范来源模式、仓库托管规范的只读约束，Markdown 文件发现与选择，持久 RepositorySnapshot 内容，异步 Repository Controller、分支轮询、签名 Webhook、任务状态以及加密 Secret/Integration 资源。
+当前实现包括 Repository/ServiceRepository/SpecificationCodeBinding（含 Markdown 路径）的 SQLite 与 PostgreSQL 持久化、旧 Git 绑定数据回填、服务仓库 API、refs 和 Markdown 文件发现、规范代码版本 API、两种规范来源模式、仓库托管规范的只读约束，持久 RepositorySnapshot 内容，异步 Repository Controller、分支轮询、签名 Webhook、任务状态、设置中的仓库凭据配置以及加密 Secret/Integration 资源。
 
-以下仍不是一期已交付功能：Provider OAuth、分布式 Worker、多 Provider 适配、Asset/SourceSpec 编辑器、语言和框架分析、CI 回调/API Token、规范文件上传、分析快照与结果索引。凭据 API 已提供 AES-GCM 密文存储和最小权限 Provider 上下文；部署必须设置 `SPECX_SECRET_KEY`，Webhook 必须设置 `SPECX_WEBHOOK_SECRET`。当前同步响应包含 resolved commit、manifest hash、content hash、Provider 版本和 `snapshotId`，内容变更会追加规范修订，仓库/来源/提交相同的快照会去重并在 SQLite/PostgreSQL 中恢复。
+以下仍不是一期已交付功能：Provider OAuth、分布式 Worker、多 Provider 适配、Asset/SourceSpec 编辑器、语言和框架分析、CI 回调/API Token、规范文件上传、分析快照与结果索引。凭据设置已提供 AES-GCM 密文存储和最小权限 Provider 上下文；部署必须设置 `SPECX_SECRET_KEY`，Webhook 必须设置 `SPECX_WEBHOOK_SECRET`。当前同步响应包含 resolved commit、manifest hash、content hash、Provider 版本和 `snapshotId`，内容变更会追加规范修订，仓库/来源/提交相同的快照会去重并在 SQLite/PostgreSQL 中恢复。

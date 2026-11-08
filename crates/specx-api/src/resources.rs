@@ -4,7 +4,8 @@ use axum::body::Bytes;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use hmac::Mac;
 use specx_controller::{
-    CommandGitProvider, ContentStore, GitCredential, RepositoryController, RepositoryReconcileRequest,
+    CommandGitProvider, ContentStore, GitCredential, GitRepositoryRefs, RepositoryController,
+    RepositoryReconcileRequest,
 };
 
 pub fn router<S>(state: ApiState) -> Router<S>
@@ -53,6 +54,7 @@ where
         .route("/specifications/{specification_id}/sync-status", get(get_specification_sync_status))
         .route("/specifications/{specification_id}/sync", post(sync_specification))
         .route("/repositories/{repository_id}/files", get(discover_repository_files))
+        .route("/repositories/{repository_id}/refs", get(discover_repository_refs))
         .route("/repositories/{repository_id}/reconcile", post(enqueue_repository_reconcile))
         .route("/controller-tasks/{task_id}", get(get_controller_task))
         .route("/webhooks/repositories/{repository_id}", post(repository_webhook))
@@ -906,6 +908,20 @@ struct RepositoryDiscoveryResponse {
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
+struct RepositoryRefsResponse {
+    default_branch: String,
+    branches: Vec<String>,
+    tags: Vec<String>,
+}
+
+impl From<GitRepositoryRefs> for RepositoryRefsResponse {
+    fn from(refs: GitRepositoryRefs) -> Self {
+        Self { default_branch: refs.default_branch, branches: refs.branches, tags: refs.tags }
+    }
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 struct ControllerTaskResponse {
     id: Id,
     controller_id: String,
@@ -1106,6 +1122,32 @@ async fn discover_repository_files(
 }
 
 #[utoipa::path(
+    get,
+    path = "/repositories/{repository_id}/refs",
+    params(("repository_id" = String, Path)),
+    responses((status = 200, body = RepositoryRefsResponse), (status = 404, body = ErrorResponse), (status = 502, body = ErrorResponse)),
+    tag = "code"
+)]
+async fn discover_repository_refs(
+    State(state): State<ApiState>,
+    Path(repository_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<Json<RepositoryRefsResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let (repository_url, credential) = {
+        let mut inner = state.inner.lock().await;
+        let repository = load_core(&mut inner, &context)?
+            .repository(&context, &repository_id)
+            .ok_or(CoreError::NotFound("repository"))?
+            .clone();
+        let credential = repository_credential(&inner, &context, &repository.provider)?;
+        (repository.canonical_url, credential)
+    };
+    let refs = fetch_repository_refs(repository_url, credential).await?;
+    Ok(Json(refs.into()))
+}
+
+#[utoipa::path(
     post,
     path = "/repositories/{repository_id}/reconcile",
     params(("repository_id" = String, Path)),
@@ -1280,16 +1322,24 @@ async fn create_integration(
     if let Some(secret_id) = &input.secret_id {
         inner.store.secret_by_id(&context.tenant_id, &context.workspace_id, secret_id)?.ok_or(ApiError::NotFound)?;
     }
+    // Providers are workspace-scoped identities. Reusing the provider updates the
+    // existing integration so rotating a credential cannot leave a shadow record
+    // that repository lookups might ignore.
+    let existing = inner
+        .store
+        .list_integrations(&context.tenant_id, &context.workspace_id)?
+        .into_iter()
+        .find(|integration| integration.provider == input.provider.trim().to_ascii_lowercase());
     let now = Utc::now().to_rfc3339();
     let integration = IntegrationRecord {
-        id: input.id,
+        id: existing.as_ref().map_or(input.id, |integration| integration.id.clone()),
         tenant_id: context.tenant_id,
         workspace_id: context.workspace_id,
         provider: input.provider.trim().to_ascii_lowercase(),
         display_name: input.display_name.trim().to_owned(),
         secret_id: input.secret_id,
         permissions: serde_json::to_string(&input.permissions).map_err(|_| ApiError::InvalidInput)?,
-        created_at: now.clone(),
+        created_at: existing.as_ref().map_or_else(|| now.clone(), |integration| integration.created_at.clone()),
         updated_at: now,
     };
     inner.store.upsert_integration(&integration)?;
@@ -3395,6 +3445,21 @@ async fn fetch_repository_snapshot(
     .map_err(|_| ApiError::RepositorySyncFailed)?
 }
 
+async fn fetch_repository_refs(
+    repository_url: String,
+    credential: Option<GitCredential>,
+) -> Result<GitRepositoryRefs, ApiError> {
+    let provider_root = std::env::temp_dir().join(format!("specx-repository-refs-{}", uuid::Uuid::new_v4()));
+    tokio::task::spawn_blocking(move || {
+        let provider = CommandGitProvider::new(&provider_root)?.with_credential(credential);
+        let result = provider.discover_refs(&repository_url).map_err(ApiError::from);
+        let _ = std::fs::remove_dir_all(&provider_root);
+        result
+    })
+    .await
+    .map_err(|_| ApiError::RepositorySyncFailed)?
+}
+
 async fn persist_repository_snapshot(
     state: &ApiState,
     context: &WorkspaceContext,
@@ -3590,26 +3655,52 @@ async fn link_service_repository(
 ) -> Result<Response, ApiError> {
     let context = request_context(&headers)?;
     let descriptor = idempotency_descriptor(&headers, &context, "service-repositories", &input)?;
-    let mut inner = state.inner.lock().await;
-    if let Some(record) = check_idempotency(&inner.store, descriptor.as_ref())? {
-        if record.resource_type != "service_repository" {
-            return Err(ApiError::IdempotencyConflict);
+    {
+        let mut inner = state.inner.lock().await;
+        if let Some(record) = check_idempotency(&inner.store, descriptor.as_ref())? {
+            if record.resource_type != "service_repository" {
+                return Err(ApiError::IdempotencyConflict);
+            }
+            let core = load_core(&mut inner, &context)?;
+            let relation = core.service_repository(&context, &service_id).ok_or(ApiError::IdempotencyConflict)?;
+            if relation.id != record.resource_id {
+                return Err(ApiError::IdempotencyConflict);
+            }
+            let response = service_repository_response(&core, &context, &service_id)?;
+            let etag = response.etag.clone();
+            return Ok(response_with_etag(response, etag));
         }
-        let core = load_core(&mut inner, &context)?;
-        let relation = core.service_repository(&context, &service_id).ok_or(ApiError::IdempotencyConflict)?;
-        if relation.id != record.resource_id {
-            return Err(ApiError::IdempotencyConflict);
-        }
-        let response = service_repository_response(&core, &context, &service_id)?;
-        let etag = response.etag.clone();
-        return Ok(response_with_etag(response, etag));
     }
 
+    let (canonical_url, credential) = {
+        let mut inner = state.inner.lock().await;
+        let core = load_core(&mut inner, &context)?;
+        if !core.list_services(&context).into_iter().any(|service| service.id == service_id) {
+            return Err(CoreError::NotFound("service").into());
+        }
+        let (canonical_url, provider, _) = normalize_repository_url(&input.repository_url)?;
+        let credential = repository_credential(&inner, &context, &provider)?;
+        (canonical_url, credential)
+    };
+    let validated_snapshot = if state.repository_validation {
+        let refs = fetch_repository_refs(canonical_url.clone(), credential.clone()).await?;
+        let fetched = fetch_repository_snapshot(
+            canonical_url.clone(),
+            SpecificationRefKind::Branch,
+            refs.default_branch.clone(),
+            credential,
+        )
+        .await?;
+        Some((refs.default_branch, fetched))
+    } else {
+        None
+    };
+
+    let mut inner = state.inner.lock().await;
     let mut core = load_core(&mut inner, &context)?;
     if !core.list_services(&context).into_iter().any(|service| service.id == service_id) {
         return Err(CoreError::NotFound("service").into());
     }
-    let (canonical_url, _, _) = normalize_repository_url(&input.repository_url)?;
     let repository = match core.repository_by_canonical_url(&context, &canonical_url).cloned() {
         Some(repository) => repository,
         None => core.create_repository(&context, uuid::Uuid::new_v4().to_string(), &input.repository_url)?,
@@ -3626,6 +3717,16 @@ async fn link_service_repository(
     inner.seed_core = None;
     let response = service_repository_response(&core, &context, &service_id)?;
     let etag = response.etag.clone();
+    let repository_id = repository.id.clone();
+    drop(inner);
+    if let Some((default_branch, fetched)) = validated_snapshot {
+        let fetched_at = Utc::now().to_rfc3339();
+        if let Err(error) =
+            persist_repository_snapshot(&state, &context, &repository_id, &default_branch, &fetched, &fetched_at).await
+        {
+            tracing::warn!(repository_id = %repository_id, error = ?error, "repository validation snapshot could not be persisted");
+        }
+    }
     Ok(response_with_etag(response, etag))
 }
 
@@ -3835,7 +3936,7 @@ pub struct CreateSpecificationRequest {
     pub source: Option<CreateSpecificationSourceRequest>,
 }
 
-#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateSpecificationSourceRequest {
     pub path: String,
@@ -3883,24 +3984,72 @@ async fn create_specification(
 ) -> Result<Response, ApiError> {
     let context = request_context(&headers)?;
     let descriptor = idempotency_descriptor(&headers, &context, "specifications", &input)?;
-    let mut inner = state.inner.lock().await;
-    if let Some(record) = check_idempotency(&inner.store, descriptor.as_ref())? {
-        if record.resource_type != "specification" {
-            return Err(ApiError::IdempotencyConflict);
+    {
+        let mut inner = state.inner.lock().await;
+        if let Some(record) = check_idempotency(&inner.store, descriptor.as_ref())? {
+            if record.resource_type != "specification" {
+                return Err(ApiError::IdempotencyConflict);
+            }
+            let core = load_core(&mut inner, &context)?;
+            let specification = core
+                .list_specifications(&context)
+                .into_iter()
+                .find(|specification| specification.id == record.resource_id)
+                .cloned()
+                .ok_or(ApiError::IdempotencyConflict)?;
+            let response = SpecificationResponse::from(specification);
+            let etag = specification_etag(&response);
+            return Ok(response_with_etag(response, etag));
         }
-        let core = load_core(&mut inner, &context)?;
-        let specification = core
-            .list_specifications(&context)
-            .into_iter()
-            .find(|specification| specification.id == record.resource_id)
-            .cloned()
-            .ok_or(ApiError::IdempotencyConflict)?;
-        let response = SpecificationResponse::from(specification);
-        let etag = specification_etag(&response);
-        return Ok(response_with_etag(response, etag));
     }
-    let mut core = load_core(&mut inner, &context)?;
     let CreateSpecificationRequest { id, service_id, title, content, source } = input;
+    if let Some(source) = &source {
+        if source.ref_kind == SpecificationRefKind::Commit {
+            return Err(ApiError::InvalidInput);
+        }
+        specx_controller::validate_markdown_path(&source.path).map_err(|_| ApiError::InvalidInput)?;
+    }
+    let source_content = if state.repository_validation {
+        if let Some(source) = &source {
+            let (repository_url, credential) = {
+                let mut inner = state.inner.lock().await;
+                let core = load_core(&mut inner, &context)?;
+                let relation =
+                    core.service_repository(&context, &service_id).ok_or(CoreError::NotFound("service_repository"))?;
+                let repository =
+                    core.repository(&context, &relation.repository_id).ok_or(CoreError::NotFound("repository"))?;
+                (repository.canonical_url.clone(), repository_credential(&inner, &context, &repository.provider)?)
+            };
+            let fetched =
+                fetch_repository_snapshot(repository_url, source.ref_kind, source.ref_name.clone(), credential).await?;
+            let file = fetched
+                .files
+                .into_iter()
+                .find(|file| file.path == source.path)
+                .ok_or(ApiError::RepositorySyncFailed)?;
+            Some(
+                String::from_utf8(file.content)
+                    .map_err(|_| ApiError::RepositorySyncFailed)?
+                    .replace("\r\n", "\n")
+                    .replace('\r', "\n"),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut inner = state.inner.lock().await;
+    let mut core = load_core(&mut inner, &context)?;
+    let title = if title.trim().is_empty() {
+        source
+            .as_ref()
+            .and_then(|source| source.path.rsplit('/').next())
+            .map(|name| name.trim_end_matches(".markdown").trim_end_matches(".md").to_owned())
+            .unwrap_or_else(|| "Untitled specification".into())
+    } else {
+        title
+    };
     let specification = core.create_markdown_specification(
         &context,
         Specification {
@@ -3910,7 +4059,7 @@ async fn create_specification(
             service_id,
             title,
             kind: SpecificationKind::Markdown,
-            content,
+            content: source_content.unwrap_or(content),
             version: 1,
             content_hash: String::new(),
             updated_at: Utc::now().to_rfc3339(),
@@ -4203,7 +4352,7 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
 #[openapi(
     info(title = "specX API", version = "1.0.0", description = "Service catalog and specification API."),
     servers((url = "/api/specx")),
-    paths(health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, get_specification_code_binding, set_specification_code_binding, delete_specification_code_binding, get_specification_sync_status, sync_specification, discover_repository_files, enqueue_repository_reconcile, get_controller_task, repository_webhook, list_secrets, create_secret, update_secret, delete_secret, list_integrations, create_integration, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, list_code_sources, create_code_source, update_code_source, delete_code_source, get_service_repository, link_service_repository, unlink_service_repository, list_service_code_bindings, create_code_binding, update_code_binding, delete_code_binding, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
+    paths(health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, get_specification_code_binding, set_specification_code_binding, delete_specification_code_binding, get_specification_sync_status, sync_specification, discover_repository_files, discover_repository_refs, enqueue_repository_reconcile, get_controller_task, repository_webhook, list_secrets, create_secret, update_secret, delete_secret, list_integrations, create_integration, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, list_code_sources, create_code_source, update_code_source, delete_code_source, get_service_repository, link_service_repository, unlink_service_repository, list_service_code_bindings, create_code_binding, update_code_binding, delete_code_binding, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
     components(schemas(
         HealthResponse,
         ReadyResponse,
@@ -4215,6 +4364,7 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
         RepositoryDiscoveryQuery,
         RepositoryFileResponse,
         RepositoryDiscoveryResponse,
+        RepositoryRefsResponse,
         ControllerTaskResponse,
         RepositoryWebhookRequest,
         CreateSecretRequest,

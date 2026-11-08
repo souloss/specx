@@ -72,6 +72,7 @@ pub struct ApiState {
     backup_retention: usize,
     metrics: Arc<ApiMetrics>,
     postgres_backend: bool,
+    repository_validation: bool,
     public_origin: Option<PublicOrigin>,
     webhook_secret: Option<Arc<String>>,
 }
@@ -1229,6 +1230,7 @@ impl ApiState {
             backup_retention: 10,
             metrics: Arc::new(ApiMetrics::storage_ready()),
             postgres_backend: false,
+            repository_validation: false,
             public_origin: None,
             webhook_secret: None,
         }
@@ -1249,6 +1251,7 @@ impl ApiState {
             backup_retention: 10,
             metrics: Arc::new(ApiMetrics::storage_ready()),
             postgres_backend: false,
+            repository_validation: true,
             public_origin: None,
             webhook_secret: None,
         }
@@ -1266,6 +1269,7 @@ impl ApiState {
             backup_retention: 10,
             metrics: Arc::new(ApiMetrics::storage_ready()),
             postgres_backend: false,
+            repository_validation: true,
             public_origin: None,
             webhook_secret: None,
         }
@@ -1298,6 +1302,7 @@ impl ApiState {
             backup_retention: 10,
             metrics: Arc::new(ApiMetrics::storage_ready()),
             postgres_backend: true,
+            repository_validation: true,
             public_origin: None,
             webhook_secret: None,
         })

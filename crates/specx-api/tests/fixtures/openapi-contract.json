@@ -27,6 +27,7 @@
     "/ready": {"get": ["200", "503"]},
     "/repositories/{repository_id}/files": {"get": ["200", "404", "502"]},
     "/repositories/{repository_id}/reconcile": {"post": ["202", "404"]},
+    "/repositories/{repository_id}/refs": {"get": ["200", "404", "502"]},
     "/services": {"get": ["200", "400", "401", "403", "429", "500"], "post": ["200", "400", "401", "403", "404", "409", "413", "415", "422", "429", "500"]},
     "/services/{service_id}": {"delete": ["204", "400", "401", "403", "404", "412", "428"], "patch": ["200", "400", "401", "403", "404", "412", "413", "415", "422", "429", "500"], "put": ["200", "400", "401", "403", "404", "409", "412", "413", "415", "422", "428", "429", "500"]},
     "/services/{service_id}/code-bindings": {"get": ["200"], "post": ["200"]},
@@ -70,6 +71,7 @@
     ,"/controller-tasks/{task_id}": {"get": ["task_id"]}
     ,"/repositories/{repository_id}/files": {"get": ["refKind", "refName", "repository_id"]}
     ,"/repositories/{repository_id}/reconcile": {"post": ["repository_id"]}
+    ,"/repositories/{repository_id}/refs": {"get": ["repository_id"]}
     ,"/webhooks/repositories/{repository_id}": {"post": ["X-SpecX-Webhook-Signature", "repository_id"]}
     ,"/secrets/{secret_id}": {"delete": ["secret_id"], "put": ["secret_id"]}
     ,"/specifications/{specification_id}/revisions": {"get": ["limit", "offset", "specification_id"]}
@@ -239,6 +241,10 @@
     "LinkServiceRepositoryRequest": {
       "required": ["repositoryUrl"],
       "properties": ["repositoryUrl"]
+    },
+    "RepositoryRefsResponse": {
+      "required": ["branches", "defaultBranch", "tags"],
+      "properties": ["branches", "defaultBranch", "tags"]
     },
     "SpecificationCodeBindingResponse": {
       "required": ["createdAt", "etag", "id", "path", "refKind", "refName", "repository", "specificationId", "updatedAt"],

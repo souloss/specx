@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue";
-import { Settings, Palette, FolderTree, Keyboard, Info, Search, X, Sun, Moon, SunMoon } from "@lucide/vue";
+import { Settings, Palette, FolderTree, Keyboard, Info, KeyRound, Search, X, Sun, Moon, SunMoon } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import ShortcutSettings from "./ShortcutSettings.vue";
 import AppReleasePanel from "./AppReleasePanel.vue";
+import RepositoryCredentialsSettings from "./RepositoryCredentialsSettings.vue";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -22,6 +23,7 @@ const categories = computed(() => [
   { id: "appearance", label: t("settings.appearance"), icon: Palette, keywords: t("settings.appearanceKeywords") },
   { id: "navigation", label: t("settings.navigation"), icon: FolderTree, keywords: t("settings.navigationKeywords") },
   { id: "shortcuts", label: t("settings.shortcuts"), icon: Keyboard, keywords: t("settings.shortcutsKeywords") },
+  { id: "repository-credentials", label: t("settings.repositoryCredentials"), icon: KeyRound, keywords: t("settings.repositoryCredentialsKeywords") },
   { id: "about", label: t("settings.about"), icon: Info, keywords: t("settings.aboutKeywords") },
 ]);
 const visibleCategories = computed(() => categories.value.filter((category) => !search.value.trim() || `${category.label} ${category.keywords}`.toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase())));
@@ -253,6 +255,7 @@ onBeforeUnmount(clearThemePalettePreview);
             <Button variant="outline" size="sm" @click="settings.resetNavigation">{{ t("settings.resetNavigation") }}</Button>
           </section>
           <ShortcutSettings v-else-if="current === 'shortcuts'" />
+          <RepositoryCredentialsSettings v-else-if="current === 'repository-credentials'" />
           <AppReleasePanel v-else />
         </div>
       </div>

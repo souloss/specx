@@ -1,11 +1,11 @@
 import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
-import { loadPanelSession } from "../lib/core";
+import { createId, loadPanelSession } from "../lib/core";
 import { specxApi } from "../lib/backend/client";
 import { ApiError } from "../lib/backend/types";
 import type { WorkspaceResponse } from "../types/api";
 import type { Catalog, CodeSource, PanelTab, ServiceCodeBinding, ServiceRepository, Specification, SpecificationRevision } from "../types/domain";
-import type { CodeSourceResponse, ServiceCodeBindingResponse, SpecificationRefKind, SpecificationSyncResponse } from "../types/api";
+import type { CodeSourceResponse, IntegrationResponse, SecretResponse, ServiceCodeBindingResponse, SpecificationRefKind, SpecificationSyncResponse } from "../types/api";
 import { translate } from "@/i18n";
 
 export const useWorkspaceStore = defineStore("workspace", () => {
@@ -39,6 +39,8 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const serviceRepositories = ref<Record<string, ServiceRepository | null>>({});
   const specificationCodeBindings = ref<Record<string, import("../types/api").SpecificationCodeBindingResponse | null>>({});
   const specificationSyncs = ref<Record<string, SpecificationSyncResponse>>({});
+  const secrets = ref<SecretResponse[]>([]);
+  const integrations = ref<IntegrationResponse[]>([]);
   let loadRevision = 0;
   watch(
     authenticated,
@@ -140,6 +142,8 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       serviceRepositories.value = {};
       specificationCodeBindings.value = {};
       specificationSyncs.value = {};
+      secrets.value = [];
+      integrations.value = [];
       restoreDrafts(next);
       if (sameWorkspace) {
         tabs.value = previousTabs.map((tab) => ({ ...tab, title: tab.kind === "specification" ? next.specifications.find((item) => item.id === tab.specificationId)!.title : next.services.find((item) => item.id === tab.serviceId)!.name }));
@@ -327,6 +331,42 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   async function discoverRepositoryFiles(repositoryId: string, refKind: SpecificationRefKind, refName: string) {
     if (!catalog.value) throw new Error(translate("apiError.forbidden"));
     return specxApi.discoverRepositoryFiles(catalog.value.workspace.id, repositoryId, refKind, refName);
+  }
+
+  async function discoverRepositoryRefs(repositoryId: string) {
+    if (!catalog.value) throw new Error(translate("apiError.forbidden"));
+    return specxApi.discoverRepositoryRefs(catalog.value.workspace.id, repositoryId);
+  }
+
+  async function loadRepositoryCredentials() {
+    const workspaceId = catalog.value?.workspace.id;
+    if (!workspaceId) return { secrets: [], integrations: [] };
+    const [secretPage, integrationPage] = await Promise.all([specxApi.listSecrets(workspaceId), specxApi.listIntegrations(workspaceId)]);
+    secrets.value = secretPage.items;
+    integrations.value = integrationPage.items;
+    return { secrets: secretPage.items, integrations: integrationPage.items };
+  }
+
+  async function saveRepositoryCredential(provider: string, displayName: string, secretName: string, value: string) {
+    if (!catalog.value) throw new Error(translate("apiError.forbidden"));
+    const workspaceId = catalog.value.workspace.id;
+    const existing = integrations.value.find((integration) => integration.provider === provider);
+    let secret: SecretResponse;
+    if (existing?.secretId) {
+      secret = await specxApi.updateSecret(workspaceId, existing.secretId, value);
+    } else {
+      secret = await specxApi.createSecret(workspaceId, { id: createId("secret"), name: secretName, value });
+    }
+    const integration = await specxApi.createIntegration(workspaceId, {
+      id: existing?.id ?? createId("integration"),
+      provider,
+      displayName,
+      secretId: secret.id,
+      permissions: ["repository:read"],
+    });
+    secrets.value = [...secrets.value.filter((item) => item.id !== secret.id), secret];
+    integrations.value = [...integrations.value.filter((item) => item.id !== integration.id && item.provider !== provider), integration];
+    return integration;
   }
 
   async function setSpecificationCodeBinding(specificationId: string, refKind: SpecificationRefKind, refName: string, path: string) {
@@ -575,6 +615,11 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     specificationSyncFor,
     syncSpecification,
     discoverRepositoryFiles,
+    discoverRepositoryRefs,
+    secrets,
+    integrations,
+    loadRepositoryCredentials,
+    saveRepositoryCredential,
     setSpecificationCodeBinding,
     deleteSpecificationCodeBinding,
     selectService,

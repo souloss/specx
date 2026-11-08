@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { translate } from "@/i18n";
 import { useWorkspaceStore } from "@/stores/workspace";
-import type { SpecificationRefKind } from "@/types/api";
+import type { RepositoryRefsResponse, SpecificationRefKind } from "@/types/api";
 
 const props = defineProps<{ specificationId: string; serviceId: string }>();
 const open = defineModel<boolean>("open", { required: true });
@@ -24,10 +24,14 @@ const confirmRemove = ref(false);
 const discovering = ref(false);
 const fileSearch = ref("");
 const discoveredFiles = ref<Array<{ path: string; byteLength: number; contentHash: string }>>([]);
+const repositoryRefs = ref<RepositoryRefsResponse | null>(null);
+const refsLoading = ref(false);
 const binding = computed(() => workspace.specificationCodeBindingFor(props.specificationId));
 const managed = computed(() => Boolean(binding.value?.path));
 const repository = computed(() => workspace.serviceRepositoryFor(props.serviceId));
 const canSave = computed(() => Boolean(repository.value) && Boolean(refName.value.trim()) && Boolean(path.value.trim()) && !busy.value && !managed.value);
+const availableRefs = computed(() => (refKind.value === "branch" ? repositoryRefs.value?.branches : repositoryRefs.value?.tags) ?? []);
+const selectedRefAvailable = computed(() => availableRefs.value.includes(refName.value));
 const filteredFiles = computed(() => discoveredFiles.value.filter((file) => file.path.toLowerCase().includes(fileSearch.value.trim().toLowerCase())));
 let loadRevision = 0;
 
@@ -42,27 +46,41 @@ watch(
     error.value = "";
     confirmRemove.value = false;
     discoveredFiles.value = [];
+    repositoryRefs.value = null;
+    refsLoading.value = true;
     fileSearch.value = "";
     busy.value = true;
     try {
       await Promise.all([workspace.loadServiceRepository(serviceId), workspace.loadSpecificationCodeBinding(specificationId)]);
+      const linked = workspace.serviceRepositoryFor(serviceId);
+      if (linked) repositoryRefs.value = await workspace.discoverRepositoryRefs(linked.repository.id);
       const current = workspace.specificationCodeBindingFor(specificationId);
-      refKind.value = current?.refKind ?? "branch";
-      refName.value = current?.refName ?? "";
+      refKind.value = current?.refKind === "tag" ? "tag" : "branch";
+      const refs = refKind.value === "branch" ? (repositoryRefs.value?.branches ?? []) : (repositoryRefs.value?.tags ?? []);
+      refName.value = current && refs.includes(current.refName) ? current.refName : repositoryRefs.value?.defaultBranch || refs[0] || "";
       path.value = current?.path ?? "";
     } catch (cause) {
       if (revision === loadRevision) error.value = cause instanceof Error ? cause.message : t("specification.codeVersionSaveFailed");
     } finally {
       if (revision === loadRevision) {
         loaded.value = true;
+        refsLoading.value = false;
         busy.value = false;
       }
     }
   },
 );
 
+watch(
+  [refKind, availableRefs],
+  () => {
+    if (availableRefs.value.length && !availableRefs.value.includes(refName.value)) refName.value = availableRefs.value[0]!;
+  },
+  { deep: true },
+);
+
 async function save() {
-  if (!canSave.value) return;
+  if (!canSave.value || !selectedRefAvailable.value) return;
   busy.value = true;
   error.value = "";
   try {
@@ -76,7 +94,7 @@ async function save() {
 }
 
 async function discoverFiles() {
-  if (!repository.value || !refName.value.trim() || discovering.value || managed.value) return;
+  if (!repository.value || !selectedRefAvailable.value || discovering.value || managed.value) return;
   discovering.value = true;
   error.value = "";
   try {
@@ -127,7 +145,9 @@ async function remove() {
             </div>
             <code class="mt-1 block truncate text-xs text-muted-foreground">{{ repository.repository.canonicalUrl }}</code>
           </div>
-          <div class="grid gap-3 sm:grid-cols-[minmax(0,9rem)_minmax(0,1fr)]">
+          <p v-if="refsLoading" class="text-sm text-muted-foreground">{{ t("specification.loadingRepositoryRefs") }}</p>
+          <p v-else-if="!repositoryRefs || !availableRefs.length" class="text-sm text-destructive">{{ t("specification.noRepositoryRefs") }}</p>
+          <div v-else class="grid gap-3 sm:grid-cols-[minmax(0,9rem)_minmax(0,1fr)]">
             <div class="space-y-2">
               <Label for="spec-ref-kind">{{ t("specification.refKind") }}</Label>
               <Select v-model="refKind" :disabled="busy || managed">
@@ -135,13 +155,17 @@ async function remove() {
                 <SelectContent>
                   <SelectItem value="branch">{{ t("specification.refKindBranch") }}</SelectItem>
                   <SelectItem value="tag">{{ t("specification.refKindTag") }}</SelectItem>
-                  <SelectItem value="commit">{{ t("specification.refKindCommit") }}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div class="space-y-2">
               <Label for="spec-ref-name">{{ t("specification.refName") }}</Label>
-              <Input id="spec-ref-name" v-model="refName" :placeholder="t('specification.refNamePlaceholder')" :disabled="busy || managed" @keydown.enter.prevent="save" />
+              <Select v-model="refName" :disabled="busy || managed">
+                <SelectTrigger id="spec-ref-name" class="w-full"><SelectValue :placeholder="t('specification.refName')" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="ref in availableRefs" :key="ref" :value="ref">{{ ref }}</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div class="space-y-2">

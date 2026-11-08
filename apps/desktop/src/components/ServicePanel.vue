@@ -34,7 +34,34 @@ const specificationCodeBinding = computed(() => (activeSpecification.value ? wor
 const repositoryManaged = computed(() => Boolean(specificationCodeBinding.value?.path));
 const specificationSync = computed(() => (activeSpecification.value ? workspace.specificationSyncFor(activeSpecification.value.id) : null));
 const syncing = ref(false);
+const repositoryLoading = ref(false);
+const repositoryLoadError = ref("");
+const serviceRepository = computed(() => workspace.serviceRepositoryFor(props.serviceId));
+const specificationFormats = computed(() => [...new Set(specifications.value.map((specification) => specification.kind))]);
 let sourceLoadRevision = 0;
+let repositoryLoadRevision = 0;
+
+function specificationKindLabel(kind: string) {
+  return kind.toLocaleLowerCase() === "markdown" ? t("specification.kinds.markdown") : kind;
+}
+
+watch(
+  () => props.serviceId,
+  async (serviceId) => {
+    const revision = ++repositoryLoadRevision;
+    repositoryLoading.value = Boolean(serviceId);
+    repositoryLoadError.value = "";
+    if (!serviceId) return;
+    try {
+      await workspace.loadServiceRepository(serviceId);
+    } catch (cause) {
+      if (revision === repositoryLoadRevision) repositoryLoadError.value = cause instanceof Error ? cause.message : t("service.repositoryLoadFailed");
+    } finally {
+      if (revision === repositoryLoadRevision) repositoryLoading.value = false;
+    }
+  },
+  { immediate: true },
+);
 
 watch(
   () => activeSpecification.value?.id,
@@ -167,6 +194,17 @@ async function synchronizeSpecification() {
             >{{ groupPath(catalog.groups, service.groupId).join(" / ") || t("common.ungrouped") }}</span
           >
         </div>
+        <div class="mt-4 flex min-w-0 items-center gap-2 text-sm" aria-live="polite">
+          <GitBranch class="h-4 w-4 shrink-0 text-primary" />
+          <span v-if="repositoryLoading" class="text-muted-foreground">{{ t("service.repositoryLoading") }}</span>
+          <span v-else-if="repositoryLoadError" class="truncate text-destructive">{{ repositoryLoadError }}</span>
+          <template v-else-if="serviceRepository">
+            <span class="text-muted-foreground">{{ t("service.repositoryLinked") }}</span>
+            <strong class="truncate">{{ serviceRepository.repository.displayName }}</strong>
+            <span class="shrink-0 rounded-sm bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">{{ serviceRepository.repository.provider }}</span>
+          </template>
+          <span v-else class="text-muted-foreground">{{ t("service.repositoryNotLinked") }}</span>
+        </div>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <button class="button" @click="codeBindingsOpen = true"><Code2 :size="16" />{{ t("service.codeBindings") }}</button><button class="button primary" @click="emit('newSpecification')"><Plus :size="16" />{{ t("service.createSpecification") }}</button>
@@ -190,7 +228,7 @@ async function synchronizeSpecification() {
         <button v-for="specification in specifications" :key="specification.id" class="spec-row" @click="emit('openSpecification', specification.id)">
           <FileText :size="17" /><span
             ><strong>{{ specification.title }}</strong
-            ><small>Markdown · {{ t("service.updatedAt", { date: formatDate(specification.updatedAt, locale) }) }}</small></span
+            ><small>{{ specificationKindLabel(specification.kind) }} · {{ t("service.updatedAt", { date: formatDate(specification.updatedAt, locale) }) }}</small></span
           >
         </button>
       </div>
@@ -205,7 +243,7 @@ async function synchronizeSpecification() {
         </div>
         <div>
           <span>{{ t("service.format") }}</span
-          ><strong>Markdown</strong>
+          ><strong>{{ specificationFormats.length ? specificationFormats.map(specificationKindLabel).join(", ") : t("service.noSpecifications") }}</strong>
         </div>
       </div>
       <div class="tag-list">

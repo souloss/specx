@@ -28,7 +28,7 @@ export type CatalogResponse = {
     id: string;
     serviceId: string;
     title: string;
-    kind: "markdown";
+    kind: string;
     content: string;
     version: number;
     contentHash: string;
@@ -93,7 +93,12 @@ export type ServiceCodeBindingResponse = {
 export type ServiceCodeBindingPageResponse = { items: ServiceCodeBindingResponse[] };
 export type RepositorySummaryResponse = { id: string; provider: string; displayName: string; canonicalUrl: string };
 export type ServiceRepositoryResponse = { id: string; repository: RepositorySummaryResponse; createdAt: string; updatedAt: string; etag: string };
+export type RepositoryRefsResponse = { defaultBranch: string; branches: string[]; tags: string[] };
 export type SpecificationRefKind = "branch" | "tag" | "commit";
+export type SecretResponse = { id: string; name: string; keyVersion: number; createdAt: string; updatedAt: string };
+export type SecretPageResponse = { items: SecretResponse[] };
+export type IntegrationResponse = { id: string; provider: string; displayName: string; secretId: string | null; permissions: string[]; createdAt: string; updatedAt: string };
+export type IntegrationPageResponse = { items: IntegrationResponse[] };
 export type SpecificationCodeBindingResponse = {
   id: string;
   specificationId: string;

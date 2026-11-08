@@ -8,7 +8,7 @@ import { specxApi } from "@/lib/backend/client";
 import { createId } from "@/lib/core";
 import { SPECIFICATION_TYPES, type SpecificationFieldDefinition, type SpecificationTypeDefinition } from "@/lib/specifications/registry";
 import type { SpecificationKind } from "@/types/domain";
-import type { SpecificationRefKind } from "@/types/api";
+import type { RepositoryFileResponse, RepositoryRefsResponse, SpecificationRefKind } from "@/types/api";
 import { translate, type MessageKey } from "@/i18n";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -28,6 +28,8 @@ const refKind = ref<SpecificationRefKind>("branch");
 const refName = ref("");
 const sourcePath = ref("");
 const repositoryLoading = ref(false);
+const repositoryRefsLoading = ref(false);
+const repositoryRefs = ref<RepositoryRefsResponse | null>(null);
 const selectedType = computed(() => SPECIFICATION_TYPES.find((item) => item.kind === selectedKind.value) ?? SPECIFICATION_TYPES[0]!);
 const currentStep = computed(() => selectedType.value.steps[step.value - 1] ?? selectedType.value.steps[0]!);
 const categories = computed(() => {
@@ -39,6 +41,10 @@ const visibleTypes = computed(() => {
   return SPECIFICATION_TYPES.filter((item) => item.enabled && (categoryFilter.value === "all" || item.category === categoryFilter.value) && (!normalized || [t(item.titleKey), t(item.descriptionKey), t(item.keywordsKey)].join(" ").toLocaleLowerCase().includes(normalized)));
 });
 const serviceRepository = computed(() => workspace.serviceRepositoryFor(serviceId.value));
+const availableRefs = computed(() => {
+  if (!repositoryRefs.value) return [];
+  return refKind.value === "branch" ? repositoryRefs.value.branches : repositoryRefs.value.tags;
+});
 const validSourcePath = computed(() => {
   const value = sourcePath.value.trim();
   if (!value || value.startsWith("/") || value.startsWith("\\") || value.endsWith("/") || value.includes("\\") || value.includes("..")) return false;
@@ -51,7 +57,7 @@ const canContinue = computed(() => {
   if (currentStep.value.kind === "type-picker") return Boolean(selectedKind.value);
   const fieldsReady = currentStep.value.fields?.every((field) => !field.required || fieldValue(field).trim()) !== false;
   if (currentStep.value.kind !== "fields" || sourceMode.value === "specx") return fieldsReady;
-  return fieldsReady && Boolean(serviceRepository.value) && Boolean(refName.value.trim()) && validSourcePath.value;
+  return Boolean(serviceRepository.value) && Boolean(repositoryRefs.value) && availableRefs.value.includes(refName.value) && validSourcePath.value;
 });
 
 function initialValues(type: SpecificationTypeDefinition) {
@@ -76,6 +82,8 @@ watch(open, (value) => {
   refKind.value = "branch";
   refName.value = "";
   sourcePath.value = "";
+  repositoryRefs.value = null;
+  repositoryRefsLoading.value = false;
   error.value = "";
   serviceId.value = workspace.activeServiceId ?? "";
 });
@@ -84,14 +92,33 @@ watch(
   async ([mode, currentServiceId]) => {
     if (mode !== "repository" || !currentServiceId) return;
     repositoryLoading.value = true;
+    repositoryRefsLoading.value = true;
+    repositoryRefs.value = null;
+    refName.value = "";
+    error.value = "";
     try {
       await workspace.loadServiceRepository(currentServiceId);
+      if (serviceRepository.value) {
+        const refs = await workspace.discoverRepositoryRefs(serviceRepository.value.repository.id);
+        repositoryRefs.value = refs;
+        refKind.value = "branch";
+        refName.value = refs.defaultBranch || refs.branches[0] || refs.tags[0] || "";
+        if (!refName.value) error.value = t("specification.noRepositoryRefs");
+      }
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : t("specification.sourceRepositoryRequired");
     } finally {
       repositoryLoading.value = false;
+      repositoryRefsLoading.value = false;
     }
   },
+);
+watch(
+  [refKind, availableRefs],
+  () => {
+    if (availableRefs.value.length && !availableRefs.value.includes(refName.value)) refName.value = availableRefs.value[0]!;
+  },
+  { deep: true },
 );
 function selectType(kind: SpecificationKind) {
   selectedKind.value = kind;
@@ -118,8 +145,12 @@ async function save() {
   error.value = "";
   try {
     const id = createId("spec");
-    const request = selectedType.value.createRequest({ id, serviceId: serviceId.value, values: values.value });
+    const request = selectedType.value.createRequest({ id, serviceId: serviceId.value, values: sourceMode.value === "repository" ? { ...values.value, title: "", content: "" } : values.value });
     if (sourceMode.value === "repository") {
+      const discovery = await workspace.discoverRepositoryFiles(serviceRepository.value!.repository.id, refKind.value, refName.value);
+      if (!discovery.files.some((file: RepositoryFileResponse) => file.path === sourcePath.value.trim())) {
+        throw new Error(t("specification.sourcePathNotFound"));
+      }
       request.source = { path: sourcePath.value.trim(), refKind: refKind.value, refName: refName.value.trim() };
     }
     await specxApi.createSpecification(workspace.catalog.workspace.id, request);
@@ -216,16 +247,22 @@ async function save() {
                 <strong class="block truncate">{{ serviceRepository.repository.displayName }}</strong>
                 <code class="mt-1 block truncate text-xs text-muted-foreground">{{ serviceRepository.repository.canonicalUrl }}</code>
               </div>
-              <div class="grid gap-3 sm:grid-cols-[minmax(0,9rem)_minmax(0,1fr)]">
+              <p v-if="repositoryRefsLoading" class="text-sm text-muted-foreground">{{ t("specification.loadingRepositoryRefs") }}</p>
+              <p v-else-if="!repositoryRefs || !availableRefs.length" class="text-sm text-destructive">{{ t("specification.noRepositoryRefs") }}</p>
+              <div v-else class="grid gap-3 sm:grid-cols-[minmax(0,9rem)_minmax(0,1fr)]">
                 <label class="settings-field"
                   >{{ t("specification.refKind")
                   }}<select v-model="refKind" class="settings-input">
                     <option value="branch">{{ t("specification.refKindBranch") }}</option>
                     <option value="tag">{{ t("specification.refKindTag") }}</option>
-                    <option value="commit">{{ t("specification.refKindCommit") }}</option>
                   </select></label
                 >
-                <label class="settings-field">{{ t("specification.refName") }}<input v-model="refName" class="settings-input" :placeholder="t('specification.refNamePlaceholder')" autocomplete="off" /></label>
+                <label class="settings-field"
+                  >{{ t("specification.refName")
+                  }}<select v-model="refName" class="settings-input">
+                    <option v-for="ref in availableRefs" :key="ref" :value="ref">{{ ref }}</option>
+                  </select></label
+                >
               </div>
               <label class="settings-field"
                 >{{ t("specification.sourcePath")
@@ -236,11 +273,13 @@ async function save() {
               >
             </template>
           </div>
-          <label v-for="field in currentStep.fields ?? []" :key="field.id" class="settings-field">
-            {{ t(field.labelKey) }}
-            <input v-if="field.control === 'text'" :value="fieldValue(field)" class="settings-input" :required="field.required" autofocus @input="updateField(field, $event)" />
-            <textarea v-else :value="fieldValue(field)" class="settings-input min-h-56 resize-y font-mono" :rows="field.rows ?? 8" :required="field.required" @input="updateField(field, $event)" />
-          </label>
+          <template v-if="sourceMode === 'specx'">
+            <label v-for="field in currentStep.fields ?? []" :key="field.id" class="settings-field">
+              {{ t(field.labelKey) }}
+              <input v-if="field.control === 'text'" :value="fieldValue(field)" class="settings-input" :required="field.required" autofocus @input="updateField(field, $event)" />
+              <textarea v-else :value="fieldValue(field)" class="settings-input min-h-56 resize-y font-mono" :rows="field.rows ?? 8" :required="field.required" @input="updateField(field, $event)" />
+            </label>
+          </template>
         </section>
         <section v-else class="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
           <div class="rounded-md border border-border p-4">
@@ -256,13 +295,15 @@ async function save() {
                 <dt class="text-muted-foreground">{{ t("specification.refName") }}</dt>
                 <dd class="truncate">{{ refName }}</dd>
               </template>
-              <template v-for="summaryField in currentStep.summaryFields ?? []" :key="summaryField.id">
-                <dt class="text-muted-foreground">{{ t(summaryField.labelKey) }}</dt>
-                <dd class="truncate">{{ fieldValue(summaryField) }}</dd>
+              <template v-if="sourceMode === 'specx'">
+                <template v-for="summaryField in currentStep.summaryFields ?? []" :key="summaryField.id">
+                  <dt class="text-muted-foreground">{{ t(summaryField.labelKey) }}</dt>
+                  <dd class="truncate">{{ fieldValue(summaryField) }}</dd>
+                </template>
               </template>
             </dl>
           </div>
-          <p class="text-xs text-muted-foreground">{{ t("specification.confirmDescription") }}</p>
+          <p class="text-xs text-muted-foreground">{{ t(sourceMode === "repository" ? "specification.confirmRepositoryDescription" : "specification.confirmDescription") }}</p>
         </section>
         <p v-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
         <DialogFooter>

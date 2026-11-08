@@ -53,6 +53,13 @@ pub struct GitRepositorySnapshot {
     pub provider_version: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitRepositoryRefs {
+    pub default_branch: String,
+    pub branches: Vec<String>,
+    pub tags: Vec<String>,
+}
+
 pub trait GitRepositoryProvider: Send + Sync {
     fn fetch_repository(&self, request: &GitRepositoryRequest) -> Result<GitRepositorySnapshot, GitProviderError>;
 }
@@ -144,6 +151,48 @@ impl CommandGitProvider {
     pub fn with_credential(mut self, credential: Option<GitCredential>) -> Self {
         self.credential = credential;
         self
+    }
+
+    /// Lists the refs advertised by the remote and resolves its default branch.
+    /// This is intentionally separate from a checkout so callers can present
+    /// safe branch/tag selectors before choosing a document path.
+    pub fn discover_refs(&self, repository_url: &str) -> Result<GitRepositoryRefs, GitProviderError> {
+        if repository_url.trim().is_empty() {
+            return Err(GitProviderError::InvalidRequest);
+        }
+        let output = self.run_git(
+            None,
+            &["ls-remote", "--symref", repository_url, "HEAD", "refs/heads/*", "refs/tags/*"],
+            "refs",
+        )?;
+        let mut default_branch = String::new();
+        let mut branches = Vec::new();
+        let mut tags = Vec::new();
+        for line in String::from_utf8(output).map_err(|_| GitProviderError::InvalidUtf8)?.lines() {
+            let Some((left, right)) = line.split_once('\t') else { continue };
+            if left.starts_with("ref:") && right == "HEAD" {
+                default_branch = left.strip_prefix("ref: refs/heads/").unwrap_or_default().trim().to_owned();
+                continue;
+            }
+            if let Some(branch) = right.strip_prefix("refs/heads/") {
+                branches.push(branch.to_owned());
+            } else if let Some(tag) = right.strip_prefix("refs/tags/")
+                && !tag.ends_with("^{}")
+            {
+                tags.push(tag.to_owned());
+            }
+        }
+        branches.sort();
+        branches.dedup();
+        tags.sort();
+        tags.dedup();
+        if default_branch.is_empty() {
+            default_branch = branches.first().cloned().ok_or_else(|| GitProviderError::CommandFailed {
+                operation: "refs",
+                detail: "remote does not advertise a default branch".into(),
+            })?;
+        }
+        Ok(GitRepositoryRefs { default_branch, branches, tags })
     }
 
     fn checkout_path(&self, request: &GitFileRequest) -> PathBuf {
@@ -447,6 +496,29 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.content, "# Hello\n");
         assert_eq!(snapshot.resolved_commit.len(), 40);
+    }
+
+    #[test]
+    fn discovers_default_branch_and_refs_from_a_local_repository() {
+        let repository = tempfile::tempdir().unwrap();
+        let checkout = repository.path().join("source");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::write(checkout.join("README.md"), "# Hello\n").unwrap();
+        run(&checkout, &["init", "--quiet"]);
+        run(&checkout, &["config", "user.email", "test@example.com"]);
+        run(&checkout, &["config", "user.name", "SpecX Test"]);
+        run(&checkout, &["add", "."]);
+        run(&checkout, &["commit", "--quiet", "-m", "initial"]);
+        run(&checkout, &["branch", "-M", "main"]);
+        run(&checkout, &["branch", "release"]);
+        run(&checkout, &["tag", "v1.0.0"]);
+
+        let provider = CommandGitProvider::new(repository.path().join("work")).unwrap();
+        let refs = provider.discover_refs(&checkout.to_string_lossy()).unwrap();
+
+        assert_eq!(refs.default_branch, "main");
+        assert_eq!(refs.branches, vec!["main", "release"]);
+        assert_eq!(refs.tags, vec!["v1.0.0"]);
     }
 
     fn run(directory: &Path, args: &[&str]) {

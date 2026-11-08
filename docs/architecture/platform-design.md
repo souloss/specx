@@ -213,7 +213,7 @@ Provider 的选择通常是平台内部决策，不是普通资源的用户配�
 
 内容存储尤其应由平台统一定义。规范正文、附件、仓库快照、渲染缓存和分析产物都通过内部 `ContentStore` 写入，平台根据部署配置、内容大小、类型和生命周期选择 SQLite 内嵌内容、文件系统或对象存储。用户不创建 `StorageClass`、`StorageClaim` 或 `StorageBinding`，业务资源只保存 `ContentRef`、hash、大小、媒体类型和保留元数据。缓存可重建，Core 仍保存恢复所需的引用和不可变证据。
 
-外部 Git 凭据与内容存储分开处理。私有仓库需要时，由管理员配置 `Integration/Secret`，控制器向 Git Provider 传递短生命周期、最小权限的引用；Repository 和 Specification 不保存连接串或明文凭据。当前部署没有真实的多后端或私有仓库消费者时，不提前建立面向用户的存储类和秘密管理界面。
+外部 Git 凭据与内容存储分开处理。私有仓库需要时，由管理员在设置中配置 `Integration/Secret`，控制器向 Git Provider 传递短生命周期、最小权限的引用；Repository 和 Specification 不保存连接串或明文凭据。设置页只管理托管平台的只读访问令牌，服务端以密文保存，前端不回显令牌。
 
 未来出现真正的 Workload 后，可以为网络连接或其他外部运行能力定义类似 CNI 的 Provider 和内部绑定，但不应把网络插件接口提前套在当前服务目录或代码同步上。
 

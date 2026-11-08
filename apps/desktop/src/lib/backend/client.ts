@@ -13,6 +13,11 @@ import type {
   SpecificationResponse,
   SpecificationSyncResponse,
   RepositoryDiscoveryResponse,
+  RepositoryRefsResponse,
+  SecretPageResponse,
+  SecretResponse,
+  IntegrationPageResponse,
+  IntegrationResponse,
   SpecificationRevisionPageResponse,
   SpecificationRevisionResponse,
   WorkspaceListResponse,
@@ -196,6 +201,24 @@ export const specxApi = {
   discoverRepositoryFiles(workspaceId: string, repositoryId: string, refKind: SpecificationRefKind, refName: string) {
     const query = new URLSearchParams({ refKind, refName });
     return request<RepositoryDiscoveryResponse>(`/api/specx/repositories/${encodeURIComponent(repositoryId)}/files?${query}`, {}, workspaceId);
+  },
+  discoverRepositoryRefs(workspaceId: string, repositoryId: string) {
+    return request<RepositoryRefsResponse>(`/api/specx/repositories/${encodeURIComponent(repositoryId)}/refs`, {}, workspaceId);
+  },
+  listSecrets(workspaceId: string) {
+    return request<SecretPageResponse>("/api/specx/secrets", {}, workspaceId);
+  },
+  createSecret(workspaceId: string, input: { id: string; name: string; value: string }) {
+    return request<SecretResponse>("/api/specx/secrets", { method: "POST", body: input }, workspaceId);
+  },
+  updateSecret(workspaceId: string, secretId: string, value: string) {
+    return request<SecretResponse>(`/api/specx/secrets/${encodeURIComponent(secretId)}`, { method: "PUT", body: { value } }, workspaceId);
+  },
+  listIntegrations(workspaceId: string) {
+    return request<IntegrationPageResponse>("/api/specx/integrations", {}, workspaceId);
+  },
+  createIntegration(workspaceId: string, input: { id: string; provider: string; displayName: string; secretId: string | null; permissions: string[] }) {
+    return request<IntegrationResponse>("/api/specx/integrations", { method: "POST", body: input }, workspaceId);
   },
   createTag(workspaceId: string, tag: { id: string; name: string; color: string }) {
     return request<unknown>("/api/specx/tags", { method: "POST", headers: { "idempotency-key": idempotencyKey("tag") }, body: tag }, workspaceId);
