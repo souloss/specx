@@ -55,6 +55,8 @@ flowchart LR
 [crate 边界](../../crates/ARCHITECTURE.md)、[API 契约](api-contract.md)、
 [国际化规范](i18n.md) 和[前端开发说明](../../apps/desktop/README.md)。
 通用界面能力的职责见 [UI 基础层](ui-foundation.md)。
+服务、规范实例、Provider 投影的版本语义和节点页面实施顺序见
+[统一资源版本模型与页面边界路线图](resource-versioning-and-ui-roadmap.md)。
 数据库版本、启动迁移和自动更新顺序见[迁移规范](storage-migrations.md)。
 
 ## 业务能力现状与接入顺序

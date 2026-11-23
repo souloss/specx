@@ -46,9 +46,12 @@ export type Catalog = {
 
 export type PanelTab = {
   id: string;
-  kind: "overview" | "specification";
+  kind: "overview" | "provider" | "specification";
   serviceId: string;
   specificationId?: string;
+  providerKind?: SpecificationKind;
   operationKey?: string;
+  modelRef?: string;
+  modelsDirectory?: boolean;
   title: string;
 };

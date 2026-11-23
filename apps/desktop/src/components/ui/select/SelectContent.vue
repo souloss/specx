@@ -8,6 +8,7 @@ import { SelectContent, SelectPortal, SelectViewport, useForwardPropsEmits } fro
 import { cn } from "@/lib/common/utils";
 import { useFloatingLayerOrder } from "@/components/ui/dialog/useDialogLayerOrder";
 import { SelectScrollDownButton, SelectScrollUpButton } from ".";
+import { useAppearancePortal } from "../useAppearancePortal";
 
 defineOptions({
   inheritAttrs: false,
@@ -36,10 +37,11 @@ const delegatedProps = reactiveOmit(props, "class", "disablePortal", "hideScroll
 
 const forwarded = useForwardPropsEmits(delegatedProps, emits);
 const { forwardRef } = useFloatingLayerOrder();
+const appearancePortal = useAppearancePortal();
 </script>
 
 <template>
-  <SelectPortal :disabled="disablePortal">
+  <SelectPortal :disabled="disablePortal" :to="appearancePortal">
     <SelectContent
       :ref="forwardRef"
       data-slot="select-content"

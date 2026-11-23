@@ -85,9 +85,31 @@ button:disabled {
 .app-tab-bar {
   background: var(--specx-chrome, var(--muted));
 }
+.app-tab-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
 .app-sidebar-panel {
   color: var(--sidebar-foreground);
   background: var(--sidebar);
+}
+.mobile-sidebar-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  width: 100%;
+  border: 0;
+  background: rgb(15 23 42 / 28%);
+  cursor: default;
+}
+.sidebar-backdrop-enter-active,
+.sidebar-backdrop-leave-active {
+  transition: opacity 160ms ease;
+}
+.sidebar-backdrop-enter-from,
+.sidebar-backdrop-leave-to {
+  opacity: 0;
 }
 .app-sidebar-toolbar,
 .resource-tree-search {
@@ -130,6 +152,12 @@ html.dark .specx-panel {
     box-shadow: 12px 0 30px rgb(0 0 0 / 16%);
   }
 }
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-backdrop-enter-active,
+  .sidebar-backdrop-leave-active {
+    transition: none;
+  }
+}
 .panel-resize-handle:hover {
   background: color-mix(in srgb, var(--primary) 35%, transparent);
 }
@@ -166,10 +194,10 @@ html.dark .specx-panel {
 .tree-name-input {
   min-width: 0;
   width: 100%;
-  height: 23px;
-  padding: 0 4px;
+  height: 30px;
+  padding: 0 8px;
   border: 1px solid var(--ring);
-  border-radius: 3px;
+  border-radius: 5px;
   color: var(--foreground);
   background: var(--background);
 }
@@ -196,6 +224,7 @@ html.dark .specx-panel {
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
 }
 .app-tab-scroll {
+  flex: 1 1 auto;
   gap: 4px;
   padding-inline: 4px;
 }

@@ -2,15 +2,15 @@
 import { computed, ref, watch } from "vue";
 import { ArrowLeft, ArrowRight, Check, FileUp, Grid2X2, List, Search } from "@lucide/vue";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { Button } from "@/components/ui/button";
-import OpenApiCodeEditor from "@/components/OpenApiCodeEditor.vue";
+import OpenApiCodeEditor from "@/components/specifications/openapi/shared/OpenApiCodeEditor.vue";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { specxApi } from "@/lib/backend/client";
 import { createId } from "@/lib/core";
 import { SPECIFICATION_TYPES, type SpecificationFieldDefinition, type SpecificationTypeDefinition } from "@/lib/specifications/registry";
-import { parseOpenApiContent } from "@/lib/openapi";
-import { readSpecificationFile } from "@/lib/specifications/fileImport";
+import { parseOpenApiContent } from "@/lib/specifications/openapi/contract/openapi";
+import { readSpecificationFile, specificationFileExtension } from "@/lib/specifications/fileImport";
 import type { SpecificationKind } from "@/types/domain";
 import type { RepositoryFileResponse, RepositoryRefsResponse, SpecificationRefKind } from "@/types/api";
 import { translate, type MessageKey } from "@/i18n";
@@ -57,9 +57,7 @@ const validSourcePath = computed(() => {
   if (!value || value.startsWith("/") || value.startsWith("\\") || value.endsWith("/") || value.includes("\\") || value.includes("..")) return false;
   if (value.split("/").some((part) => !part || part === ".")) return false;
   if ([...value].some((character) => "~^:?*[".includes(character))) return false;
-  const lower = value.toLocaleLowerCase();
-  if (selectedKind.value === "openapi") return lower.endsWith(".json") || lower.endsWith(".yaml") || lower.endsWith(".yml");
-  return lower.endsWith(".md") || lower.endsWith(".markdown");
+  return Boolean(specificationFileExtension(value, selectedKind.value));
 });
 const canContinue = computed(() => {
   if (currentStep.value.kind === "type-picker") return Boolean(selectedKind.value);
@@ -190,7 +188,8 @@ async function save() {
       request.source = { path: sourcePath.value.trim(), refKind: refKind.value, refName: refName.value.trim() };
     }
     if (sourceMode.value === "import") {
-      request.title = values.value.title?.trim() || importedFileName.value.replace(/\.(markdown|md|yaml|yml|json)$/i, "");
+      const extension = specificationFileExtension(importedFileName.value, selectedKind.value);
+      request.title = values.value.title?.trim() || (extension ? importedFileName.value.slice(0, -extension.length) : importedFileName.value);
       request.content = values.value.content ?? "";
     }
     await specxApi.createSpecification(workspace.catalog.workspace.id, request);
@@ -283,11 +282,11 @@ async function save() {
             </div>
           </fieldset>
           <div v-if="sourceMode === 'import'" class="space-y-3 rounded-md border border-border bg-muted/10 p-4">
-            <input ref="fileInput" type="file" class="sr-only" :accept="selectedKind === 'markdown' ? '.md,.markdown,text/markdown' : '.json,.yaml,.yml,application/json,application/yaml,text/yaml'" :aria-label="t('specification.importFile')" @change="importFile" />
+            <input ref="fileInput" type="file" class="sr-only" :accept="[...selectedType.file.extensions, ...selectedType.file.mimeTypes].join(',')" :aria-label="t('specification.importFile')" @change="importFile" />
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div class="min-w-0">
                 <div class="text-sm font-medium">{{ importedFileName || t("specification.importFileEmpty") }}</div>
-                <div class="text-xs text-muted-foreground">{{ t("specification.importFileDescription", { extensions: selectedKind === "markdown" ? ".md, .markdown" : ".json, .yaml, .yml" }) }}</div>
+                <div class="text-xs text-muted-foreground">{{ t("specification.importFileDescription", { extensions: selectedType.file.extensions.join(", ") }) }}</div>
               </div>
               <Button type="button" variant="outline" size="sm" :disabled="busy" @click="chooseImportFile"><FileUp class="h-3.5 w-3.5" />{{ importedFileName ? t("specification.replaceImportFile") : t("specification.chooseImportFile") }}</Button>
             </div>
@@ -311,22 +310,16 @@ async function save() {
               <div v-else class="grid gap-3 sm:grid-cols-[minmax(0,9rem)_minmax(0,1fr)]">
                 <label class="settings-field"
                   >{{ t("specification.refKind")
-                  }}<Select v-model="refKind">
-                    <SelectTrigger class="settings-input h-9 w-full"><SelectValue :placeholder="t('specification.refKind')" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="branch">{{ t("specification.refKindBranch") }}</SelectItem>
-                      <SelectItem value="tag">{{ t("specification.refKindTag") }}</SelectItem>
-                    </SelectContent>
-                  </Select></label
+                  }}<AppSelect v-model="refKind" size="form" class="settings-input h-9 w-full" :aria-label="t('specification.refKind')">
+                    <option value="branch">{{ t("specification.refKindBranch") }}</option>
+                    <option value="tag">{{ t("specification.refKindTag") }}</option>
+                  </AppSelect></label
                 >
                 <label class="settings-field"
                   >{{ t("specification.refName")
-                  }}<Select v-model="refName">
-                    <SelectTrigger class="settings-input h-9 w-full"><SelectValue :placeholder="t('specification.refName')" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem v-for="ref in availableRefs" :key="ref" :value="ref">{{ ref }}</SelectItem>
-                    </SelectContent>
-                  </Select></label
+                  }}<AppSelect v-model="refName" size="form" class="settings-input h-9 w-full" :aria-label="t('specification.refName')">
+                    <option v-for="ref in availableRefs" :key="ref" :value="ref">{{ ref }}</option>
+                  </AppSelect></label
                 >
               </div>
               <label class="settings-field"

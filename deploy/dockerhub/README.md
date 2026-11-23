@@ -37,3 +37,24 @@ The complete deployment runs as one container and uses its persisted SQLite file
 ## Reverse proxy
 
 Forward the public HTTPS origin to port `4224` and set `SPECX_PUBLIC_ORIGIN` to the exact `https://host[:port]` origin without a path. Restrict direct access to the container listener so requests cannot bypass the proxy policy.
+
+## Published OpenAPI documentation
+
+Open an OpenAPI specification and choose **Share documentation**. An owner or
+administrator can select a saved revision, review its content, set the title,
+description and light/dark theme, and choose whether to display the definition
+download action and a browser request workbench. Publishing creates an immutable, anonymously readable site;
+later edits require another publication. Revoke a link from the same dialog.
+
+For an application at `https://specx.example.com`, links use
+`https://<random-publication-id>.specx.example.com/`. Configure wildcard DNS for
+`*.specx.example.com`, a TLS certificate covering that wildcard, and forward
+those hosts to the same Web Host with the original `Host` header preserved.
+Proxy both the reader HTML/assets and `/api/specx/public/openapi/` requests.
+Keep `SPECX_PUBLIC_ORIGIN=https://specx.example.com` for authenticated writes;
+publication subdomains only need anonymous reads from SpecX. Online debugging, when enabled, sends requests directly from the reader’s browser to an explicit HTTP(S) target; the target must permit CORS. Workspace environments and credentials are never included.
+
+On a local installation, links use `<random-publication-id>.localhost:<port>`
+and work without an external DNS provider. These local links are accessible
+only on the machine running SpecX. The application creates publication IDs;
+it does not provision public DNS records or TLS certificates.

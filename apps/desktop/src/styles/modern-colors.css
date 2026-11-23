@@ -4,7 +4,8 @@
  * RGB fallbacks remain in tokens.css and palettes.css for older WebViews.
  */
 @supports (color: oklch(1 0 0)) {
-  :root {
+  :root,
+  [data-appearance="light"] {
     --background: oklch(1 0 0);
     --foreground: oklch(0.145 0 0);
     --card: oklch(1 0 0);
@@ -53,7 +54,8 @@
     --specx-sidebar-header: oklch(0.985 0 0);
   }
 
-  .dark {
+  .dark,
+  [data-appearance="dark"] {
     --background: oklch(0.19 0.004 285);
     --foreground: oklch(0.88 0.006 285);
     --card: oklch(0.225 0.005 285);

@@ -1,3 +1,5 @@
+import { getOpenApiModels, type OpenApiModelChange } from "@/lib/specifications/openapi/contract/openapiModels";
+import { getOpenApiOperations, parseOpenApiContent } from "@/lib/specifications/openapi/contract/openapi";
 import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
 import { createId, loadPanelSession } from "../lib/core";
@@ -7,6 +9,9 @@ import type { WorkspaceResponse } from "../types/api";
 import type { Catalog, CodeSource, PanelTab, Service, ServiceCodeBinding, ServiceRepository, Specification, SpecificationRevision } from "../types/domain";
 import type { CodeSourceResponse, IntegrationResponse, SecretResponse, ServiceCodeBindingResponse, SpecificationRefKind, SpecificationSyncResponse } from "../types/api";
 import { translate } from "@/i18n";
+import { specificationType } from "@/lib/specifications/registry";
+import type { OpenApiOperationChange } from "@/lib/specifications/openapi/design/openapiOperationEditing";
+import { createOpenApiProviderState } from "./specifications/openapiProvider";
 
 export const useWorkspaceStore = defineStore("workspace", () => {
   const authenticated = ref<boolean | null>(null);
@@ -41,6 +46,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   const specificationSyncs = ref<Record<string, SpecificationSyncResponse>>({});
   const secrets = ref<SecretResponse[]>([]);
   const integrations = ref<IntegrationResponse[]>([]);
+  const { reset: resetOpenApiProviders, ...openApiProviderState } = createOpenApiProviderState(() => catalog.value?.workspace.id);
   const defaultTags = [
     { id: "tag-language-typescript", name: "TypeScript", color: "#3178c6" },
     { id: "tag-language-javascript", name: "JavaScript", color: "#d6b800" },
@@ -155,10 +161,21 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       specificationSyncs.value = {};
       secrets.value = [];
       integrations.value = [];
+      resetOpenApiProviders();
       restoreDrafts(next);
       void ensureDefaultTags();
       if (sameWorkspace) {
-        tabs.value = previousTabs.map((tab) => ({ ...tab, title: tab.kind === "specification" ? next.specifications.find((item) => item.id === tab.specificationId)!.title : next.services.find((item) => item.id === tab.serviceId)!.name }));
+        tabs.value = previousTabs.map((tab) => ({
+          ...tab,
+          title:
+            tab.kind === "specification"
+              ? tab.operationKey || tab.modelRef || tab.modelsDirectory
+                ? tab.title
+                : next.specifications.find((item) => item.id === tab.specificationId)!.title
+              : tab.kind === "provider"
+                ? translate(specificationType(tab.providerKind ?? "markdown").directoryKey)
+                : next.services.find((item) => item.id === tab.serviceId)!.name,
+        }));
         if (!tabs.value.some((tab) => tab.id === activeTabId.value)) activeTabId.value = tabs.value[0]?.id ?? "";
         activeServiceId.value = tabs.value.find((tab) => tab.id === activeTabId.value)?.serviceId ?? null;
       } else restorePanelState(next);
@@ -381,7 +398,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   async function syncSpecification(specificationId: string) {
     if (!catalog.value) throw new Error(translate("apiError.forbidden"));
     const result = await specxApi.syncSpecification(catalog.value.workspace.id, specificationId);
-    catalog.value.specifications = catalog.value.specifications.map((item) => (item.id === specificationId ? { ...item, ...result.specification, kind: "markdown" } : item));
+    catalog.value.specifications = catalog.value.specifications.map((item) => (item.id === specificationId ? { ...item, ...result.specification, kind: item.kind } : item));
     specificationSyncs.value = { ...specificationSyncs.value, [specificationId]: result };
     return result;
   }
@@ -498,7 +515,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     try {
       const saved = await specxApi.updateSpecification(catalogValue.workspace.id, specificationId, { title: draft.title.trim(), content: draft.content }, draft.baseEtag);
       catalogValue.specifications = catalogValue.specifications.map((item) => (item.id === specificationId ? { ...item, ...saved, kind: item.kind } : item));
-      tabs.value = tabs.value.map((tab) => (tab.specificationId === specificationId && !tab.operationKey ? { ...tab, title: saved.title } : tab));
+      tabs.value = tabs.value.map((tab) => (tab.specificationId === specificationId && !tab.operationKey && !tab.modelRef && !tab.modelsDirectory ? { ...tab, title: saved.title } : tab));
       delete drafts.value[specificationId];
       drafts.value = { ...drafts.value };
       draftRevision.value++;
@@ -533,6 +550,73 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     persistDrafts();
   }
 
+  async function saveOpenApiDocument(specificationId: string, content: string, change?: OpenApiOperationChange | OpenApiModelChange) {
+    const currentCatalog = catalog.value;
+    const specification = currentCatalog?.specifications.find((item) => item.id === specificationId);
+    if (!currentCatalog || !specification || specification.kind !== "openapi") return false;
+    const originTabId = activeTabId.value;
+    // Operation and model design have independent drafts. Do not replace a source editor's
+    // draft or borrow its potentially stale base ETag for a different operation.
+    try {
+      const saved = await specxApi.updateSpecification(currentCatalog.workspace.id, specificationId, { title: specification.title, content }, specification.etag);
+      if (catalog.value?.workspace.id === currentCatalog.workspace.id) {
+        catalog.value.specifications = catalog.value.specifications.map((item) => (item.id === specificationId && item.version <= saved.version ? { ...item, ...saved, kind: item.kind } : item));
+        const current = catalog.value.specifications.find((item) => item.id === specificationId);
+        if (change && !("kind" in change) && current && getOpenApiOperations(current.content).some((entry) => entry.identityKey === change.key)) {
+          const previousTabs = tabs.value.filter((tab) => tab.specificationId === specificationId && tab.operationKey === change.previousKey && change.previousKey);
+          const nextId = `specification-${specificationId}-${encodeURIComponent(change.key)}`;
+          if (previousTabs.length) {
+            const previousIds = new Set(previousTabs.map((tab) => tab.id));
+            tabs.value = tabs.value.filter((tab) => tab.id !== nextId || previousIds.has(tab.id)).map((tab) => (previousIds.has(tab.id) ? { ...tab, id: nextId, operationKey: change.key, title: change.title } : tab));
+            if (previousIds.has(activeTabId.value)) activeTabId.value = nextId;
+            if (pendingCloseTabId.value && previousIds.has(pendingCloseTabId.value)) pendingCloseTabId.value = nextId;
+          } else if (activeTabId.value === originTabId) openSpecification(specificationId, change.key, change.title);
+        }
+        if (change && "kind" in change && current) {
+          const previousId = change.previousReference ? `specification-${specificationId}-model-${encodeURIComponent(change.previousReference)}` : undefined;
+          const previous = tabs.value.find((tab) => tab.id === previousId);
+          if (previous && change.reference) {
+            const nextId = `specification-${specificationId}-model-${encodeURIComponent(change.reference)}`;
+            tabs.value = tabs.value.filter((tab) => tab.id !== nextId || tab.id === previousId).map((tab) => (tab.id === previousId ? { ...tab, id: nextId, modelRef: change.reference, title: change.title ?? tab.title } : tab));
+            if (activeTabId.value === previousId) activeTabId.value = nextId;
+            if (pendingCloseTabId.value === previousId) pendingCloseTabId.value = nextId;
+          } else if (previous && !change.reference) {
+            closeTab(previous.id, true);
+            if (originTabId === previous.id) openOpenApiModel(specificationId);
+          } else if (change.reference && activeTabId.value === originTabId) openOpenApiModel(specificationId, change.reference);
+        }
+      }
+      return true;
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 412) {
+        if (catalog.value?.workspace.id === currentCatalog.workspace.id) {
+          try {
+            await refresh();
+          } catch {
+            // Keep the operation's local draft available even if refresh fails.
+          }
+        }
+        throw new Error(translate("specification.openapiDesignConcurrentChange"));
+      }
+      throw cause;
+    }
+  }
+
+  function saveOpenApiOperation(specificationId: string, content: string, change?: OpenApiOperationChange) {
+    return saveOpenApiDocument(specificationId, content, change);
+  }
+
+  function openOpenApiModel(specificationId: string, modelRef?: string) {
+    const specification = catalog.value?.specifications.find((item) => item.id === specificationId && item.kind === "openapi");
+    if (!specification) return;
+    const model = modelRef ? getOpenApiModels(parseOpenApiContent(specification.content)).find((item) => item.reference === modelRef) : undefined;
+    if (modelRef && !model) return;
+    const id = `specification-${specificationId}-model-${modelRef ? encodeURIComponent(modelRef) : "directory"}`;
+    if (!tabs.value.some((tab) => tab.id === id)) tabs.value.push({ id, kind: "specification", serviceId: specification.serviceId, specificationId, modelRef, modelsDirectory: !modelRef, title: model?.name ?? translate("specification.openapiModels.directory") });
+    activeServiceId.value = specification.serviceId;
+    activeTabId.value = id;
+  }
+
   async function loadSpecificationRevisions(specificationId: string) {
     const workspaceId = catalog.value?.workspace.id;
     if (!workspaceId) return [];
@@ -559,7 +643,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     const specification = catalogValue?.specifications.find((item) => item.id === specificationId);
     if (!catalogValue || !specification) return false;
     const restored = await specxApi.restoreSpecificationRevision(catalogValue.workspace.id, specificationId, version, specification.etag);
-    catalogValue.specifications = catalogValue.specifications.map((item) => (item.id === specificationId ? { ...item, ...restored, kind: "markdown" } : item));
+    catalogValue.specifications = catalogValue.specifications.map((item) => (item.id === specificationId ? { ...item, ...restored, kind: item.kind } : item));
     delete drafts.value[specificationId];
     drafts.value = { ...drafts.value };
     draftRevision.value++;
@@ -607,6 +691,15 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     }
     activeServiceId.value = specification.serviceId;
     activeTabId.value = id;
+  }
+
+  function openProvider(serviceId: string, providerKind: Specification["kind"]) {
+    const id = `provider-${serviceId}-${providerKind}`;
+    const title = translate(specificationType(providerKind).directoryKey);
+    if (!tabs.value.some((tab) => tab.id === id)) tabs.value.push({ id, kind: "provider", serviceId, providerKind, title });
+    activeServiceId.value = serviceId;
+    activeTabId.value = id;
+    if (providerKind === "openapi") void openApiProviderState.loadOpenApiProvider(serviceId);
   }
 
   function closeTab(id: string, force = false) {
@@ -680,12 +773,14 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     discoverRepositoryRefs,
     secrets,
     integrations,
+    ...openApiProviderState,
     loadRepositoryCredentials,
     saveRepositoryCredential,
     setSpecificationCodeBinding,
     deleteSpecificationCodeBinding,
     selectService,
     openOverview,
+    openProvider,
     openSpecification,
     closeTab,
     pendingCloseTabId,
@@ -695,6 +790,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     updateSpecificationDraft,
     hasUnsavedSpecification,
     saveSpecification,
+    saveOpenApiOperation,
+    saveOpenApiDocument,
+    openOpenApiModel,
     discardSpecificationDraft,
     specificationRevisions,
     specificationRevisionsLoading,

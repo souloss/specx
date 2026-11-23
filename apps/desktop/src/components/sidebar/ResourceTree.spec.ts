@@ -5,6 +5,7 @@ import { nextTick } from "vue";
 import ResourceTree from "./ResourceTree.vue";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { useNavigationStore } from "@/stores/navigationStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { catalogFixture } from "@/test/catalogFixture";
 import { specxApi } from "@/lib/backend/client";
 import { installMemoryStorage } from "@/test/browserStorage";
@@ -20,8 +21,38 @@ beforeEach(() => {
   vi.spyOn(workspace, "refresh").mockResolvedValue(undefined);
   wrapper = mount(ResourceTree, { attachTo: document.body, global: { plugins: [pinia] } });
 });
-afterEach(() => wrapper?.unmount());
+afterEach(() => {
+  wrapper?.unmount();
+  vi.unstubAllGlobals();
+});
 describe("resource tree interactions", () => {
+  it("closes the mobile sidebar after selecting a resource", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({ matches: true })),
+    );
+    const settings = useSettingsStore();
+    settings.sidebarCollapsed = false;
+
+    await wrapper.get('[data-tree-node="svc-a"]').trigger("click");
+
+    expect(useNavigationStore().selectedId).toBe("svc-a");
+    expect(settings.sidebarCollapsed).toBe(true);
+  });
+
+  it("keeps the desktop sidebar open after selecting a resource", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({ matches: false })),
+    );
+    const settings = useSettingsStore();
+    settings.sidebarCollapsed = false;
+
+    await wrapper.get('[data-tree-node="svc-a"]').trigger("click");
+
+    expect(settings.sidebarCollapsed).toBe(false);
+  });
+
   it("opens the full service editor from the context menu", async () => {
     await wrapper.get('[data-tree-node="svc-a"]').trigger("contextmenu", { clientX: 60, clientY: 80 });
     const edit = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("编辑服务"));

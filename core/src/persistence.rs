@@ -11,7 +11,7 @@ use crate::{
     Workspace, WorkspaceContext, normalize_repository_url,
 };
 
-pub const LATEST_SCHEMA_VERSION: i64 = 17;
+pub const LATEST_SCHEMA_VERSION: i64 = 25;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, backup::Backup, params};
 use sha2::{Digest, Sha256};
@@ -59,6 +59,18 @@ pub struct WorkspaceMember {
 pub struct WorkspaceMembership {
     pub workspace: Workspace,
     pub role: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenApiPublication {
+    pub id: String,
+    pub version: i64,
+    pub title: String,
+    pub description: String,
+    pub theme: String,
+    pub show_download: bool,
+    pub allow_try_it: bool,
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -162,6 +174,36 @@ pub struct IntegrationRecord {
     pub display_name: String,
     pub secret_id: Option<String>,
     pub permissions: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenApiProviderSettingsRecord {
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub service_id: String,
+    pub default_environment_id: Option<String>,
+    pub default_server_url: String,
+    pub show_operation_id: bool,
+    pub schema_display: String,
+    pub mock_enabled: bool,
+    pub mock_public_id: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenApiEnvironmentRecord {
+    pub id: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub service_id: String,
+    pub name: String,
+    pub slug: String,
+    pub base_url: String,
+    pub request_mode: String,
+    pub servers: String,
+    pub variables: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -610,6 +652,92 @@ impl SqliteStore {
         )?;
         transaction
             .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (17, datetime('now'))", [])?;
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS openapi_provider_settings (
+               tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+               service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+               default_environment_id TEXT,
+               default_server_url TEXT NOT NULL DEFAULT '',
+               show_operation_id INTEGER NOT NULL DEFAULT 1,
+               schema_display TEXT NOT NULL DEFAULT 'summary',
+               updated_at TEXT NOT NULL,
+               PRIMARY KEY (tenant_id, workspace_id, service_id)
+             );
+             CREATE TABLE IF NOT EXISTS openapi_environments (
+               id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+               service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+               name TEXT NOT NULL, slug TEXT NOT NULL, base_url TEXT NOT NULL DEFAULT '',
+               variables TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+               UNIQUE (tenant_id, workspace_id, service_id, slug)
+             );
+             CREATE INDEX IF NOT EXISTS openapi_environments_scope ON openapi_environments(tenant_id, workspace_id, service_id, name);",
+        )?;
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (18, datetime('now'))", [])?;
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS openapi_workbenches (
+               tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+               service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+               revision INTEGER NOT NULL, etag TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL,
+               PRIMARY KEY (tenant_id, workspace_id, service_id)
+             );",
+        )?;
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (19, datetime('now'))", [])?;
+        transaction.execute_batch(
+            "ALTER TABLE openapi_provider_settings ADD COLUMN mock_enabled INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE openapi_provider_settings ADD COLUMN mock_public_id TEXT;
+             CREATE UNIQUE INDEX IF NOT EXISTS openapi_provider_mock_token ON openapi_provider_settings(mock_public_id) WHERE mock_public_id IS NOT NULL;",
+        ).or_else(|error| {
+            let message = error.to_string();
+            if message.contains("duplicate column name") {
+                transaction.execute_batch(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS openapi_provider_mock_token ON openapi_provider_settings(mock_public_id) WHERE mock_public_id IS NOT NULL;",
+                )
+            } else {
+                Err(error)
+            }
+        })?;
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (20, datetime('now'))", [])?;
+        transaction.execute_batch("CREATE TABLE IF NOT EXISTS openapi_publications (
+                 id TEXT PRIMARY KEY, specification_id TEXT NOT NULL, version INTEGER NOT NULL,
+                 title TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL,
+                 UNIQUE (specification_id, version),
+                 FOREIGN KEY (specification_id, version) REFERENCES specification_revisions(specification_id, version) ON DELETE CASCADE
+               );")?;
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (21, datetime('now'))", [])?;
+        for (column, definition) in [
+            ("description", "TEXT NOT NULL DEFAULT ''"),
+            ("theme", "TEXT NOT NULL DEFAULT 'light'"),
+            ("show_download", "INTEGER NOT NULL DEFAULT 1"),
+        ] {
+            transaction
+                .execute(&format!("ALTER TABLE openapi_publications ADD COLUMN {column} {definition}"), [])
+                .or_else(
+                    |error| {
+                        if error.to_string().contains("duplicate column name") { Ok(0) } else { Err(error) }
+                    },
+                )?;
+        }
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (22, datetime('now'))", [])?;
+        transaction
+            .execute("ALTER TABLE openapi_publications ADD COLUMN allow_try_it INTEGER NOT NULL DEFAULT 1", [])
+            .or_else(|error| if error.to_string().contains("duplicate column name") { Ok(0) } else { Err(error) })?;
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (23, datetime('now'))", [])?;
+        transaction
+            .execute("ALTER TABLE openapi_environments ADD COLUMN request_mode TEXT NOT NULL DEFAULT 'inherit'", [])
+            .or_else(|error| if error.to_string().contains("duplicate column name") { Ok(0) } else { Err(error) })?;
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (24, datetime('now'))", [])?;
+        transaction
+            .execute("ALTER TABLE openapi_environments ADD COLUMN servers TEXT NOT NULL DEFAULT '[]'", [])
+            .or_else(|error| if error.to_string().contains("duplicate column name") { Ok(0) } else { Err(error) })?;
+        transaction
+            .execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (25, datetime('now'))", [])?;
         transaction.commit().map_err(PersistenceError::from)?;
         Ok(())
     }
@@ -706,6 +834,8 @@ impl SqliteStore {
         let snapshot = Connection::open(&artifact.path)?;
         let transaction = snapshot.unchecked_transaction()?;
         transaction.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
+        // A restore must not reactivate any previously shared links.
+        transaction.execute("DELETE FROM openapi_publications", [])?;
         for table in [
             "service_tags",
             "service_ref_tracks",
@@ -2289,6 +2419,198 @@ impl SqliteStore {
         Ok(result)
     }
 
+    pub fn upsert_openapi_provider_settings(
+        &self,
+        settings: &OpenApiProviderSettingsRecord,
+    ) -> Result<(), PersistenceError> {
+        self.connection.execute(
+            "INSERT INTO openapi_provider_settings(tenant_id,workspace_id,service_id,default_environment_id,default_server_url,show_operation_id,schema_display,mock_enabled,mock_public_id,updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+             ON CONFLICT(tenant_id,workspace_id,service_id) DO UPDATE SET default_environment_id=excluded.default_environment_id,default_server_url=excluded.default_server_url,show_operation_id=excluded.show_operation_id,schema_display=excluded.schema_display,mock_enabled=excluded.mock_enabled,mock_public_id=excluded.mock_public_id,updated_at=excluded.updated_at",
+            params![settings.tenant_id, settings.workspace_id, settings.service_id, settings.default_environment_id, settings.default_server_url, settings.show_operation_id, settings.schema_display, settings.mock_enabled, settings.mock_public_id, settings.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn openapi_provider_settings(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        service_id: &str,
+    ) -> Result<Option<OpenApiProviderSettingsRecord>, PersistenceError> {
+        self.connection.query_row(
+            "SELECT tenant_id,workspace_id,service_id,default_environment_id,default_server_url,show_operation_id,schema_display,mock_enabled,mock_public_id,updated_at FROM openapi_provider_settings WHERE tenant_id=?1 AND workspace_id=?2 AND service_id=?3",
+            params![tenant_id, workspace_id, service_id],
+            |row| Ok(OpenApiProviderSettingsRecord { tenant_id: row.get(0)?, workspace_id: row.get(1)?, service_id: row.get(2)?, default_environment_id: row.get(3)?, default_server_url: row.get(4)?, show_operation_id: row.get(5)?, schema_display: row.get(6)?, mock_enabled: row.get(7)?, mock_public_id: row.get(8)?, updated_at: row.get(9)? }),
+        ).optional().map_err(PersistenceError::from)
+    }
+
+    pub fn openapi_provider_settings_by_mock_public_id(
+        &self,
+        public_id: &str,
+    ) -> Result<Option<OpenApiProviderSettingsRecord>, PersistenceError> {
+        self.connection.query_row(
+            "SELECT tenant_id,workspace_id,service_id,default_environment_id,default_server_url,show_operation_id,schema_display,mock_enabled,mock_public_id,updated_at FROM openapi_provider_settings WHERE mock_public_id=?1 AND mock_enabled=1",
+            params![public_id],
+            |row| Ok(OpenApiProviderSettingsRecord { tenant_id: row.get(0)?, workspace_id: row.get(1)?, service_id: row.get(2)?, default_environment_id: row.get(3)?, default_server_url: row.get(4)?, show_operation_id: row.get(5)?, schema_display: row.get(6)?, mock_enabled: row.get(7)?, mock_public_id: row.get(8)?, updated_at: row.get(9)? }),
+        ).optional().map_err(PersistenceError::from)
+    }
+
+    pub fn upsert_openapi_environment(&self, environment: &OpenApiEnvironmentRecord) -> Result<(), PersistenceError> {
+        self.connection.execute(
+            "INSERT INTO openapi_environments(id,tenant_id,workspace_id,service_id,name,slug,base_url,variables,created_at,updated_at,request_mode,servers)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,base_url=excluded.base_url,variables=excluded.variables,request_mode=excluded.request_mode,servers=excluded.servers,updated_at=excluded.updated_at",
+            params![environment.id, environment.tenant_id, environment.workspace_id, environment.service_id, environment.name, environment.slug, environment.base_url, environment.variables, environment.created_at, environment.updated_at, environment.request_mode, environment.servers],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_openapi_environments(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        service_id: &str,
+    ) -> Result<Vec<OpenApiEnvironmentRecord>, PersistenceError> {
+        let mut statement = self.connection.prepare("SELECT id,tenant_id,workspace_id,service_id,name,slug,base_url,variables,created_at,updated_at,request_mode,servers FROM openapi_environments WHERE tenant_id=?1 AND workspace_id=?2 AND service_id=?3 ORDER BY name,id")?;
+        statement
+            .query_map(params![tenant_id, workspace_id, service_id], |row| {
+                Ok(OpenApiEnvironmentRecord {
+                    id: row.get(0)?,
+                    tenant_id: row.get(1)?,
+                    workspace_id: row.get(2)?,
+                    service_id: row.get(3)?,
+                    name: row.get(4)?,
+                    slug: row.get(5)?,
+                    base_url: row.get(6)?,
+                    variables: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                    request_mode: row.get(10)?,
+                    servers: row.get(11)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(PersistenceError::from)
+    }
+
+    pub fn openapi_environment_by_id(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        service_id: &str,
+        id: &str,
+    ) -> Result<Option<OpenApiEnvironmentRecord>, PersistenceError> {
+        self.connection.query_row(
+            "SELECT id,tenant_id,workspace_id,service_id,name,slug,base_url,variables,created_at,updated_at,request_mode,servers FROM openapi_environments WHERE tenant_id=?1 AND workspace_id=?2 AND service_id=?3 AND id=?4",
+            params![tenant_id, workspace_id, service_id, id],
+            |row| Ok(OpenApiEnvironmentRecord { id: row.get(0)?, tenant_id: row.get(1)?, workspace_id: row.get(2)?, service_id: row.get(3)?, name: row.get(4)?, slug: row.get(5)?, base_url: row.get(6)?, variables: row.get(7)?, created_at: row.get(8)?, updated_at: row.get(9)?, request_mode: row.get(10)?, servers: row.get(11)? }),
+        ).optional().map_err(PersistenceError::from)
+    }
+
+    pub fn openapi_environment_id_exists(&self, id: &str) -> Result<bool, PersistenceError> {
+        self.connection
+            .query_row("SELECT EXISTS(SELECT 1 FROM openapi_environments WHERE id=?1)", params![id], |row| row.get(0))
+            .map_err(PersistenceError::from)
+    }
+
+    pub fn delete_openapi_environment(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        service_id: &str,
+        id: &str,
+    ) -> Result<bool, PersistenceError> {
+        Ok(self.connection.execute(
+            "DELETE FROM openapi_environments WHERE tenant_id=?1 AND workspace_id=?2 AND service_id=?3 AND id=?4",
+            params![tenant_id, workspace_id, service_id, id],
+        )? == 1)
+    }
+
+    pub fn openapi_publications(
+        &self,
+        context: &WorkspaceContext,
+        specification: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<OpenApiPublication>, PersistenceError> {
+        let mut stmt = self.connection.prepare("SELECT p.id,p.version,p.title,p.description,p.theme,p.show_download,p.allow_try_it,p.created_at FROM openapi_publications p JOIN specification_revisions r ON r.specification_id=p.specification_id AND r.version=p.version WHERE r.tenant_id=?1 AND r.workspace_id=?2 AND r.specification_id=?3 ORDER BY p.version DESC LIMIT ?4 OFFSET ?5")?;
+        let rows =
+            stmt.query_map(params![context.tenant_id, context.workspace_id, specification, limit, offset], |row| {
+                Ok(OpenApiPublication {
+                    id: row.get(0)?,
+                    version: row.get(1)?,
+                    title: row.get(2)?,
+                    description: row.get(3)?,
+                    theme: row.get(4)?,
+                    show_download: row.get(5)?,
+                    allow_try_it: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
+    pub fn create_openapi_publication(
+        &self,
+        context: &WorkspaceContext,
+        specification: &str,
+        publication: &OpenApiPublication,
+        content: &str,
+        audit: &AuditEvent,
+    ) -> Result<bool, PersistenceError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let changed = transaction.execute("INSERT INTO openapi_publications(id,specification_id,version,title,content,created_at,description,theme,show_download,allow_try_it) SELECT ?5,r.specification_id,r.version,?6,?7,?8,?9,?10,?11,?12 FROM specification_revisions r WHERE r.tenant_id=?1 AND r.workspace_id=?2 AND r.specification_id=?3 AND r.version=?4 ON CONFLICT(specification_id,version) DO NOTHING",
+            params![context.tenant_id, context.workspace_id, specification, publication.version, publication.id, publication.title, content, publication.created_at, publication.description, publication.theme, publication.show_download, publication.allow_try_it])? == 1;
+        if changed {
+            insert_audit_event(&transaction, audit)?;
+        }
+        transaction.commit()?;
+        Ok(changed)
+    }
+
+    pub fn revoke_openapi_publication(
+        &self,
+        context: &WorkspaceContext,
+        specification: &str,
+        id: &str,
+        audit: &AuditEvent,
+    ) -> Result<bool, PersistenceError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let changed = transaction.execute("DELETE FROM openapi_publications WHERE id=?4 AND EXISTS (SELECT 1 FROM specification_revisions r WHERE r.tenant_id=?1 AND r.workspace_id=?2 AND r.specification_id=?3 AND r.specification_id=openapi_publications.specification_id AND r.version=openapi_publications.version)",
+            params![context.tenant_id, context.workspace_id, specification, id])? == 1;
+        if changed {
+            insert_audit_event(&transaction, audit)?;
+        }
+        transaction.commit()?;
+        Ok(changed)
+    }
+
+    pub fn public_openapi_document(&self, id: &str) -> Result<Option<(OpenApiPublication, String)>, PersistenceError> {
+        self.connection
+            .query_row(
+                "SELECT id,version,title,description,theme,show_download,allow_try_it,created_at,content FROM openapi_publications WHERE id=?1",
+                params![id],
+                |row| {
+                    Ok((
+                        OpenApiPublication {
+                            id: row.get(0)?,
+                            version: row.get(1)?,
+                            title: row.get(2)?,
+                            description: row.get(3)?,
+                            theme: row.get(4)?,
+                            show_download: row.get(5)?,
+                            allow_try_it: row.get(6)?,
+                            created_at: row.get(7)?,
+                        },
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn update_specification_code_binding_if_current_with_audit(
         &self,
         context: &WorkspaceContext,
@@ -3613,11 +3935,57 @@ mod tests {
                 },
             )
             .unwrap();
+            core.create_specification(
+                context,
+                Specification {
+                    id: format!("{id}-spec"),
+                    tenant_id: context.tenant_id.clone(),
+                    workspace_id: context.workspace_id.clone(),
+                    service_id: id.into(),
+                    title: "Public API".into(),
+                    kind: SpecificationKind::OpenApi,
+                    content: r#"{"openapi":"3.1.0","info":{"title":"API","version":"1"},"paths":{}}"#.into(),
+                    version: 1,
+                    content_hash: String::new(),
+                    updated_at: Utc::now().to_rfc3339(),
+                },
+            )
+            .unwrap();
         }
         store.persist_core(&core, &workspace_one).unwrap();
         store.persist_core(&core, &workspace_two).unwrap();
+        for (scope, service) in [(&workspace_one, "svc-one"), (&workspace_two, "svc-two")] {
+            let audit = AuditEvent {
+                tenant_id: scope.tenant_id.clone(),
+                workspace_id: scope.workspace_id.clone(),
+                actor_id: scope.actor_id.clone(),
+                request_id: "publication-backup".into(),
+                action: "publish".into(),
+                resource_type: "openapi_document".into(),
+                resource_id: format!("{service}-spec"),
+                created_at: Utc::now().to_rfc3339(),
+            };
+            let publication = OpenApiPublication {
+                id: format!("{service}-link"),
+                version: 1,
+                title: "Public API".into(),
+                description: "".into(),
+                theme: "light".into(),
+                show_download: true,
+                allow_try_it: true,
+                created_at: audit.created_at.clone(),
+            };
+            assert!(
+                store.create_openapi_publication(scope, &audit.resource_id, &publication, "snapshot", &audit).unwrap()
+            );
+        }
         let prefix = "workspace-one";
         let backup = store.create_workspace_backup(&workspace_one, &backup_directory, prefix, 3).unwrap();
+        let saved = SqliteStore::open(&backup.path).unwrap();
+        assert!(saved.public_openapi_document("svc-one-link").unwrap().is_none());
+        assert!(saved.public_openapi_document("svc-two-link").unwrap().is_none());
+        assert!(saved.specification_revision(&workspace_one, "svc-one-spec", 1).unwrap().is_some());
+        drop(saved);
 
         let mut changed_one = Core::load(&store, &workspace_one).unwrap();
         changed_one
@@ -3645,6 +4013,8 @@ mod tests {
             )
             .unwrap();
         store.persist_core(&changed_two, &workspace_two).unwrap();
+        assert!(store.public_openapi_document("svc-one-link").unwrap().is_some());
+        assert!(store.public_openapi_document("svc-two-link").unwrap().is_some());
 
         let mut store = SqliteStore::open(&database).unwrap();
         store.restore_workspace_from_path(&workspace_one, &backup.path).unwrap();
@@ -3652,6 +4022,8 @@ mod tests {
         let restored_two = Core::load(&store, &workspace_two).unwrap();
         assert_eq!(restored_one.list_services(&workspace_one)[0].name, "Workspace One");
         assert_eq!(restored_two.list_services(&workspace_two)[0].name, "Changed Two");
+        assert!(store.public_openapi_document("svc-one-link").unwrap().is_none());
+        assert!(store.public_openapi_document("svc-two-link").unwrap().is_some());
     }
 
     #[test]

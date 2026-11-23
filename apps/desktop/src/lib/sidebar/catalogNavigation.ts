@@ -1,7 +1,6 @@
 import type { Catalog, SpecificationKind } from "@/types/domain";
 import type { ResourceTreeNode, SidebarLayout, SidebarOrderEntry } from "@/types/navigation";
 import { UNGROUPED_GROUP_ID } from "@/lib/core";
-import { getOpenApiOperations } from "@/lib/openapi";
 import { specificationType } from "@/lib/specifications/registry";
 import { translate } from "@/i18n";
 
@@ -68,27 +67,17 @@ export function layoutTree(layout: SidebarLayout, catalog: Catalog): ResourceTre
           children: providerSpecifications
             .sort((left, right) => left.title.localeCompare(right.title))
             .map((specification) => {
-              const providerMetadata = { providerKind: kind, providerIcon: provider.icon } as const;
-              if (kind !== "openapi") return { id: `specification:${specification.id}`, label: specification.title, type: "leaf" as const, parentId: providerId, serviceId, specificationId: specification.id, ...providerMetadata };
-              const tags = new Map<string, ResourceTreeNode>();
-              for (const operation of getOpenApiOperations(specification.content)) {
-                for (const tag of operation.tags) {
-                  const tagId = `specification:${specification.id}:tag:${tag}`;
-                  const tagNode = tags.get(tag) ?? { id: tagId, label: tag, type: "directory" as const, parentId: `specification:${specification.id}`, serviceId, specificationId: specification.id, ...providerMetadata, children: [] };
-                  tagNode.children!.push({
-                    id: `specification:${specification.id}:operation:${operation.identityKey}:${tag}`,
-                    label: `${operation.method.toUpperCase()} ${operation.path}`,
-                    type: "leaf",
-                    parentId: tagId,
-                    serviceId,
-                    specificationId: specification.id,
-                    operationKey: operation.identityKey,
-                    ...providerMetadata,
-                  });
-                  tags.set(tag, tagNode);
-                }
-              }
-              return { id: `specification:${specification.id}`, label: specification.title, type: "directory" as const, parentId: providerId, serviceId, specificationId: specification.id, ...providerMetadata, children: [...tags.values()].sort((a, b) => a.label.localeCompare(b.label)) };
+              const node: ResourceTreeNode = {
+                id: `specification:${specification.id}`,
+                label: specification.title,
+                type: "leaf",
+                parentId: providerId,
+                serviceId,
+                specificationId: specification.id,
+                providerKind: kind,
+                providerIcon: provider.icon,
+              };
+              return provider.buildNavigation?.(node, specification.content) ?? node;
             }),
         };
       });
@@ -114,16 +103,17 @@ export function filterResourceTree(nodes: ResourceTreeNode[], query: string, cat
     return text.toLocaleLowerCase().includes(needle);
   };
   const services = new Map(catalog.services.map((service) => [service.id, service]));
-  function visit(items: ResourceTreeNode[], ancestorMatches = false): ResourceTreeNode[] {
+  function visit(items: ResourceTreeNode[], ancestorMatches = false, withinService = false): ResourceTreeNode[] {
     return items.flatMap((node) => {
       const service = services.get(node.id);
-      const textMatch = (!needle && !searchRegex) || ancestorMatches || [node.label, service?.slug, service?.description].some(matches);
+      const textMatch = (!needle && !searchRegex) || ancestorMatches || [node.label, node.searchText, service?.slug, service?.description].some(matches);
       if (node.type === "resource") {
-        const children = visit(node.children ?? [], textMatch && !!needle);
-        return textMatch && (!tagId || service?.tagIds.includes(tagId)) ? [{ ...node, children }] : [];
+        if (tagId && !service?.tagIds.includes(tagId)) return [];
+        const children = visit(node.children ?? [], textMatch && (!!needle || Boolean(searchRegex)), true);
+        return textMatch || children.length ? [{ ...node, children }] : [];
       }
-      const children = visit(node.children ?? [], textMatch && !!needle);
-      return children.length || (textMatch && !tagId) ? [{ ...node, children }] : [];
+      const children = visit(node.children ?? [], textMatch && (!!needle || Boolean(searchRegex)), withinService);
+      return children.length || (textMatch && (!tagId || withinService)) ? [{ ...node, children }] : [];
     });
   }
   return visit(nodes);

@@ -20,10 +20,12 @@ COPY crates/specx-formats/Cargo.toml crates/specx-formats/Cargo.toml
 COPY crates/specx-platform/Cargo.toml crates/specx-platform/Cargo.toml
 COPY crates/specx-api/Cargo.toml crates/specx-api/Cargo.toml
 COPY crates/specx-web/Cargo.toml crates/specx-web/Cargo.toml
+COPY crates/specx-request-agent/Cargo.toml crates/specx-request-agent/Cargo.toml
+COPY crates/specx-controller/Cargo.toml crates/specx-controller/Cargo.toml
 RUN mkdir -p core/src crates/specx-types/src crates/specx-formats/src crates/specx-platform/src \
-  crates/specx-api/src crates/specx-web/src \
+  crates/specx-api/src crates/specx-web/src crates/specx-request-agent/src crates/specx-controller/src \
   && touch core/src/lib.rs crates/specx-types/src/lib.rs crates/specx-formats/src/lib.rs \
-  crates/specx-platform/src/lib.rs crates/specx-api/src/lib.rs crates/specx-web/src/main.rs \
+  crates/specx-platform/src/lib.rs crates/specx-api/src/lib.rs crates/specx-web/src/main.rs crates/specx-request-agent/src/lib.rs crates/specx-controller/src/lib.rs \
   && cargo build --release -p specx-api -p specx-platform
 COPY core/ core/
 COPY crates/specx-types/ crates/specx-types/
@@ -31,13 +33,15 @@ COPY crates/specx-formats/ crates/specx-formats/
 COPY crates/specx-platform/ crates/specx-platform/
 COPY crates/specx-api/ crates/specx-api/
 COPY crates/specx-web/ crates/specx-web/
-RUN find core crates/specx-types crates/specx-formats crates/specx-platform crates/specx-api crates/specx-web \
+COPY crates/specx-request-agent/ crates/specx-request-agent/
+COPY crates/specx-controller/ crates/specx-controller/
+RUN find core crates/specx-types crates/specx-formats crates/specx-platform crates/specx-api crates/specx-web crates/specx-request-agent crates/specx-controller \
   -type f -exec touch {} +
 RUN cargo build --release -p specx-web
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-  && apt-get install --yes --no-install-recommends ca-certificates libssl3 postgresql-client \
+  && apt-get install --yes --no-install-recommends ca-certificates libssl3 libcurl4 postgresql-client \
   && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=backend /app/target/release/specx-web /usr/local/bin/specx-web

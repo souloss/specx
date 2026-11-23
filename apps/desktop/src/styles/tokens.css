@@ -4,7 +4,7 @@
  * Keep .dark after :root so explicit appearance choices override base colors.
  */
 
-@custom-variant dark (&:is(.dark *));
+@custom-variant dark (&:is(.dark *):not([data-appearance="light"], [data-appearance="light"] *), &:is([data-appearance="dark"], [data-appearance="dark"] *));
 
 @theme inline {
   --font-sans: "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
@@ -70,7 +70,8 @@
   --radius-xl: var(--specx-radius-xl);
 }
 
-:root {
+:root,
+[data-appearance="light"] {
   color-scheme: light;
   --background: rgb(255 255 255);
   --foreground: rgb(10 10 10);
@@ -135,7 +136,8 @@
   --specx-viewport-height: 100vh;
 }
 
-.dark {
+.dark,
+[data-appearance="dark"] {
   color-scheme: dark;
   --background: rgb(19 20 22);
   --foreground: rgb(215 215 219);

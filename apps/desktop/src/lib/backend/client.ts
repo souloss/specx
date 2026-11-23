@@ -1,3 +1,4 @@
+import type { AgentRequest, AgentResponse, OpenApiEnvironmentInput, PublicOpenApiEnvironment } from "@/types/api";
 import { uuid } from "../common/utils";
 import type { Catalog, Group, Service, Specification } from "../../types/domain";
 import type {
@@ -19,6 +20,15 @@ import type {
   SecretResponse,
   IntegrationPageResponse,
   IntegrationResponse,
+  OpenApiEnvironment,
+  OpenApiRuntimeEnvironment,
+  OpenApiProviderResponse,
+  OpenApiSettings,
+  OpenApiMockResponse,
+  OpenApiPublication,
+  OpenApiPublicationPage,
+  OpenApiPublicationPreview,
+  PublicOpenApiDocument,
   SpecificationRevisionPageResponse,
   SpecificationRevisionResponse,
   WorkspaceListResponse,
@@ -65,6 +75,17 @@ export function toService(service: CatalogResponse["services"][number]): Service
 }
 
 export const specxApi = {
+  async executeRequestAgent(workspaceId: string, serviceId: string, id: string, input: AgentRequest, signal: AbortSignal) {
+    return (await getBackendTransport()).request<AgentResponse>(`/api/specx/services/${encodeURIComponent(serviceId)}/openapi/agent/requests/${id}`, {
+      method: "POST",
+      headers: { "x-specx-workspace-id": workspaceId },
+      body: input,
+      signal,
+    });
+  },
+  async cancelRequestAgent(workspaceId: string, serviceId: string, id: string) {
+    return (await getBackendTransport()).request<void>(`/api/specx/services/${encodeURIComponent(serviceId)}/openapi/agent/requests/${id}`, { method: "DELETE", headers: { "x-specx-workspace-id": workspaceId } });
+  },
   isDesktop: () => isTauriRuntime(),
   migrationRetry: async () => {
     if (!isTauriRuntime()) return { ready: true };
@@ -220,6 +241,30 @@ export const specxApi = {
   createIntegration(workspaceId: string, input: { id: string; provider: string; displayName: string; secretId: string | null; permissions: string[] }) {
     return request<IntegrationResponse>("/api/specx/integrations", { method: "POST", body: input }, workspaceId);
   },
+  getOpenApiProvider(workspaceId: string, serviceId: string) {
+    return request<OpenApiProviderResponse>(`/api/specx/services/${encodeURIComponent(serviceId)}/openapi`, {}, workspaceId);
+  },
+  updateOpenApiSettings(workspaceId: string, serviceId: string, input: Omit<OpenApiSettings, "updatedAt" | "mockEnabled">) {
+    return request<OpenApiSettings>(`/api/specx/services/${encodeURIComponent(serviceId)}/openapi/settings`, { method: "PUT", body: input }, workspaceId);
+  },
+  enableOpenApiMock(workspaceId: string, serviceId: string) {
+    return request<OpenApiMockResponse>(`/api/specx/services/${encodeURIComponent(serviceId)}/openapi/mock`, { method: "POST" }, workspaceId);
+  },
+  disableOpenApiMock(workspaceId: string, serviceId: string) {
+    return request<void>(`/api/specx/services/${encodeURIComponent(serviceId)}/openapi/mock`, { method: "DELETE" }, workspaceId);
+  },
+  createOpenApiEnvironment(workspaceId: string, serviceId: string, input: OpenApiEnvironmentInput & { id: string; slug?: string }) {
+    return request<OpenApiEnvironment>(`/api/specx/services/${encodeURIComponent(serviceId)}/openapi/environments`, { method: "POST", body: input }, workspaceId);
+  },
+  updateOpenApiEnvironment(workspaceId: string, serviceId: string, environmentId: string, input: OpenApiEnvironmentInput & { slug: string }) {
+    return request<OpenApiEnvironment>(`/api/specx/services/${encodeURIComponent(serviceId)}/openapi/environments/${encodeURIComponent(environmentId)}`, { method: "PUT", body: input }, workspaceId);
+  },
+  deleteOpenApiEnvironment(workspaceId: string, serviceId: string, environmentId: string) {
+    return request<void>(`/api/specx/services/${encodeURIComponent(serviceId)}/openapi/environments/${encodeURIComponent(environmentId)}`, { method: "DELETE" }, workspaceId);
+  },
+  resolveOpenApiEnvironment(workspaceId: string, serviceId: string, environmentId: string) {
+    return request<OpenApiRuntimeEnvironment>(`/api/specx/services/${encodeURIComponent(serviceId)}/openapi/environments/${encodeURIComponent(environmentId)}/resolve`, { method: "POST" }, workspaceId);
+  },
   createTag(workspaceId: string, tag: { id: string; name: string; color: string }) {
     return request<TagResponse>("/api/specx/tags", { method: "POST", headers: { "idempotency-key": idempotencyKey("tag") }, body: tag }, workspaceId);
   },
@@ -250,6 +295,21 @@ export const specxApi = {
   },
   deleteSpecification(workspaceId: string, specificationId: string, etag: string) {
     return request<void>(`/api/specx/specifications/${encodeURIComponent(specificationId)}`, { method: "DELETE", headers: { "if-match": etag } }, workspaceId);
+  },
+  listOpenApiPublications(workspaceId: string, id: string, offset = 0) {
+    return request<OpenApiPublicationPage>(`/api/specx/specifications/${encodeURIComponent(id)}/publications?offset=${offset}`, {}, workspaceId);
+  },
+  previewOpenApiPublication(workspaceId: string, id: string, version: number) {
+    return request<OpenApiPublicationPreview>(`/api/specx/specifications/${encodeURIComponent(id)}/publication-preview/${version}`, {}, workspaceId);
+  },
+  publishOpenApi(workspaceId: string, id: string, input: { version: number; title: string; description: string; theme: "light" | "dark"; showDownload: boolean; allowTryIt: boolean; digest: string; environments?: PublicOpenApiEnvironment[] }) {
+    return request<OpenApiPublication>(`/api/specx/specifications/${encodeURIComponent(id)}/publications`, { method: "POST", body: input }, workspaceId);
+  },
+  revokeOpenApiPublication(workspaceId: string, id: string, publicationId: string) {
+    return request<void>(`/api/specx/specifications/${encodeURIComponent(id)}/publications/${encodeURIComponent(publicationId)}`, { method: "DELETE" }, workspaceId);
+  },
+  getPublicOpenApiDocument(id: string) {
+    return request<PublicOpenApiDocument>(`/api/specx/public/openapi/${encodeURIComponent(id)}`);
   },
   listSpecificationRevisions(workspaceId: string, specificationId: string, limit = 50, offset = 0) {
     return request<SpecificationRevisionPageResponse>(`/api/specx/specifications/${encodeURIComponent(specificationId)}/revisions?limit=${limit}&offset=${offset}`, {}, workspaceId);

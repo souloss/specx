@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref } from "vue";
 import { Settings, Palette, FolderTree, Keyboard, Info, KeyRound, Search, X, Sun, Moon, SunMoon } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import AppSelect from "@/components/ui/AppSelect.vue";
 import ShortcutSettings from "./ShortcutSettings.vue";
 import AppReleasePanel from "./AppReleasePanel.vue";
 import RepositoryCredentialsSettings from "./RepositoryCredentialsSettings.vue";
@@ -143,40 +143,38 @@ onBeforeUnmount(clearThemePalettePreview);
             <div class="settings-appearance-top-grid">
               <div class="settings-appearance-field min-w-0">
                 <label for="color-palette" class="text-sm font-medium">{{ t("settings.palette") }}</label>
-                <Select :model-value="themePalette" @update:model-value="(value) => setThemePalette(value as typeof themePalette)" @update:open="(open) => !open && clearThemePalettePreview()">
-                  <SelectTrigger id="color-palette" class="h-8 w-full gap-1" :aria-label="t('settings.palette')"
-                    ><SelectValue
-                      ><span class="flex items-center gap-1"><span class="h-3 w-3 rounded-full border border-border" :style="{ background: APP_THEME_PALETTES.find((option) => option.value === themePalette)?.previewColor }" />{{ paletteNames[themePalette] }}</span></SelectValue
-                    ></SelectTrigger
+                <AppSelect
+                  id="color-palette"
+                  :model-value="themePalette"
+                  class="h-8 w-full gap-1"
+                  :aria-label="t('settings.palette')"
+                  @update:model-value="setThemePalette"
+                  @update:open="(open) => !open && clearThemePalettePreview()"
+                  @option-preview="(value) => previewThemePalette(value as typeof themePalette)"
+                  @option-leave="clearThemePalettePreview"
+                >
+                  <option v-for="option in APP_THEME_PALETTES" :key="option.value" :value="option.value">{{ paletteNames[option.value] }}</option>
+                  <template #selected
+                    ><span class="flex items-center gap-2"><span class="h-3 w-3 shrink-0 rounded-full border border-border" :style="{ background: APP_THEME_PALETTES.find((option) => option.value === themePalette)?.previewColor }" />{{ paletteNames[themePalette] }}</span></template
                   >
-                  <SelectContent @pointerleave="clearThemePalettePreview"
-                    ><SelectItem v-for="option in APP_THEME_PALETTES" :key="option.value" :value="option.value" @pointerenter="previewThemePalette(option.value)" @focus="previewThemePalette(option.value)"
-                      ><span class="flex items-center gap-2"><span class="h-3 w-3 rounded-full border border-border" :style="{ background: option.previewColor }" />{{ paletteNames[option.value] }}</span></SelectItem
-                    ></SelectContent
+                  <template #option="{ value, label }"
+                    ><span class="flex items-center gap-2"><span class="h-3 w-3 shrink-0 rounded-full border border-border" :style="{ background: APP_THEME_PALETTES.find((option) => option.value === value)?.previewColor }" />{{ label }}</span></template
                   >
-                </Select>
+                </AppSelect>
               </div>
               <div class="settings-appearance-field min-w-0">
                 <label for="ui-font-family" class="text-sm font-medium">{{ t("settings.font") }}</label>
-                <Select :model-value="uiFontPreset" @update:model-value="selectUiFontPreset">
-                  <SelectTrigger id="ui-font-family" class="h-8 w-full" :aria-label="t('settings.font')"
-                    ><SelectValue>{{ uiFontOptions.find((option) => option.value === uiFontPreset)?.label }}</SelectValue></SelectTrigger
-                  >
-                  <SelectContent>
-                    <SelectItem v-for="option in uiFontOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-                  </SelectContent>
-                </Select>
+                <AppSelect id="ui-font-family" :model-value="uiFontPreset" class="h-8 w-full" :aria-label="t('settings.font')" @update:model-value="selectUiFontPreset">
+                  <option v-for="option in uiFontOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+                </AppSelect>
                 <Input v-if="uiFontPreset === 'custom'" :model-value="customFontName" class="mt-2 h-8" :aria-label="t('settings.fontCustomAria')" :placeholder="t('settings.fontCustomPlaceholder')" @update:model-value="updateCustomFont" />
               </div>
               <div class="settings-appearance-field min-w-0">
                 <label for="app-language" class="text-sm font-medium">{{ t("settings.language") }}</label>
-                <Select :model-value="i18n.global.locale.value" @update:model-value="(value) => typeof value === 'string' && ['zh-CN', 'en'].includes(value) && setLocale(value as 'zh-CN' | 'en')">
-                  <SelectTrigger id="app-language" class="h-8 w-full" :aria-label="t('settings.language')"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="zh-CN">{{ t("settings.languageChinese") }}</SelectItem>
-                    <SelectItem value="en">{{ t("settings.languageEnglish") }}</SelectItem>
-                  </SelectContent>
-                </Select>
+                <AppSelect id="app-language" :model-value="i18n.global.locale.value" class="h-8 w-full" :aria-label="t('settings.language')" @update:model-value="(value) => ['zh-CN', 'en'].includes(value) && setLocale(value as 'zh-CN' | 'en')">
+                  <option value="zh-CN">{{ t("settings.languageChinese") }}</option>
+                  <option value="en">{{ t("settings.languageEnglish") }}</option>
+                </AppSelect>
               </div>
             </div>
             <div class="settings-appearance-theme-grid">

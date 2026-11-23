@@ -10,6 +10,7 @@ import DialogOverlay from "./DialogOverlay.vue";
 import { useDialogLayerOrder } from "./useDialogLayerOrder";
 import { cn } from "@/lib/common/utils";
 import { translate } from "@/i18n";
+import { useAppearancePortal } from "../useAppearancePortal";
 
 defineOptions({
   inheritAttrs: false,
@@ -27,10 +28,11 @@ const delegatedProps = reactiveOmit(props, "class", "showOverlay", "showCloseBut
 const forwarded = useForwardPropsEmits(delegatedProps, emits);
 
 const { layerStyle } = useDialogLayerOrder();
+const appearancePortal = useAppearancePortal();
 </script>
 
 <template>
-  <DialogPortal>
+  <DialogPortal :to="appearancePortal">
     <DialogOverlay v-if="props.showOverlay" :style="layerStyle" />
     <div data-slot="dialog-positioner" :style="layerStyle" class="fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none">
       <DialogContent
