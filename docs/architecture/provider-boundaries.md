@@ -14,6 +14,15 @@ Controller 位于 Core 与 Provider 之间。它观察资源的期望状态和�
 
 Provider 负责声明的格式或能力实现，例如 Markdown 预览、Git ref 解析、仓库快照读取和 Webhook 注册。它接收 Controller 发出的最小授权上下文，返回版本化结果、证据和诊断；不复制身份系统，不直接写核心表，不将服务凭据暴露给浏览器。Provider 不直接调用另一个领域 Controller。
 
+OpenAPI provider follows the same boundary. Its service-level directory is a
+projection of parsed specifications, while provider settings (schema display,
+operation id visibility, default server and default environment) and named
+environments are durable service facts. An environment is a user-facing label,
+Base URL, and enabled variable set; it is not a storage class or a new persistence
+backend. Non-sensitive values can be listed for editing, while sensitive values are
+kept in the platform Secret store and resolved only for an explicit Try-it request.
+The resolve response is `no-store` and is never copied into the workspace catalog.
+
 一期不要求独立 Controller 集群、Provider 进程、复杂插件包或插件市场。纯 UI 的 Markdown 贡献可以随 Web 发布；仓库同步先由内置 Controller 调用受控 Git Provider 完成。未来涉及不可信代码、用户输入执行或高资源消耗时，再使用受管进程或执行池隔离。
 
 代码来源 Provider 遵循相同边界：Core 只保存已有 Git `Repository`、服务关联

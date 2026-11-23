@@ -15,6 +15,9 @@ export type ResourceTreeNode = {
   serviceId?: string;
   specificationId?: string;
   operationKey?: string;
+  modelRef?: string;
+  modelsDirectory?: boolean;
+  searchText?: string;
   providerKind?: SpecificationKind;
   providerIcon?: Component;
   providerRoot?: boolean;

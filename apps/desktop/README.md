@@ -12,12 +12,14 @@
 | `src/components/sidebar/` | 资源树的键盘、右键菜单、内联命名、拖放与定位 |
 | `src/components/settings/` | 设置分类、外观、导航偏好与快捷键 |
 | `src/components/ui/` | 通用控件，不依赖 specX 领域 |
+| `src/components/specifications/` | 规范编辑与历史入口。Markdown 和 OpenAPI 的专属视图各自独立，OpenAPI 按文档、设计、环境、发布与调试组织 |
 | `src/stores/workspace.ts` | 工作区事实、打开的服务/规范标签与加载生命周期 |
+| `src/stores/specifications/` | 规范专属的响应式状态，工作区负责注入当前作用域 |
 | `src/stores/navigationStore.ts` | 目录命令、命名草稿、筛选、定位与 API 接线 |
 | `src/stores/settingsStore.ts` | 当前设备的导航偏好、经典/分隔布局和设置页状态 |
 | `src/lib/sidebar/` | 目录布局算法和 SpecX catalog 适配，便于独立测试 |
 | `src/lib/backend/` | 统一 client、HTTP/Tauri transport、错误与安全存储 |
-| `src/lib/specifications/` | 规范类型注册表与创建流程适配 |
+| `src/lib/specifications/` | 规范类型注册表及各格式的创建、导入、目录规则。OpenAPI 的契约解析、交互逻辑、Worker 和对应测试放在所属子目录 |
 | `src/composables/` | 主题、拖放、尺寸、标签滚动和快捷键等界面能力 |
 | `src/i18n/` | 简体中文和英文资源、语言偏好与运行时翻译 |
 | `src/styles/` | RGB 基础 tokens、主题色板、OKLCH 渐进增强、应用壳和资源内容样式 |
@@ -25,6 +27,10 @@
 
 依赖方向为组件 → store → client/纯函数 → transport。组件不得直接访问
 数据库或调用原生业务命令。`specx-core` 的领域规则也不迁到前端。
+
+新增规范类型时，在该格式目录中定义创建字段、文件类型和内容检查，并在注册表中登记。
+有专属目录结构的格式可以提供节点构建函数。通用导入和服务目录消费这些定义，
+规范视图继续由服务面板接入。
 
 ```sh
 pnpm --dir apps/desktop dev

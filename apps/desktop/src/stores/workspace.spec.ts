@@ -5,6 +5,7 @@ import { specxApi } from "@/lib/backend/client";
 import { catalogFixture } from "@/test/catalogFixture";
 import { installMemoryStorage } from "@/test/browserStorage";
 import type { Catalog } from "@/types/domain";
+import { ApiError } from "@/lib/backend/types";
 
 vi.mock("@/lib/backend/client", () => ({
   specxApi: {
@@ -136,6 +137,9 @@ describe("catalog loading", () => {
 
     expect(workspace.catalog?.specifications[0]).toMatchObject({ kind: "openapi", title: "Accounts API", version: 2 });
     expect(workspace.tabs[0]).toMatchObject({ operationKey: "GET:/accounts", title: "List accounts" });
+    vi.mocked(specxApi.loadCatalog).mockResolvedValue(JSON.parse(JSON.stringify(workspace.catalog)) as Catalog);
+    await workspace.refresh();
+    expect(workspace.tabs[0]).toMatchObject({ operationKey: "GET:/accounts", title: "List accounts" });
   });
 
   it("retains the draft and records the remote representation on an ETag conflict", async () => {
@@ -154,6 +158,130 @@ describe("catalog loading", () => {
     expect(workspace.specificationDraft("spec")).toMatchObject({ status: "conflict", title: "本地版本", remote: { title: "远端版本", version: 2 } });
   });
 
+  it("saves an operation with the current ETag while preserving an independent full-source draft", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    const specification = workspace.catalog.specifications[0]!;
+    specification.kind = "openapi";
+    workspace.updateSpecificationDraft("spec", { title: "Unsaved source title", content: "Unsaved full-source content" });
+    specification.etag = '"spec-v2"';
+    specification.version = 2;
+    vi.mocked(specxApi.updateSpecification).mockResolvedValue({ ...specification, content: "Saved operation content", etag: '"spec-v3"', version: 3 });
+    await expect(workspace.saveOpenApiOperation("spec", "Saved operation content")).resolves.toBe(true);
+    expect(specxApi.updateSpecification).toHaveBeenCalledWith("workspace", "spec", { title: specification.title, content: "Saved operation content" }, '"spec-v2"');
+    expect(workspace.catalog.specifications[0]).toMatchObject({ content: "Saved operation content", version: 3, kind: "openapi" });
+    expect(workspace.specificationDraft("spec")).toMatchObject({ title: "Unsaved source title", content: "Unsaved full-source content", baseEtag: '"spec-v1"' });
+  });
+
+  it("refreshes a concurrent operation change without overwriting its source draft", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    workspace.catalog.specifications[0]!.kind = "openapi";
+    workspace.updateSpecificationDraft("spec", { title: "Local source draft", content: "local" });
+    vi.mocked(specxApi.updateSpecification).mockRejectedValue(new ApiError("Conflict", 412));
+    const remote = catalogFixture();
+    remote.specifications[0] = { ...remote.specifications[0]!, kind: "openapi", content: "remote", version: 2, etag: '"spec-v2"' };
+    vi.mocked(specxApi.loadCatalog).mockResolvedValue(remote);
+    await expect(workspace.saveOpenApiOperation("spec", "operation draft")).rejects.toThrow("设计草稿仍保留");
+    expect(workspace.catalog.specifications[0]).toMatchObject({ content: "remote", version: 2 });
+    expect(workspace.specificationDraft("spec")).toMatchObject({ title: "Local source draft", content: "local", baseEtag: '"spec-v1"' });
+  });
+
+  it("does not put a late operation save into another workspace", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    workspace.catalog.specifications[0]!.kind = "openapi";
+    const saved = { ...workspace.catalog.specifications[0]!, content: "saved in original workspace", version: 2 };
+    let complete!: (value: typeof saved) => void;
+    vi.mocked(specxApi.updateSpecification).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const saving = workspace.saveOpenApiOperation("spec", saved.content);
+    workspace.catalog = { ...catalogFixture(), workspace: { id: "another-workspace", name: "Another", tenantName: "Tenant" } };
+    complete(saved);
+    await expect(saving).resolves.toBe(true);
+    expect(workspace.catalog.specifications[0]!.content).not.toBe(saved.content);
+  });
+
+  it("opens a newly created API while keeping its specification root tab", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    const specification = workspace.catalog.specifications[0]!;
+    specification.kind = "openapi";
+    workspace.openSpecification("spec");
+    const content = JSON.stringify({ openapi: "3.0.3", info: { title: "API", version: "1" }, paths: { "/orders/{id}": { get: { responses: { "200": { description: "OK" } } } } } });
+    vi.mocked(specxApi.updateSpecification).mockResolvedValue({ ...specification, content, version: 2, etag: '"spec-v2"' });
+    await workspace.saveOpenApiOperation("spec", content, { key: "GET:/orders/{id}", title: "GET /orders/{id}" });
+    expect(workspace.tabs).toHaveLength(2);
+    expect(workspace.tabs[0]).toMatchObject({ id: "specification-spec", operationKey: undefined });
+    expect(workspace.activeTab).toMatchObject({ operationKey: "GET:/orders/{id}", title: "GET /orders/{id}" });
+  });
+
+  it("persists separate model targets and retargets only the renamed model tab", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    const specification = workspace.catalog.specifications[0]!;
+    specification.kind = "openapi";
+    specification.content = JSON.stringify({ openapi: "3.1.0", components: { schemas: { Pet: { type: "object" }, Other: { type: "string" } } } });
+    workspace.openSpecification("spec");
+    workspace.openOpenApiModel("spec");
+    workspace.openOpenApiModel("spec", "#/components/schemas/Pet");
+    workspace.openOpenApiModel("spec", "#/components/schemas/Pet");
+    expect(workspace.tabs).toHaveLength(3);
+    expect(workspace.activeTab).toMatchObject({ modelRef: "#/components/schemas/Pet", title: "Pet" });
+    const next = JSON.stringify({ openapi: "3.1.0", components: { schemas: { PetRecord: { type: "object" }, Other: { type: "string" } } } });
+    vi.mocked(specxApi.updateSpecification).mockResolvedValue({ ...specification, content: next, version: 2, etag: '"spec-v2"' });
+    await workspace.saveOpenApiDocument("spec", next, { kind: "model", previousReference: "#/components/schemas/Pet", reference: "#/components/schemas/PetRecord", title: "PetRecord" });
+    expect(specxApi.updateSpecification).toHaveBeenCalledWith("workspace", "spec", { title: specification.title, content: next }, specification.etag);
+    expect(workspace.activeTab).toMatchObject({ modelRef: "#/components/schemas/PetRecord", title: "PetRecord" });
+    expect(workspace.tabs[1]).toMatchObject({ modelsDirectory: true, title: "数据模型" });
+    vi.mocked(specxApi.loadCatalog).mockResolvedValue(JSON.parse(JSON.stringify(workspace.catalog)) as Catalog);
+    await workspace.refresh();
+    expect(workspace.activeTab).toMatchObject({ modelRef: "#/components/schemas/PetRecord", title: "PetRecord" });
+    workspace.openOpenApiModel("spec", "#/components/schemas/Missing");
+    expect(workspace.activeTab?.modelRef).toBe("#/components/schemas/PetRecord");
+  });
+  it("retargets the active operation tab after an address change and removes a stale duplicate tab", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    const specification = workspace.catalog.specifications[0]!;
+    specification.kind = "openapi";
+    workspace.openSpecification("spec", "POST:/orders/{orderId}", "Stale destination tab");
+    workspace.openSpecification("spec", "GET:/orders/{id}", "GET /orders/{id}");
+    const content = JSON.stringify({ openapi: "3.0.3", info: { title: "API", version: "1" }, paths: { "/orders/{orderId}": { post: { responses: { "200": { description: "OK" } } } } } });
+    vi.mocked(specxApi.updateSpecification).mockResolvedValue({ ...specification, content, version: 2, etag: '"spec-v2"' });
+    await workspace.saveOpenApiOperation("spec", content, { previousKey: "GET:/orders/{id}", key: "POST:/orders/{orderId}", title: "POST /orders/{orderId}" });
+    expect(workspace.tabs).toHaveLength(1);
+    expect(workspace.activeTab).toMatchObject({ id: "specification-spec-POST%3A%2Forders%2F%7BorderId%7D", operationKey: "POST:/orders/{orderId}", title: "POST /orders/{orderId}" });
+  });
+
+  it("keeps the user's current page when an API creation finishes after they navigate away", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    const specification = workspace.catalog.specifications[0]!;
+    specification.kind = "openapi";
+    workspace.openSpecification("spec");
+    const content = JSON.stringify({ openapi: "3.0.3", info: { title: "API", version: "1" }, paths: { "/orders": { get: { responses: { "200": { description: "OK" } } } } } });
+    const saved = { ...specification, content, version: 2, etag: '"spec-v2"' };
+    let complete!: (value: typeof saved) => void;
+    vi.mocked(specxApi.updateSpecification).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const saving = workspace.saveOpenApiOperation("spec", content, { key: "GET:/orders", title: "GET /orders" });
+    workspace.openOverview("svc-a");
+    complete(saved);
+    await saving;
+    expect(workspace.activeTab).toMatchObject({ kind: "overview", serviceId: "svc-a" });
+    expect(workspace.catalog.specifications[0]!.content).toBe(content);
+    expect(workspace.tabs.some((tab) => tab.operationKey === "GET:/orders")).toBe(false);
+  });
+
   it("requires an explicit decision before closing a tab with unsaved content", async () => {
     const workspace = useWorkspaceStore();
     workspace.catalog = catalogFixture();
@@ -168,12 +296,14 @@ describe("catalog loading", () => {
     expect(workspace.specificationDraft("spec")).toBeUndefined();
   });
 
-  it("restores a revision through the current ETag and refreshes history", async () => {
+  it.each(["markdown", "openapi"] as const)("restores a %s revision through the current ETag and preserves its provider", async (kind) => {
     const workspace = useWorkspaceStore();
     workspace.catalog = catalogFixture();
+    workspace.catalog.specifications[0]!.kind = kind;
+    const content = kind === "markdown" ? "# 恢复内容" : JSON.stringify({ openapi: "3.1.0", info: { title: "Restored", version: "1" }, paths: {} });
     vi.mocked(specxApi.restoreSpecificationRevision).mockResolvedValue({
       ...workspace.catalog.specifications[0],
-      content: "# 恢复内容",
+      content,
       version: 3,
       etag: '"spec-v3"',
     });
@@ -182,15 +312,17 @@ describe("catalog loading", () => {
     await expect(workspace.restoreSpecificationRevision("spec", 1)).resolves.toBe(true);
 
     expect(specxApi.restoreSpecificationRevision).toHaveBeenCalledWith("workspace", "spec", 1, '"spec-v1"');
-    expect(workspace.catalog.specifications[0]).toMatchObject({ content: "# 恢复内容", version: 3 });
+    expect(workspace.catalog.specifications[0]).toMatchObject({ content, kind, version: 3 });
     expect(specxApi.listSpecificationRevisions).toHaveBeenCalledWith("workspace", "spec");
   });
 
-  it("updates the catalog and records the result after synchronizing a managed specification", async () => {
+  it.each(["markdown", "openapi"] as const)("preserves the %s provider when synchronizing a managed specification", async (kind) => {
     const workspace = useWorkspaceStore();
     workspace.catalog = catalogFixture();
+    workspace.catalog.specifications[0]!.kind = kind;
+    const content = kind === "markdown" ? "# Synced" : JSON.stringify({ openapi: "3.1.0", info: { title: "Synced", version: "1" }, paths: {} });
     vi.mocked(specxApi.syncSpecification).mockResolvedValue({
-      specification: { ...workspace.catalog.specifications[0], content: "# Synced", contentHash: "sha256:synced", version: 2, etag: '"spec-v2"' },
+      specification: { ...workspace.catalog.specifications[0], content, contentHash: "sha256:synced", version: 2, etag: '"spec-v2"' },
       snapshotId: "snapshot-1",
       manifestHash: "sha256:manifest",
       resolvedCommit: "a".repeat(40),
@@ -203,7 +335,7 @@ describe("catalog loading", () => {
     await expect(workspace.syncSpecification("spec")).resolves.toMatchObject({ changed: true, providerVersion: "git-cli" });
 
     expect(specxApi.syncSpecification).toHaveBeenCalledWith("workspace", "spec");
-    expect(workspace.catalog.specifications[0]).toMatchObject({ content: "# Synced", version: 2, contentHash: "sha256:synced" });
+    expect(workspace.catalog.specifications[0]).toMatchObject({ content, kind, version: 2, contentHash: "sha256:synced" });
     expect(workspace.specificationSyncFor("spec")).toMatchObject({ changed: true, resolvedCommit: "a".repeat(40) });
   });
 

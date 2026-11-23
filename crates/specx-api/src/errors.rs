@@ -56,6 +56,16 @@ macro_rules! error_catalog {
 
 // Each entry owns one stable machine code and one localized summary key.
 error_catalog! {
+    AgentTargetDenied => (403, "agent_target_denied", "apiError.agentTargetDenied"),
+    AgentTimeout => (504, "agent_timeout", "apiError.agentTimeout"),
+    AgentCancelled => (409, "agent_cancelled", "apiError.agentCancelled"),
+    AgentConnectionFailed => (502, "agent_connection_failed", "apiError.agentConnectionFailed"),
+    AgentResolveFailed => (502, "agent_resolve_failed", "apiError.agentResolveFailed"),
+    AgentResponseReadFailed => (502, "agent_response_read_failed", "apiError.agentResponseReadFailed"),
+    AgentResponseDecodingFailed => (502, "agent_response_decoding_failed", "apiError.agentResponseDecodingFailed"),
+    AgentResponseHeadersTooLarge => (502, "agent_response_headers_too_large", "apiError.agentResponseHeadersTooLarge"),
+    AgentTlsFailed => (502, "agent_tls_failed", "apiError.agentTlsFailed"),
+    AgentRedirectLimit => (502, "agent_redirect_limit", "apiError.agentRedirectLimit"),
     InvalidCredentials => (401, "invalid_credentials", "apiError.invalidCredentials"),
     Unauthorized => (401, "unauthorized", "apiError.unauthorized"),
     Forbidden => (403, "forbidden", "apiError.forbidden"),

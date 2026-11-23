@@ -44,6 +44,8 @@ const pendingDelete = ref<ResourceTreeNode | null>(null);
 const deleting = ref(false);
 const editingService = computed(() => (editingServiceId.value ? (workspace.catalog?.services.find((service) => service.id === editingServiceId.value) ?? null) : null));
 const pendingCloseTab = computed(() => workspace.tabs.find((tab) => tab.id === workspace.pendingCloseTabId));
+const narrowViewport = ref(false);
+let viewportQuery: MediaQueryList | undefined;
 useAppShortcuts(
   () => {
     void nextTick(() => sidebar.value?.focusSearch());
@@ -52,18 +54,27 @@ useAppShortcuts(
 );
 onMounted(() => {
   window.addEventListener("beforeunload", beforeUnload);
-  if (window.matchMedia("(max-width: 640px)").matches) settings.sidebarCollapsed = true;
+  viewportQuery = window.matchMedia("(max-width: 640px)");
+  updateViewport();
+  viewportQuery.addEventListener("change", updateViewport);
   void workspace.initialize();
   void updates.initialize().then(() => {
     if (updates.autoCheck) return updates.check();
   });
 });
+function updateViewport() {
+  narrowViewport.value = viewportQuery?.matches ?? false;
+  if (narrowViewport.value) settings.sidebarCollapsed = true;
+}
 function beforeUnload(event: BeforeUnloadEvent) {
   if (!workspace.tabs.some((tab) => tab.specificationId && workspace.hasUnsavedSpecification(tab.specificationId))) return;
   event.preventDefault();
   event.returnValue = "";
 }
-onBeforeUnmount(() => window.removeEventListener("beforeunload", beforeUnload));
+onBeforeUnmount(() => {
+  window.removeEventListener("beforeunload", beforeUnload);
+  viewportQuery?.removeEventListener("change", updateViewport);
+});
 function newService(parentId: string | null = null) {
   settings.sidebarCollapsed = false;
   editingServiceId.value = null;
@@ -116,10 +127,13 @@ async function resolvePendingClose(action: "save" | "discard" | "cancel") {
     <AppToolbar @new-service="newService" @new-specification="showSpecification = true" @logout="logout" />
     <div class="app-content-row flex min-h-0 flex-1" :class="settings.appLayout === 'classic' ? 'app-layout-classic' : 'app-panel-gutter gap-1 p-1'">
       <AppSidebar v-if="!settings.sidebarCollapsed" ref="sidebar" :sidebar-width="sidebarWidth" @start-resize="startSidebarResize" @collapse="settings.sidebarCollapsed = true" @remove="pendingDelete = $event" @create-service="newService" @edit-service="editService" />
+      <Transition name="sidebar-backdrop">
+        <button v-if="narrowViewport && !settings.sidebarCollapsed" type="button" class="mobile-sidebar-backdrop" :aria-label="t('sidebar.closeNavigation')" @click="settings.sidebarCollapsed = true" />
+      </Transition>
       <main class="flex min-w-0 flex-1 flex-col overflow-hidden bg-background" :class="{ 'specx-panel': settings.appLayout === 'separated' }">
         <AppTabBar v-if="workspace.tabs.length || settings.showSettingsPage" />
         <SettingsPage v-if="settings.showSettingsPage" />
-        <div v-else-if="workspace.activeTab && workspace.activeServiceId" class="min-h-0 flex-1 overflow-hidden p-4 sm:p-6 lg:p-8">
+        <div v-else-if="workspace.activeTab && workspace.activeServiceId" class="min-h-0 flex-1 overflow-hidden" :class="workspace.activeTab.operationKey ? 'px-5 pb-0' : 'p-4 sm:p-6 lg:p-8'">
           <ServicePanel :catalog="workspace.catalog" :service-id="workspace.activeServiceId" :tab="workspace.activeTab" @open-specification="workspace.openSpecification" @new-specification="showSpecification = true" />
         </div>
         <div v-else class="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 p-8">

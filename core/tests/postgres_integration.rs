@@ -459,3 +459,89 @@ async fn postgres_migration_failure_rolls_back_the_entire_transaction() {
         .expect("probe query");
     assert!(exists.is_none());
 }
+
+#[tokio::test]
+async fn postgres_publication_is_scoped_persistent_and_cascades_with_revision() {
+    use specx_core::persistence::OpenApiPublication;
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let Some(url) = postgres_url() else { return };
+    let first = PostgresStore::connect(&url, 4).await.unwrap();
+    let peer = PostgresStore::connect(&url, 4).await.unwrap();
+    let suffix = Utc::now().timestamp_nanos_opt().unwrap();
+    let context = WorkspaceContext {
+        tenant_id: format!("publish-{suffix}"),
+        workspace_id: "default".into(),
+        actor_id: "owner".into(),
+    };
+    let service = format!("publish-service-{suffix}");
+    let id = format!("publish-spec-{suffix}");
+    let mut core = Core::default();
+    core.create_service(
+        &context,
+        Service {
+            id: service.clone(),
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            group_id: None,
+            name: "Publication".into(),
+            slug: "publication".into(),
+            description: String::new(),
+            tag_ids: vec![],
+            updated_at: Utc::now().to_rfc3339(),
+            archived: false,
+        },
+    )
+    .unwrap();
+    core.create_specification(
+        &context,
+        Specification {
+            id: id.clone(),
+            tenant_id: context.tenant_id.clone(),
+            workspace_id: context.workspace_id.clone(),
+            service_id: service,
+            title: "Published".into(),
+            kind: SpecificationKind::OpenApi,
+            content: r#"{"openapi":"3.1.0","info":{"title":"Test","version":"1"},"paths":{}}"#.into(),
+            version: 1,
+            content_hash: String::new(),
+            updated_at: Utc::now().to_rfc3339(),
+        },
+    )
+    .unwrap();
+    first.persist_core(&core, &context).await.unwrap();
+    let revision = first.specification_revision(&context, &id, 1).await.unwrap().unwrap();
+    let publication = OpenApiPublication {
+        id: format!("published-{suffix}"),
+        version: 1,
+        title: "Stable".into(),
+        description: "Published API".into(),
+        theme: "light".into(),
+        show_download: true,
+        allow_try_it: true,
+        created_at: Utc::now().to_rfc3339(),
+    };
+    let audit = AuditEvent {
+        tenant_id: context.tenant_id.clone(),
+        workspace_id: context.workspace_id.clone(),
+        actor_id: context.actor_id.clone(),
+        request_id: "delete-published-spec".into(),
+        action: "delete".into(),
+        resource_type: "specification".into(),
+        resource_id: id.clone(),
+        created_at: Utc::now().to_rfc3339(),
+    };
+    assert!(first.create_openapi_publication(&context, &id, &publication, &revision.content, &audit).await.unwrap());
+    assert!(!peer.create_openapi_publication(&context, &id, &publication, &revision.content, &audit).await.unwrap());
+    assert_eq!(
+        peer.public_openapi_document(&publication.id).await.unwrap(),
+        Some((publication.clone(), revision.content))
+    );
+    let stranger = WorkspaceContext { workspace_id: "elsewhere".into(), ..context.clone() };
+    assert!(peer.openapi_publications(&stranger, &id, 50, 0).await.unwrap().is_empty());
+    assert!(!peer.revoke_openapi_publication(&stranger, &id, &publication.id, &audit).await.unwrap());
+    assert!(peer.revoke_openapi_publication(&context, &id, &publication.id, &audit).await.unwrap());
+    assert!(first.public_openapi_document(&publication.id).await.unwrap().is_none());
+    assert!(first.create_openapi_publication(&context, &id, &publication, "snapshot", &audit).await.unwrap());
+    first.delete_specification(&context, &id, &audit).await.unwrap();
+    assert!(peer.public_openapi_document(&publication.id).await.unwrap().is_none());
+}

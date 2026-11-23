@@ -53,3 +53,13 @@
 - Controller 先作为 Host 内的受控任务落地；在出现第二个真实消费者和明确隔离需求前，不引入通用插件市场、独立控制器集群或任意资源调度框架。
 
 控制器边界、快照模型和失败恢复约定见[控制器与同步链路](controller-model.md)。
+
+## 目标决策：服务、规范与 Provider 的版本及页面边界
+
+- Service 和 Specification Instance 是稳定身份的持久资源；实例正文通过不可变 Specification Revision 演进。
+- 仓库 branch/tag 是可移动来源引用，必须记录解析后的 commit；Provider 的目录、Tag、Operation 等节点是绑定 Revision 的投影，不拥有独立版本树。
+- 需要冻结整个服务时，使用可选的不可变 ServiceRelease 清单引用来源 commit 和各实例修订；第一阶段不要求建设发布清单。
+- 平台负责资源身份、通用页面框架、来源/历史/权限和导航；Provider 负责规范内容解析、投影和专属视图。所有可见节点都必须可打开，目录节点有自己的概览。
+- OpenAPI 专属能力暂停扩张，先完成节点导航、分类概览、服务概览收敛及 Markdown/OpenAPI Provider 的统一页面接入。
+
+实施顺序、兼容盘点及验收标准见[统一资源版本模型与页面边界路线图](resource-versioning-and-ui-roadmap.md)。

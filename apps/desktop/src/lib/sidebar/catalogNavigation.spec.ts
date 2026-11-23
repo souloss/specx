@@ -91,6 +91,25 @@ describe("catalog navigation adaptation", () => {
     const withOpenApi = layoutTree(catalogSidebarLayout(catalog), catalog)[0]!.children![0]!.children!.find((node) => node.id === "svc-a")!;
     expect(withOpenApi.children?.map((node) => node.providerKind).sort()).toEqual(["markdown", "openapi"]);
   });
+  it("retains model and operation matches through service ancestors and combines service tags with descendant search", () => {
+    const catalog = catalogFixture();
+    catalog.specifications.push({
+      ...catalog.specifications[0]!,
+      id: "api-models",
+      serviceId: "svc-b",
+      kind: "openapi",
+      title: "Invoices API",
+      content: JSON.stringify({ openapi: "3.1.0", paths: { "/invoices": { get: { summary: "Find overdue payments", tags: ["Invoices"] } } }, components: { schemas: { Invoice: { properties: { paymentStatus: { type: "string" } } } } } }),
+    });
+    const nodes = layoutTree(catalogSidebarLayout(catalog), catalog);
+    const flatten = (items: typeof nodes): typeof nodes => items.flatMap((node) => [node, ...flatten(node.children ?? [])]);
+    const search = filterResourceTree(nodes, "paymentStatus", catalog, "critical");
+    expect(flatten(search).some((node) => node.modelRef === "#/components/schemas/Invoice")).toBe(true);
+    expect(flatten(search).some((node) => node.modelsDirectory)).toBe(true);
+    expect(flatten(filterResourceTree(nodes, "overdue", catalog)).some((node) => node.operationKey === "GET:/invoices")).toBe(true);
+    expect(filterResourceTree(nodes, "paymentStatus", catalog, "not-assigned")).toEqual([]);
+    expect(flatten(filterResourceTree(nodes, "^数据模型$", catalog, "", /^数据模型$/)).some((node) => node.modelRef)).toBe(true);
+  });
   it("rejects dragging a group into its own descendant without changing the source", () => {
     const layout = catalogSidebarLayout(catalogFixture());
     const snapshot = JSON.stringify(layout);

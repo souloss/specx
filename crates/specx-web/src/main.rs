@@ -15,7 +15,9 @@ use tower_http::{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(env::var("RUST_LOG").unwrap_or_else(|_| "specx_web=info,tower_http=info".into()))
+        .with_env_filter(
+            env::var("RUST_LOG").unwrap_or_else(|_| "specx_web=info,specx_api=warn,tower_http=info".into()),
+        )
         .init();
 
     let paths = AppPaths::from_env();
@@ -29,6 +31,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         api = api.with_public_origin(&origin)?;
     }
     api = api.with_backup_storage_from_env().await?;
+    api = api.with_request_agent_origins(
+        env::var("SPECX_AGENT_ALLOWED_ORIGINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )?;
     api = api.with_webhook_secret(env::var("SPECX_WEBHOOK_SECRET").ok());
 
     let password = env::var("SPECX_PASSWORD").map_err(|_| "SPECX_PASSWORD must be set")?;

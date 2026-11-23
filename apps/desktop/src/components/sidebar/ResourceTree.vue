@@ -50,6 +50,10 @@ const rows = computed(() => {
 function reportError(error: unknown) {
   toast(error instanceof Error ? error.message : t("tree.operationFailed"), 5000);
 }
+function selectNode(node: ResourceTreeNode) {
+  navigation.select(node);
+  if (typeof window.matchMedia === "function" && window.matchMedia("(max-width: 640px)").matches) settings.sidebarCollapsed = true;
+}
 async function commit() {
   try {
     await navigation.commitName();
@@ -88,7 +92,7 @@ function menuItems(node: ResourceTreeNode): ContextMenuItem[] {
         ];
   const group = node.type === "resource-group";
   if (node.type === "directory" || node.type === "leaf") {
-    if (node.specificationId) return [{ label: t("tree.openSpecification"), icon: node.providerIcon ?? FileText, action: () => navigation.select(node) }];
+    if (node.specificationId) return [{ label: t("tree.openSpecification"), icon: node.providerIcon ?? FileText, action: () => selectNode(node) }];
     return [{ label: t(node.children?.length && navigation.expandedIds.has(node.id) ? "tree.collapseNode" : "tree.expandNode", { name: node.label }), icon: node.providerIcon ?? Folder, action: () => navigation.toggle(node.id) }];
   }
   const items: ContextMenuItem[] = group
@@ -98,7 +102,7 @@ function menuItems(node: ResourceTreeNode): ContextMenuItem[] {
         { label: navigation.expandedIds.has(node.id) ? t("tree.collapseGroup") : t("tree.expandGroup"), action: () => navigation.toggle(node.id) },
       ]
     : [
-        { label: t("tree.openService"), icon: Box, action: () => navigation.select(node) },
+        { label: t("tree.openService"), icon: Box, action: () => selectNode(node) },
         { label: t("tree.editService"), icon: Pencil, action: () => emit("editService", node.id) },
         {
           label: t("tree.moveToGroup"),
@@ -149,7 +153,7 @@ function onKeydown(event: KeyboardEvent) {
   } else if (event.key === "ArrowLeft" && current) {
     if (current.node.children?.length && current.expanded) navigation.toggle(current.node.id);
     else target = rows.value.findIndex((row) => row.node.id === current.node.parentId);
-  } else if (event.key === "Enter" && current) navigation.select(current.node);
+  } else if (event.key === "Enter" && current) selectNode(current.node);
   else return;
   event.preventDefault();
   if (rows.value[target]) navigation.selectedId = rows.value[target].node.id;
@@ -179,7 +183,7 @@ defineExpose({ reveal });
             'drop-inside': drag.targetId === node.id && drag.dropPosition === 'inside',
           }"
           :style="{ paddingLeft: `${8 + depth * 16}px` }"
-          @click="!drag.active && navigation.select(node)"
+          @click="!drag.active && selectNode(node)"
           @contextmenu="
             navigation.selectedId = node.id;
             onContextMenu($event);
@@ -199,7 +203,7 @@ defineExpose({ reveal });
             <ChevronRight class="h-3 w-3 transition-transform" :class="{ 'rotate-90': expanded }" />
           </button>
           <span v-else class="w-3 shrink-0" />
-          <component :is="node.providerRoot && node.providerIcon ? node.providerIcon : node.type === 'resource-group' || node.type === 'directory' ? (expanded ? FolderOpen : Folder) : (node.providerIcon ?? Box)" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <component :is="(node.providerRoot || node.modelsDirectory) && node.providerIcon ? node.providerIcon : node.type === 'resource-group' || node.type === 'directory' ? (expanded ? FolderOpen : Folder) : (node.providerIcon ?? Box)" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           <input
             v-if="navigation.naming?.id === node.id"
             :ref="nameInput"

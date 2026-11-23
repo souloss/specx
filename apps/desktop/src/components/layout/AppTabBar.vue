@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from "vue";
-import { X, FileText, Box, Settings } from "@lucide/vue";
+import { X, FileText, Box, Settings, Layers3 } from "@lucide/vue";
 import CustomContextMenu from "@/components/ui/CustomContextMenu.vue";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { translate } from "@/i18n";
+import EnvironmentContextControl from "./EnvironmentContextControl.vue";
 const workspace = useWorkspaceStore();
 const settings = useSettingsStore();
 const t = translate;
@@ -38,41 +39,44 @@ function keyboard(event: KeyboardEvent) {
 
 <template>
   <div class="app-tab-bar relative shrink-0 border-b border-border bg-muted/20" :class="{ 'classic-tab-layout': settings.appLayout === 'classic' }">
-    <div ref="tabsRef" role="tablist" :aria-label="t('tabs.ariaLabel')" class="app-tab-scroll flex h-9 min-w-0 items-center overflow-x-auto [scrollbar-width:none]" @wheel="onTabsWheel" @keydown="keyboard">
-      <CustomContextMenu
-        v-for="tab in workspace.tabs"
-        :key="tab.id"
-        :items="[
-          { label: t('tabs.close'), action: () => workspace.closeTab(tab.id) },
-          {
-            label: t('tabs.closeOthers'),
-            action: () => closeTabs(workspace.tabs.filter((item) => item.id !== tab.id).map((item) => item.id)),
-          },
-          {
-            label: t('tabs.closeAll'),
-            action: () => closeTabs(workspace.tabs.map((item) => item.id)),
-          },
-        ]"
-      >
-        <template #default="{ onContextMenu }"
-          ><div
-            role="tab"
-            :aria-selected="workspace.activeTabId === tab.id && !settings.showSettingsPage"
-            :tabindex="workspace.activeTabId === tab.id ? 0 : -1"
-            class="app-tab-pill group"
-            :class="{ active: workspace.activeTabId === tab.id && !settings.showSettingsPage }"
-            @click="activate(tab.id)"
-            @keydown.enter.prevent="activate(tab.id)"
-            @contextmenu="onContextMenu"
-            @auxclick="$event.button === 1 && workspace.closeTab(tab.id)"
-          >
-            <component :is="tab.kind === 'specification' ? FileText : Box" class="h-3 w-3 shrink-0" /><span class="max-w-44 truncate">{{ tab.title }}</span
-            ><button type="button" class="ml-2 rounded p-0.5 hover:bg-muted" :aria-label="t('tabs.closeTab', { name: tab.title })" @click.stop="workspace.closeTab(tab.id)"><X class="h-3 w-3" /></button></div
-        ></template>
-      </CustomContextMenu>
-      <div v-if="settings.showSettingsPage" role="tab" aria-selected="true" class="app-tab-pill active">
-        <Settings class="h-3 w-3" />{{ t("common.settings") }}<button :aria-label="t('tabs.closeSettings')" @click="settings.showSettingsPage = false"><X class="h-3 w-3" /></button>
+    <div class="app-tab-row">
+      <div ref="tabsRef" role="tablist" :aria-label="t('tabs.ariaLabel')" class="app-tab-scroll flex h-9 min-w-0 flex-1 items-center overflow-x-auto [scrollbar-width:none]" @wheel="onTabsWheel" @keydown="keyboard">
+        <CustomContextMenu
+          v-for="tab in workspace.tabs"
+          :key="tab.id"
+          :items="[
+            { label: t('tabs.close'), action: () => workspace.closeTab(tab.id) },
+            {
+              label: t('tabs.closeOthers'),
+              action: () => closeTabs(workspace.tabs.filter((item) => item.id !== tab.id).map((item) => item.id)),
+            },
+            {
+              label: t('tabs.closeAll'),
+              action: () => closeTabs(workspace.tabs.map((item) => item.id)),
+            },
+          ]"
+        >
+          <template #default="{ onContextMenu }"
+            ><div
+              role="tab"
+              :aria-selected="workspace.activeTabId === tab.id && !settings.showSettingsPage"
+              :tabindex="workspace.activeTabId === tab.id ? 0 : -1"
+              class="app-tab-pill group"
+              :class="{ active: workspace.activeTabId === tab.id && !settings.showSettingsPage }"
+              @click="activate(tab.id)"
+              @keydown.enter.prevent="activate(tab.id)"
+              @contextmenu="onContextMenu"
+              @auxclick="$event.button === 1 && workspace.closeTab(tab.id)"
+            >
+              <component :is="tab.modelRef || tab.modelsDirectory ? Layers3 : tab.kind === 'specification' ? FileText : Box" class="h-3 w-3 shrink-0" /><span class="max-w-44 truncate">{{ tab.title }}</span
+              ><button type="button" class="ml-2 rounded p-0.5 hover:bg-muted" :aria-label="t('tabs.closeTab', { name: tab.title })" @click.stop="workspace.closeTab(tab.id)"><X class="h-3 w-3" /></button></div
+          ></template>
+        </CustomContextMenu>
+        <div v-if="settings.showSettingsPage" role="tab" aria-selected="true" class="app-tab-pill active">
+          <Settings class="h-3 w-3" />{{ t("common.settings") }}<button :aria-label="t('tabs.closeSettings')" @click="settings.showSettingsPage = false"><X class="h-3 w-3" /></button>
+        </div>
       </div>
+      <EnvironmentContextControl />
     </div>
     <div v-if="hasTabOverflow" class="absolute inset-x-0 bottom-0 h-1 cursor-pointer bg-muted" @pointerdown="startScrollbarDrag"><div class="h-full rounded-full bg-muted-foreground/40" :style="{ marginLeft: `${scrollThumbLeftPercent}%`, width: `${scrollThumbWidthPercent}%` }" /></div>
   </div>

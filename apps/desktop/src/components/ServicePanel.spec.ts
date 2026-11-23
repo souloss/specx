@@ -5,12 +5,17 @@ import ServicePanel from "./ServicePanel.vue";
 import { catalogFixture } from "@/test/catalogFixture";
 
 const mockWorkspace = vi.hoisted(() => ({
+  workspaces: [],
   specificationCodeBindingFor: vi.fn(),
   specificationSyncFor: vi.fn(),
   loadSpecificationCodeBinding: vi.fn(),
   syncSpecification: vi.fn(),
   deleteSpecification: vi.fn(),
   openOverview: vi.fn(),
+  openApiProviderFor: vi.fn(() => null),
+  loadOpenApiProvider: vi.fn(async () => null),
+  serviceRepositoryFor: vi.fn(() => null),
+  loadServiceRepository: vi.fn(async () => null),
 }));
 
 vi.mock("@/stores/workspace", () => ({
@@ -141,6 +146,86 @@ describe("ServicePanel repository-managed specification", () => {
 
     const deleteButton = wrapper.findAll("button").find((button) => button.text().includes("删除规范"));
     expect(deleteButton?.attributes("data-variant")).toBe("destructive");
+    wrapper.unmount();
+  });
+
+  it("reloads source and environment metadata after a catalog refresh while guarding edits", async () => {
+    const catalog = catalogFixture();
+    catalog.specifications[0] = { ...catalog.specifications[0]!, kind: "openapi", content: JSON.stringify({ openapi: "3.1.0", paths: {} }) };
+    const binding = ref<null | { path: string }>(null);
+    mockWorkspace.specificationCodeBindingFor.mockImplementation(() => binding.value);
+    mockWorkspace.specificationSyncFor.mockReturnValue(null);
+    mockWorkspace.loadSpecificationCodeBinding.mockResolvedValue(null);
+    const wrapper = mount(ServicePanel, {
+      props: { catalog, serviceId: "svc-a", tab: { id: "specification-spec", kind: "specification", serviceId: "svc-a", specificationId: "spec", title: "API" } },
+      global: { stubs: { OpenApiPreview: { name: "OpenApiPreview", props: ["editable"], template: '<div data-testid="preview" />' }, SpecificationHistory: true, OpenApiOperationCreateDialog: true, SpecificationCodeBindingDialog: true, CodeBindingDialog: true, Dialog: true } },
+    });
+    await flushPromises();
+    const sourceCalls = mockWorkspace.loadSpecificationCodeBinding.mock.calls.length;
+    const providerCalls = mockWorkspace.loadOpenApiProvider.mock.calls.length;
+    const repositoryCalls = mockWorkspace.loadServiceRepository.mock.calls.length;
+    expect(wrapper.findComponent({ name: "OpenApiPreview" }).props("editable")).toBe(true);
+    let complete!: () => void;
+    mockWorkspace.loadSpecificationCodeBinding.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = () => {
+            binding.value = { path: "api.yaml" };
+            resolve(binding.value);
+          };
+        }),
+    );
+    await wrapper.setProps({ catalog: { ...catalog } });
+    expect(mockWorkspace.loadSpecificationCodeBinding).toHaveBeenCalledTimes(sourceCalls + 1);
+    expect(mockWorkspace.loadOpenApiProvider).toHaveBeenCalledTimes(providerCalls + 1);
+    expect(mockWorkspace.loadServiceRepository).toHaveBeenCalledTimes(repositoryCalls + 1);
+    expect(wrapper.findComponent({ name: "OpenApiPreview" }).props("editable")).toBe(false);
+    complete();
+    await flushPromises();
+    expect(wrapper.findComponent({ name: "OpenApiPreview" }).props("editable")).toBe(false);
+    expect(wrapper.text()).toContain("由仓库托管");
+    wrapper.unmount();
+  });
+
+  it("keeps whole-specification actions on the root when switching from source editing to an operation", async () => {
+    const catalog = catalogFixture();
+    catalog.specifications[0] = {
+      ...catalog.specifications[0]!,
+      kind: "openapi",
+      content: JSON.stringify({ openapi: "3.0.3", info: { title: "API", version: "1" }, paths: { "/pets": { get: { responses: { "200": { description: "OK" } } } } } }),
+    };
+    mockWorkspace.specificationCodeBindingFor.mockReturnValue(null);
+    mockWorkspace.specificationSyncFor.mockReturnValue(null);
+    mockWorkspace.loadSpecificationCodeBinding.mockResolvedValue(null);
+    const tab = { id: "specification-spec", kind: "specification" as const, serviceId: "svc-a", specificationId: "spec", title: "API" };
+    const wrapper = mount(ServicePanel, {
+      props: { catalog, serviceId: "svc-a", tab },
+      global: {
+        stubs: {
+          OpenApiPreview: { template: '<div data-testid="operation-preview" />' },
+          SpecificationEditor: { template: '<div data-testid="source-editor" />' },
+          SpecificationHistory: true,
+          SpecificationCodeBindingDialog: true,
+          CodeBindingDialog: true,
+          Dialog: true,
+        },
+      },
+    });
+    await flushPromises();
+    expect(wrapper.find(".spec-toolbar").text()).toContain("删除规范");
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("编辑规范"))!
+      .trigger("click");
+    expect(wrapper.find('[data-testid="source-editor"]').exists()).toBe(true);
+
+    await wrapper.setProps({ tab: { ...tab, id: "operation-get-pets", title: "GET /pets", operationKey: "GET:/pets" } });
+    expect(wrapper.find(".spec-toolbar").exists()).toBe(false);
+    expect(wrapper.find('[data-testid="source-editor"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="operation-preview"]').exists()).toBe(true);
+
+    await wrapper.setProps({ tab });
+    expect(wrapper.find('[data-testid="source-editor"]').exists()).toBe(true);
     wrapper.unmount();
   });
 });

@@ -2,7 +2,7 @@
 <script setup lang="ts">
 import type { DialogContentEmits, DialogContentProps } from "reka-ui";
 
-import { type HTMLAttributes } from "vue";
+import { type HTMLAttributes, type StyleValue } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { XIcon } from "@lucide/vue";
 import { DialogClose, DialogContent, DialogDescription, DialogPortal, VisuallyHidden, useForwardPropsEmits } from "reka-ui";
@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import DialogOverlay from "./DialogOverlay.vue";
 import { useDialogLayerOrder } from "./useDialogLayerOrder";
 import { translate } from "@/i18n";
+import { useAppearancePortal } from "../useAppearancePortal";
 
 defineOptions({
   inheritAttrs: false,
@@ -22,6 +23,7 @@ const props = withDefaults(
       class?: HTMLAttributes["class"];
       overlayClass?: HTMLAttributes["class"];
       portalClass?: HTMLAttributes["class"];
+      portalStyle?: StyleValue;
       showCloseButton?: boolean;
     }
   >(),
@@ -32,17 +34,18 @@ const props = withDefaults(
 const emits = defineEmits<DialogContentEmits>();
 const t = translate;
 
-const delegatedProps = reactiveOmit(props, "class", "overlayClass", "portalClass");
+const delegatedProps = reactiveOmit(props, "class", "overlayClass", "portalClass", "portalStyle");
 
 const forwarded = useForwardPropsEmits(delegatedProps, emits);
 
 const { layerStyle } = useDialogLayerOrder();
+const appearancePortal = useAppearancePortal();
 </script>
 
 <template>
-  <DialogPortal>
+  <DialogPortal :to="appearancePortal">
     <DialogOverlay :class="props.overlayClass" :style="layerStyle" />
-    <div data-slot="dialog-positioner" :style="layerStyle" :class="cn('fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none', props.portalClass)">
+    <div data-slot="dialog-positioner" :style="[layerStyle, props.portalStyle]" :class="cn('fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none', props.portalClass)">
       <DialogContent
         data-slot="dialog-content"
         v-bind="{ ...$attrs, ...forwarded }"

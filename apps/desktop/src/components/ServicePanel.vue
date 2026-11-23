@@ -1,14 +1,21 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { CircleCheck, Edit3, FileText, GitBranch, History, Plus, RefreshCw, Trash2 } from "@lucide/vue";
+import { CircleCheck, Edit3, FileText, GitBranch, History, Plus, RefreshCw, Share2, Trash2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import MarkdownPreview from "./MarkdownPreview.vue";
-import OpenApiPreview from "./OpenApiPreview.vue";
-import SpecificationEditor from "./SpecificationEditor.vue";
-import SpecificationHistory from "./SpecificationHistory.vue";
+import MarkdownPreview from "./specifications/markdown/MarkdownPreview.vue";
+import OpenApiModelsPanel from "./specifications/openapi/design/OpenApiModelsPanel.vue";
+import type { OpenApiModelChange } from "@/lib/specifications/openapi/contract/openapiModels";
+import OpenApiPreview from "./specifications/openapi/OpenApiPreview.vue";
+import OpenApiPublicationDialog from "./specifications/openapi/publishing/OpenApiPublicationDialog.vue";
+import { isTauriRuntime } from "@/lib/backend/runtime";
+import OpenApiProviderPanel from "./specifications/openapi/OpenApiProviderPanel.vue";
+import OpenApiOperationCreateDialog from "./specifications/openapi/design/OpenApiOperationCreateDialog.vue";
+import type { OpenApiOperationChange } from "@/lib/specifications/openapi/design/openapiOperationEditing";
+import SpecificationEditor from "./specifications/SpecificationEditor.vue";
+import SpecificationHistory from "./specifications/SpecificationHistory.vue";
 import CodeBindingDialog from "./CodeBindingDialog.vue";
-import SpecificationCodeBindingDialog from "./SpecificationCodeBindingDialog.vue";
+import SpecificationCodeBindingDialog from "./specifications/SpecificationCodeBindingDialog.vue";
 import TagBadge from "./TagBadge.vue";
 import { formatDate, groupPath } from "../lib/core";
 import { i18n, translate } from "@/i18n";
@@ -20,12 +27,17 @@ const emit = defineEmits<{ openSpecification: [id: string]; newSpecification: []
 const workspace = useWorkspaceStore();
 const service = computed(() => props.catalog.services.find((item) => item.id === props.serviceId));
 const activeSpecification = computed(() => (props.tab.specificationId ? props.catalog.specifications.find((item) => item.id === props.tab.specificationId) : undefined));
+const modelTarget = computed(() => Boolean(props.tab.modelRef || props.tab.modelsDirectory));
+const activeProvider = computed(() => (props.tab.providerKind === "openapi" || activeSpecification.value?.kind === "openapi" ? workspace.openApiProviderFor(props.serviceId) : null));
 const specifications = computed(() => props.catalog.specifications.filter((item) => item.serviceId === props.serviceId));
 const tags = computed(() => service.value?.tagIds.map((id) => props.catalog.tags.find((tag) => tag.id === id)).filter(Boolean) ?? []);
 const t = translate;
 const locale = computed(() => i18n.global.locale.value as "zh-CN" | "en");
 const editing = ref(false);
+const createOperationOpen = ref(false);
 const historyOpen = ref(false);
+const publicationOpen = ref(false);
+const canPublish = computed(() => !isTauriRuntime() && workspace.workspaces.some((item) => item.id === props.catalog.workspace.id && ["owner", "admin"].includes(item.role)));
 const deleteOpen = ref(false);
 const deleting = ref(false);
 const error = ref("");
@@ -50,8 +62,8 @@ function specificationKindLabel(kind: string) {
 }
 
 watch(
-  () => props.serviceId,
-  async (serviceId) => {
+  () => [props.serviceId, props.catalog] as const,
+  async ([serviceId]) => {
     const revision = ++repositoryLoadRevision;
     repositoryLoading.value = Boolean(serviceId);
     repositoryLoadError.value = "";
@@ -68,11 +80,21 @@ watch(
 );
 
 watch(
-  () => activeSpecification.value?.id,
-  async (specificationId) => {
+  () => [props.tab.kind, props.tab.providerKind, props.serviceId, activeSpecification.value?.kind, props.catalog] as const,
+  ([kind, providerKind, serviceId, specificationKind]) => {
+    if (((kind === "provider" && providerKind === "openapi") || (kind === "specification" && specificationKind === "openapi")) && !workspace.openApiProviderFor(serviceId)) void workspace.loadOpenApiProvider(serviceId);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [activeSpecification.value?.id, props.catalog] as const,
+  async ([specificationId]) => {
     const revision = ++sourceLoadRevision;
     editing.value = false;
+    createOperationOpen.value = false;
     historyOpen.value = false;
+    publicationOpen.value = false;
     deleteOpen.value = false;
     error.value = "";
     sourceMetadataLoading.value = Boolean(specificationId);
@@ -120,6 +142,24 @@ async function synchronizeSpecification() {
     syncing.value = false;
   }
 }
+
+function navigateModel(reference?: string) {
+  if (activeSpecification.value) workspace.openOpenApiModel(activeSpecification.value.id, reference);
+}
+function navigateOperation(key: string, title: string) {
+  if (activeSpecification.value) workspace.openSpecification(activeSpecification.value.id, key, title);
+}
+async function saveOpenApiModel(content: string, change?: OpenApiModelChange) {
+  const specification = activeSpecification.value;
+  if (!specification || specification.kind !== "openapi" || sourceMetadataLoading.value || repositoryManaged.value) return false;
+  return workspace.saveOpenApiDocument(specification.id, content, change);
+}
+
+async function saveOpenApiOperation(content: string, change?: OpenApiOperationChange) {
+  const specification = activeSpecification.value;
+  if (!specification || specification.kind !== "openapi" || repositoryManaged.value) return false;
+  return workspace.saveOpenApiOperation(specification.id, content, change);
+}
 </script>
 
 <template>
@@ -127,9 +167,16 @@ async function synchronizeSpecification() {
     <h2>{{ t("service.unavailable") }}</h2>
     <p>{{ t("service.unavailableDescription") }}</p>
   </div>
-  <div v-else-if="activeSpecification" class="spec-panel h-full min-h-0 overflow-auto pr-1">
-    <header v-if="!editing" class="spec-toolbar">
-      <div>
+  <div v-else-if="props.tab.kind === 'provider' && props.tab.providerKind === 'openapi'" class="spec-panel h-full min-h-0 overflow-auto pr-1">
+    <OpenApiProviderPanel v-if="activeProvider" :service-id="props.serviceId" :provider="activeProvider" />
+    <div v-else class="panel-empty">
+      <span class="eyebrow">{{ t("specification.kinds.openapi") }}</span>
+      <h2>{{ t("common.loading") }}</h2>
+    </div>
+  </div>
+  <div v-else-if="activeSpecification" class="spec-panel h-full min-h-0 overflow-auto pr-1" :class="{ 'spec-panel-openapi-operation': activeSpecification.kind === 'openapi' && Boolean(props.tab.operationKey || modelTarget) }">
+    <header v-if="!editing && !props.tab.operationKey && !modelTarget" class="spec-toolbar">
+      <div v-if="!props.tab.operationKey">
         <span class="eyebrow">{{ t("service.specificationHeading") }}</span>
         <h2>{{ props.tab.operationKey ? props.tab.title : activeSpecification.title }}</h2>
         <span class="muted">{{ props.tab.operationKey ? `${activeSpecification.title} · ` : `${service.name} · ` }}{{ t("service.updatedAt", { date: formatDate(activeSpecification.updatedAt, locale) }) }} · {{ t("specification.currentVersion", { version: activeSpecification.version }) }}</span>
@@ -138,7 +185,9 @@ async function synchronizeSpecification() {
         <span v-if="sourceMetadataLoading" class="text-xs text-muted-foreground">{{ t("common.loading") }}</span>
         <Button v-if="repositoryManaged" size="sm" :disabled="sourceMetadataLoading || syncing" @click="synchronizeSpecification"><RefreshCw class="h-3.5 w-3.5" :class="syncing ? 'animate-spin' : undefined" />{{ syncing ? t("specification.syncing") : t("specification.syncNow") }}</Button>
         <Button v-if="!repositoryManaged" size="sm" variant="outline" :disabled="sourceMetadataLoading" @click="specificationCodeBindingOpen = true"><GitBranch class="h-3.5 w-3.5" />{{ t("specification.bindCodeVersion") }}</Button>
+        <Button v-if="!repositoryManaged && activeSpecification.kind === 'openapi'" size="sm" :disabled="sourceMetadataLoading" @click="createOperationOpen = true"><Plus class="h-3.5 w-3.5" />{{ t("specification.openapiCreateOperation") }}</Button>
         <Button v-if="!repositoryManaged" size="sm" :disabled="sourceMetadataLoading" @click="editing = true"><Edit3 class="h-3.5 w-3.5" />{{ t("service.editSpecification") }}</Button>
+        <Button v-if="activeSpecification.kind === 'openapi' && canPublish" size="sm" variant="outline" @click="publicationOpen = true"><Share2 class="size-3.5" aria-hidden="true" />{{ t("openapiPublication.manage") }}</Button>
         <Button size="sm" variant="outline" :disabled="sourceMetadataLoading" @click="historyOpen = true"><History class="h-3.5 w-3.5" />{{ t("service.specificationHistory") }}</Button>
         <Button v-if="!repositoryManaged" size="sm" variant="destructive" :disabled="sourceMetadataLoading" @click="deleteOpen = true"><Trash2 class="h-3.5 w-3.5" />{{ t("service.deleteSpecification") }}</Button>
       </div>
@@ -157,9 +206,38 @@ async function synchronizeSpecification() {
       </div>
     </div>
     <p v-if="error" role="alert" class="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{{ error }}</p>
-    <SpecificationEditor v-if="editing && !repositoryManaged" :specification="activeSpecification" @close="editing = false" />
-    <div v-else class="spec-layout" :class="{ 'spec-layout-openapi': activeSpecification.kind === 'openapi' }">
-      <OpenApiPreview v-if="activeSpecification.kind === 'openapi'" :content="activeSpecification.content" :focus-operation-key="props.tab.operationKey" />
+    <SpecificationEditor v-if="editing && !repositoryManaged && !props.tab.operationKey" :specification="activeSpecification" @close="editing = false" />
+    <OpenApiModelsPanel
+      v-else-if="activeSpecification.kind === 'openapi' && modelTarget"
+      :key="`${activeSpecification.id}:${props.tab.modelRef ?? 'models'}`"
+      :content="activeSpecification.content"
+      :model-ref="props.tab.modelRef"
+      :specification-title="activeSpecification.title"
+      :editable="!sourceMetadataLoading && !repositoryManaged"
+      :draft-scope="JSON.stringify([props.catalog.workspace.id, activeSpecification.id])"
+      :save-document="saveOpenApiModel"
+      :navigate-model="navigateModel"
+      :navigate-operation="navigateOperation"
+    />
+    <div v-else class="spec-layout" :class="{ 'spec-layout-openapi': activeSpecification.kind === 'openapi', 'spec-layout-openapi-operation': activeSpecification.kind === 'openapi' && Boolean(props.tab.operationKey || modelTarget) }">
+      <OpenApiPreview
+        v-if="activeSpecification.kind === 'openapi'"
+        :key="activeSpecification.id"
+        :content="activeSpecification.content"
+        :focus-operation-key="props.tab.operationKey"
+        :service-id="props.serviceId"
+        :environments="activeProvider?.environments ?? []"
+        :default-environment-id="activeProvider?.settings.defaultEnvironmentId"
+        :default-server-url="activeProvider?.settings.defaultServerUrl"
+        :show-operation-id="activeProvider?.settings.showOperationId ?? true"
+        :schema-display="activeProvider?.settings.schemaDisplay ?? 'summary'"
+        :specification-title="activeSpecification.title"
+        :specification-version="activeSpecification.version"
+        :design-draft-scope="JSON.stringify([props.catalog.workspace.id, activeSpecification.id])"
+        :editable="!sourceMetadataLoading && !repositoryManaged"
+        :save-operation="saveOpenApiOperation"
+        :navigate-model="navigateModel"
+      />
       <MarkdownPreview v-else :content="activeSpecification.content" />
       <aside v-if="activeSpecification.kind !== 'openapi'" class="spec-meta">
         <span class="eyebrow">{{ t("service.serviceLabel") }}</span
@@ -168,7 +246,9 @@ async function synchronizeSpecification() {
         <span class="mt-3 text-xs">{{ t("specification.currentVersion", { version: activeSpecification.version }) }}</span>
       </aside>
     </div>
+    <OpenApiPublicationDialog v-if="publicationOpen && canPublish && activeSpecification.kind === 'openapi'" :key="activeSpecification.id" :specification="activeSpecification" :workspace-id="catalog.workspace.id" :environments="activeProvider?.environments" @close="publicationOpen = false" />
     <SpecificationHistory v-model:open="historyOpen" :specification="activeSpecification" :managed="repositoryManaged" />
+    <OpenApiOperationCreateDialog v-if="activeSpecification.kind === 'openapi'" v-model:open="createOperationOpen" :content="activeSpecification.content" :editable="!sourceMetadataLoading && !repositoryManaged" :save-operation="saveOpenApiOperation" />
     <SpecificationCodeBindingDialog v-model:open="specificationCodeBindingOpen" :specification-id="activeSpecification.id" :service-id="activeSpecification.serviceId" />
     <Dialog v-model:open="deleteOpen">
       <DialogContent>

@@ -6,6 +6,7 @@
 
 mod backup_storage;
 pub mod errors;
+mod request_agent;
 mod resources;
 
 use errors::{ErrorKind, ErrorResponse};
@@ -30,8 +31,9 @@ use sha2::{Digest, Sha256};
 use specx_controller::{FileContentStore, GitProviderError};
 use specx_core::persistence::{
     AuditEvent, BackupArtifact, ControllerTask, IdempotencyRecord, IntegrationRecord, LATEST_SCHEMA_VERSION,
-    PersistenceError, RepositorySnapshotFile, RepositorySyncSchedule, SecretRecord, SpecificationRevision, SqliteStore,
-    WebSession, WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
+    OpenApiEnvironmentRecord, OpenApiProviderSettingsRecord, OpenApiPublication, PersistenceError,
+    RepositorySnapshotFile, RepositorySyncSchedule, SecretRecord, SpecificationRevision, SqliteStore, WebSession,
+    WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
 };
 #[cfg(feature = "postgres")]
 use specx_core::postgres::PostgresStore;
@@ -75,6 +77,7 @@ pub struct ApiState {
     repository_validation: bool,
     public_origin: Option<PublicOrigin>,
     webhook_secret: Option<Arc<String>>,
+    request_agent: Arc<request_agent::AgentRuntime>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -535,6 +538,148 @@ impl StoreBackend {
                 let workspace_id = workspace_id.to_owned();
                 run_postgres_future(store.clone(), move |store| async move {
                     store.list_integrations(&tenant_id, &workspace_id).await
+                })
+            }
+        }
+    }
+
+    fn upsert_openapi_provider_settings(
+        &self,
+        settings: &OpenApiProviderSettingsRecord,
+    ) -> Result<(), PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.upsert_openapi_provider_settings(settings),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let settings = settings.clone();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.upsert_openapi_provider_settings(&settings).await
+                })
+            }
+        }
+    }
+
+    fn openapi_provider_settings(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        service_id: &str,
+    ) -> Result<Option<OpenApiProviderSettingsRecord>, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.openapi_provider_settings(tenant_id, workspace_id, service_id),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let tenant_id = tenant_id.to_owned();
+                let workspace_id = workspace_id.to_owned();
+                let service_id = service_id.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.openapi_provider_settings(&tenant_id, &workspace_id, &service_id).await
+                })
+            }
+        }
+    }
+
+    fn openapi_provider_settings_by_mock_public_id(
+        &self,
+        public_id: &str,
+    ) -> Result<Option<OpenApiProviderSettingsRecord>, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.openapi_provider_settings_by_mock_public_id(public_id),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let public_id = public_id.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.openapi_provider_settings_by_mock_public_id(&public_id).await
+                })
+            }
+        }
+    }
+
+    fn upsert_openapi_environment(&self, environment: &OpenApiEnvironmentRecord) -> Result<(), PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.upsert_openapi_environment(environment),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let environment = environment.clone();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.upsert_openapi_environment(&environment).await
+                })
+            }
+        }
+    }
+
+    fn list_openapi_environments(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        service_id: &str,
+    ) -> Result<Vec<OpenApiEnvironmentRecord>, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.list_openapi_environments(tenant_id, workspace_id, service_id),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let tenant_id = tenant_id.to_owned();
+                let workspace_id = workspace_id.to_owned();
+                let service_id = service_id.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.list_openapi_environments(&tenant_id, &workspace_id, &service_id).await
+                })
+            }
+        }
+    }
+
+    fn openapi_environment_by_id(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        service_id: &str,
+        id: &str,
+    ) -> Result<Option<OpenApiEnvironmentRecord>, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.openapi_environment_by_id(tenant_id, workspace_id, service_id, id),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let tenant_id = tenant_id.to_owned();
+                let workspace_id = workspace_id.to_owned();
+                let service_id = service_id.to_owned();
+                let id = id.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.openapi_environment_by_id(&tenant_id, &workspace_id, &service_id, &id).await
+                })
+            }
+        }
+    }
+
+    fn openapi_environment_id_exists(&self, id: &str) -> Result<bool, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.openapi_environment_id_exists(id),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let id = id.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.openapi_environment_id_exists(&id).await
+                })
+            }
+        }
+    }
+
+    fn delete_openapi_environment(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        service_id: &str,
+        id: &str,
+    ) -> Result<bool, PersistenceError> {
+        match self {
+            Self::Sqlite(store) => store.delete_openapi_environment(tenant_id, workspace_id, service_id, id),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(store) => {
+                let tenant_id = tenant_id.to_owned();
+                let workspace_id = workspace_id.to_owned();
+                let service_id = service_id.to_owned();
+                let id = id.to_owned();
+                run_postgres_future(store.clone(), move |store| async move {
+                    store.delete_openapi_environment(&tenant_id, &workspace_id, &service_id, &id).await
                 })
             }
         }
@@ -1233,6 +1378,7 @@ impl ApiState {
             repository_validation: false,
             public_origin: None,
             webhook_secret: None,
+            request_agent: Arc::new(request_agent::AgentRuntime::default()),
         }
     }
 
@@ -1254,6 +1400,7 @@ impl ApiState {
             repository_validation: true,
             public_origin: None,
             webhook_secret: None,
+            request_agent: Arc::new(request_agent::AgentRuntime::default()),
         }
     }
 
@@ -1272,6 +1419,7 @@ impl ApiState {
             repository_validation: true,
             public_origin: None,
             webhook_secret: None,
+            request_agent: Arc::new(request_agent::AgentRuntime::default()),
         }
     }
 
@@ -1305,7 +1453,17 @@ impl ApiState {
             repository_validation: true,
             public_origin: None,
             webhook_secret: None,
+            request_agent: Arc::new(request_agent::AgentRuntime::default()),
         })
+    }
+
+    /// Administrator grants for private origins; public destinations remain available.
+    pub fn with_request_agent_origins(mut self, origins: Vec<String>) -> Result<Self, PersistenceError> {
+        self.request_agent = Arc::new(
+            request_agent::AgentRuntime::new(origins)
+                .map_err(|_| PersistenceError::new("invalid request Agent origin policy"))?,
+        );
+        Ok(self)
     }
 
     /// Pin browser write requests to the origin published by a reverse proxy.
@@ -1765,7 +1923,10 @@ async fn authorize_request(State(state): State<ApiState>, mut request: Request, 
     }
     let result = if matches!(request.uri().path(), "/health" | "/ready" | "/openapi.json") {
         next.run(request).await
-    } else if request.uri().path().starts_with("/webhooks/repositories/") {
+    } else if request.uri().path().starts_with("/webhooks/repositories/")
+        || request.uri().path().starts_with("/mock/openapi/")
+        || (is_read_method(request.method()) && request.uri().path().starts_with("/public/openapi/"))
+    {
         // Repository webhooks authenticate with their HMAC signature in the
         // handler and deliberately do not require a browser workspace session.
         next.run(request).await
@@ -2075,6 +2236,7 @@ pub enum ApiError {
     NotReady,
     InvalidQuery,
     InvalidInput,
+    Conflict,
     LastOwnerRequired,
     IdempotencyConflict,
     PreconditionRequired,
@@ -2113,6 +2275,7 @@ impl IntoResponse for ApiError {
             Self::NotReady => ErrorKind::NotReady,
             Self::InvalidQuery => ErrorKind::InvalidQuery,
             Self::InvalidInput => ErrorKind::InvalidInput,
+            Self::Conflict => ErrorKind::Conflict,
             Self::LastOwnerRequired => ErrorKind::LastOwnerRequired,
             Self::IdempotencyConflict => ErrorKind::IdempotencyConflict,
             Self::PreconditionRequired => ErrorKind::PreconditionRequired,
@@ -2130,3 +2293,6 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod publication_tests;

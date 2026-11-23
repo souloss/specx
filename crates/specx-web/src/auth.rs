@@ -83,6 +83,16 @@ pub(crate) async fn request_context(
     mut request: Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Response {
+    request.headers_mut().remove("x-specx-tenant-id");
+    request.headers_mut().remove("x-specx-actor-id");
+    if request.uri().path().starts_with("/docs/openapi/") || is_publication_host(request.headers()) {
+        let mut response = next.run(request).await;
+        let headers = response.headers_mut();
+        headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+        headers.insert("x-robots-tag", HeaderValue::from_static("noindex, nofollow"));
+        headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+        return response;
+    }
     if request.uri().path().starts_with("/api/specx/webhooks/repositories/") {
         return next.run(request).await;
     }
@@ -106,6 +116,20 @@ pub(crate) async fn request_context(
         }
     }
     next.run(request).await
+}
+
+fn is_publication_host(headers: &axum::http::HeaderMap) -> bool {
+    let Some(host) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(':').next())
+    else {
+        return false;
+    };
+    let Some((label, domain)) = host.split_once('.') else {
+        return false;
+    };
+    label.len() == 32 && label.bytes().all(|byte| byte.is_ascii_hexdigit()) && !domain.is_empty()
 }
 
 fn session_token(host: &HostState, password: impl AsRef<str>) -> String {
@@ -178,5 +202,50 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(body, serde_json::to_value(ErrorKind::NotFound.body()).unwrap());
         }
+    }
+    #[tokio::test]
+    async fn anonymous_clients_cannot_supply_internal_identity_headers() {
+        let directory = tempfile::tempdir().unwrap();
+        let api = specx_api::ApiState::open(directory.path().join("specx.sqlite")).unwrap();
+        let host = HostState::new("test-password".into(), "test-secret".into());
+        let app = Router::new()
+            .nest("/api/specx", specx_api::router(api))
+            .layer(middleware::from_fn_with_state(host.clone(), request_context))
+            .with_state(host);
+        let response = app
+            .oneshot(
+                Request::get("/api/specx/catalog")
+                    .header("host", format!("{}.docs.example.test", "a".repeat(32)))
+                    .header("x-specx-tenant-id", "specx")
+                    .header("x-specx-workspace-id", "default")
+                    .header("x-specx-actor-id", "forged-owner")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn publication_subdomains_get_private_reader_headers_without_authentication() {
+        let host = HostState::new("test-password".into(), "test-secret".into());
+        let app = Router::new()
+            .fallback(|| async { axum::response::Html("<html>Published docs</html>") })
+            .layer(middleware::from_fn_with_state(host.clone(), request_context))
+            .with_state(host);
+        let response = app
+            .oneshot(
+                Request::get("/")
+                    .header("host", format!("{}.docs.example.test", "a".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(response.headers()["x-robots-tag"], "noindex, nofollow");
+        assert_eq!(response.headers()["x-frame-options"], "DENY");
     }
 }

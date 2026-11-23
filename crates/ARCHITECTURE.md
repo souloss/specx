@@ -19,6 +19,7 @@ framework crates for hypothetical features.
 | `specx-platform` | Environment-derived paths and shared database URL syntax | Standard library only; no business rules or drivers |
 | `specx-core` | Catalog invariants and SQLite/PostgreSQL persistence | May depend on types and pure formats; never on HTTP or UI |
 | `specx-controller` | Controller registration, event routing, bounded reconciliation, platform ContentStore, Git capability and the first Markdown controller adapter | Depends on types and pure capabilities; never on Core persistence, HTTP, UI or authorization |
+| `specx-request-agent` | Bounded HTTP execution, per-hop target policy, raw response bytes and connection telemetry | Depends on cURL and URL syntax; no persistence, API DTOs or UI |
 | `specx-api` | HTTP routes, API DTOs, authorization checks, storage selection facade | Depends on core; does not choose host login or browser state |
 | `specx-web` | Server startup, password session, static files, API mounting | Composes API and platform; does not implement catalog rules |
 

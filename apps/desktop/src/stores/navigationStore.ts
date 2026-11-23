@@ -126,9 +126,12 @@ export const useNavigationStore = defineStore("navigation", () => {
       settings.showSettingsPage = false;
       workspace.selectService(node.id);
     } else if (node.type === "leaf") {
-      if (node.specificationId) workspace.openSpecification(node.specificationId, node.operationKey, node.label);
+      if (node.specificationId && node.modelRef) workspace.openOpenApiModel(node.specificationId, node.modelRef);
+      else if (node.specificationId) workspace.openSpecification(node.specificationId, node.operationKey, node.label);
     } else if (node.type === "directory") {
-      if (node.specificationId) workspace.openSpecification(node.specificationId);
+      if (node.providerRoot && node.providerKind) workspace.openProvider(node.serviceId ?? node.parentId ?? "", node.providerKind);
+      else if (node.specificationId && node.modelsDirectory) workspace.openOpenApiModel(node.specificationId);
+      else if (node.specificationId) workspace.openSpecification(node.specificationId);
       toggle(node.id);
     } else toggle(node.id);
   }

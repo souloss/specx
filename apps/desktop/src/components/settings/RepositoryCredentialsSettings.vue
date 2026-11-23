@@ -4,7 +4,7 @@ import { KeyRound, RefreshCw, Save } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import AppSelect from "@/components/ui/AppSelect.vue";
 import { translate } from "@/i18n";
 import { useWorkspaceStore } from "@/stores/workspace";
 
@@ -79,12 +79,9 @@ async function save() {
     <div v-else class="max-w-xl space-y-4">
       <div class="space-y-2">
         <Label for="repository-credential-provider">{{ t("settings.repositoryCredentialProvider") }}</Label>
-        <Select v-model="provider">
-          <SelectTrigger id="repository-credential-provider" class="w-full"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem v-for="option in providerOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-          </SelectContent>
-        </Select>
+        <AppSelect id="repository-credential-provider" v-model="provider" size="form" class="w-full" :disabled="busy">
+          <option v-for="option in providerOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+        </AppSelect>
       </div>
       <div class="space-y-2">
         <Label for="repository-credential-value">{{ configured ? t("settings.repositoryCredentialRotate") : t("settings.repositoryCredential") }}</Label>

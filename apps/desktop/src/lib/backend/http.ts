@@ -12,6 +12,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
   const response = await fetch(path, {
     method: options.method ?? "GET",
+    signal: options.signal,
     headers,
     body,
     credentials: "include",

@@ -46,6 +46,13 @@ impl std::error::Error for OpenApiValidationError {}
 
 /// Parse and validate an OpenAPI 3 document without resolving network references.
 pub fn parse_openapi(value: &str) -> Result<OpenApiDocument, OpenApiValidationError> {
+    let document = parse_openapi_value(value)?;
+    parse_openapi_document_value(document)
+}
+
+/// Parse an OpenAPI document and retain its local object tree for providers
+/// that need to serve examples or inspect components after validation.
+pub fn parse_openapi_value(value: &str) -> Result<Value, OpenApiValidationError> {
     if value.len() > MAX_OPENAPI_BYTES {
         return Err(validation("$", "document exceeds the 5 MiB limit"));
     }
@@ -59,12 +66,13 @@ pub fn parse_openapi(value: &str) -> Result<OpenApiDocument, OpenApiValidationEr
                 })
         })
         .map_err(|error| validation("$", &format!("invalid JSON/YAML: {error}")))?;
-    parse_openapi_value(document)
+    reject_external_refs(&document, "$", 0)?;
+    parse_openapi_document_value(document.clone())?;
+    Ok(document)
 }
 
-fn parse_openapi_value(document: Value) -> Result<OpenApiDocument, OpenApiValidationError> {
+fn parse_openapi_document_value(document: Value) -> Result<OpenApiDocument, OpenApiValidationError> {
     let object = document.as_object().ok_or_else(|| validation("$", "document must be an object"))?;
-    reject_external_refs(&document, "$", 0)?;
     let version =
         object.get("openapi").and_then(Value::as_str).ok_or_else(|| validation("$.openapi", "must be a string"))?;
     if !(version.starts_with("3.0.") || version.starts_with("3.1.")) {

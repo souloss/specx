@@ -10,7 +10,8 @@
 
 use crate::persistence::{
     AuditEvent, BackupArtifact, ControllerTask, IdempotencyRecord, IntegrationRecord, LATEST_SCHEMA_VERSION,
-    PersistenceError, RepositorySnapshotFile, RepositorySyncSchedule, SecretRecord, SpecificationRevision, WebSession,
+    OpenApiEnvironmentRecord, OpenApiProviderSettingsRecord, OpenApiPublication, PersistenceError,
+    RepositorySnapshotFile, RepositorySyncSchedule, SecretRecord, SpecificationRevision, WebSession,
     WorkspaceInvitation, WorkspaceMember, WorkspaceMembership,
 };
 use crate::{
@@ -600,6 +601,107 @@ impl PostgresStore {
             .map_err(pg_error)?;
         transaction
             .execute("INSERT INTO schema_migrations(version) VALUES (17) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS openapi_provider_settings (
+                   tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+                   default_environment_id TEXT,
+                   default_server_url TEXT NOT NULL DEFAULT '',
+                   show_operation_id BOOLEAN NOT NULL DEFAULT TRUE,
+                   schema_display TEXT NOT NULL DEFAULT 'summary',
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY (tenant_id, workspace_id, service_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS openapi_environments (
+                   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+                   name TEXT NOT NULL, slug TEXT NOT NULL, base_url TEXT NOT NULL DEFAULT '',
+                   variables TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                   UNIQUE (tenant_id, workspace_id, service_id, slug)
+                 );
+                 CREATE INDEX IF NOT EXISTS openapi_environments_scope ON openapi_environments(tenant_id, workspace_id, service_id, name);",
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (18) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS openapi_workbenches (
+                   tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                   service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+                   revision BIGINT NOT NULL, etag TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL,
+                   PRIMARY KEY (tenant_id, workspace_id, service_id)
+                 );",
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (19) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .batch_execute(
+                "ALTER TABLE openapi_provider_settings ADD COLUMN IF NOT EXISTS mock_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+                 ALTER TABLE openapi_provider_settings ADD COLUMN IF NOT EXISTS mock_public_id TEXT;
+                 CREATE UNIQUE INDEX IF NOT EXISTS openapi_provider_mock_token ON openapi_provider_settings(mock_public_id) WHERE mock_public_id IS NOT NULL;",
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (20) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction.batch_execute("CREATE TABLE IF NOT EXISTS openapi_publications (
+                 id TEXT PRIMARY KEY, specification_id TEXT NOT NULL, version BIGINT NOT NULL,
+                 title TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL,
+                 UNIQUE (specification_id, version),
+                 FOREIGN KEY (specification_id, version) REFERENCES specification_revisions(specification_id, version) ON DELETE CASCADE
+               );").await.map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (21) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .batch_execute(
+                "ALTER TABLE openapi_publications ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''; \
+                 ALTER TABLE openapi_publications ADD COLUMN IF NOT EXISTS theme TEXT NOT NULL DEFAULT 'light'; \
+                 ALTER TABLE openapi_publications ADD COLUMN IF NOT EXISTS show_download BOOLEAN NOT NULL DEFAULT TRUE;",
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (22) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .batch_execute(
+                "ALTER TABLE openapi_publications ADD COLUMN IF NOT EXISTS allow_try_it BOOLEAN NOT NULL DEFAULT TRUE;",
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (23) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction.batch_execute("ALTER TABLE openapi_environments ADD COLUMN IF NOT EXISTS request_mode TEXT NOT NULL DEFAULT 'inherit';").await.map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (24) ON CONFLICT DO NOTHING", &[])
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .batch_execute(
+                "ALTER TABLE openapi_environments ADD COLUMN IF NOT EXISTS servers TEXT NOT NULL DEFAULT '[]';",
+            )
+            .await
+            .map_err(pg_error)?;
+        transaction
+            .execute("INSERT INTO schema_migrations(version) VALUES (25) ON CONFLICT DO NOTHING", &[])
             .await
             .map_err(pg_error)?;
         transaction.commit().await.map_err(pg_error)?;
@@ -1486,6 +1588,229 @@ impl PostgresStore {
                 updated_at: row.get(8),
             })
             .collect())
+    }
+
+    pub async fn upsert_openapi_provider_settings(
+        &self,
+        settings: &OpenApiProviderSettingsRecord,
+    ) -> Result<(), PersistenceError> {
+        self.client().await?.execute(
+            "INSERT INTO openapi_provider_settings(tenant_id,workspace_id,service_id,default_environment_id,default_server_url,show_operation_id,schema_display,mock_enabled,mock_public_id,updated_at)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+             ON CONFLICT(tenant_id,workspace_id,service_id) DO UPDATE SET default_environment_id=excluded.default_environment_id,default_server_url=excluded.default_server_url,show_operation_id=excluded.show_operation_id,schema_display=excluded.schema_display,mock_enabled=excluded.mock_enabled,mock_public_id=excluded.mock_public_id,updated_at=excluded.updated_at",
+            &[&settings.tenant_id, &settings.workspace_id, &settings.service_id, &settings.default_environment_id, &settings.default_server_url, &settings.show_operation_id, &settings.schema_display, &settings.mock_enabled, &settings.mock_public_id, &settings.updated_at],
+        ).await.map_err(pg_error)?;
+        Ok(())
+    }
+
+    pub async fn openapi_provider_settings(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        service_id: &str,
+    ) -> Result<Option<OpenApiProviderSettingsRecord>, PersistenceError> {
+        let row = self.client().await?.query_opt("SELECT tenant_id,workspace_id,service_id,default_environment_id,default_server_url,show_operation_id,schema_display,mock_enabled,mock_public_id,updated_at FROM openapi_provider_settings WHERE tenant_id=$1 AND workspace_id=$2 AND service_id=$3", &[&tenant_id, &workspace_id, &service_id]).await.map_err(pg_error)?;
+        Ok(row.map(|row| OpenApiProviderSettingsRecord {
+            tenant_id: row.get(0),
+            workspace_id: row.get(1),
+            service_id: row.get(2),
+            default_environment_id: row.get(3),
+            default_server_url: row.get(4),
+            show_operation_id: row.get(5),
+            schema_display: row.get(6),
+            mock_enabled: row.get(7),
+            mock_public_id: row.get(8),
+            updated_at: row.get(9),
+        }))
+    }
+
+    pub async fn openapi_provider_settings_by_mock_public_id(
+        &self,
+        public_id: &str,
+    ) -> Result<Option<OpenApiProviderSettingsRecord>, PersistenceError> {
+        let row = self.client().await?.query_opt("SELECT tenant_id,workspace_id,service_id,default_environment_id,default_server_url,show_operation_id,schema_display,mock_enabled,mock_public_id,updated_at FROM openapi_provider_settings WHERE mock_public_id=$1 AND mock_enabled=TRUE", &[&public_id]).await.map_err(pg_error)?;
+        Ok(row.map(|row| OpenApiProviderSettingsRecord {
+            tenant_id: row.get(0),
+            workspace_id: row.get(1),
+            service_id: row.get(2),
+            default_environment_id: row.get(3),
+            default_server_url: row.get(4),
+            show_operation_id: row.get(5),
+            schema_display: row.get(6),
+            mock_enabled: row.get(7),
+            mock_public_id: row.get(8),
+            updated_at: row.get(9),
+        }))
+    }
+
+    pub async fn upsert_openapi_environment(
+        &self,
+        environment: &OpenApiEnvironmentRecord,
+    ) -> Result<(), PersistenceError> {
+        self.client().await?.execute(
+            "INSERT INTO openapi_environments(id,tenant_id,workspace_id,service_id,name,slug,base_url,variables,created_at,updated_at,request_mode,servers)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,base_url=excluded.base_url,variables=excluded.variables,request_mode=excluded.request_mode,servers=excluded.servers,updated_at=excluded.updated_at",
+            &[&environment.id, &environment.tenant_id, &environment.workspace_id, &environment.service_id, &environment.name, &environment.slug, &environment.base_url, &environment.variables, &environment.created_at, &environment.updated_at, &environment.request_mode, &environment.servers],
+        ).await.map_err(pg_error)?;
+        Ok(())
+    }
+
+    pub async fn list_openapi_environments(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        service_id: &str,
+    ) -> Result<Vec<OpenApiEnvironmentRecord>, PersistenceError> {
+        let rows = self.client().await?.query("SELECT id,tenant_id,workspace_id,service_id,name,slug,base_url,variables,created_at,updated_at,request_mode,servers FROM openapi_environments WHERE tenant_id=$1 AND workspace_id=$2 AND service_id=$3 ORDER BY name,id", &[&tenant_id, &workspace_id, &service_id]).await.map_err(pg_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| OpenApiEnvironmentRecord {
+                id: row.get(0),
+                tenant_id: row.get(1),
+                workspace_id: row.get(2),
+                service_id: row.get(3),
+                name: row.get(4),
+                slug: row.get(5),
+                base_url: row.get(6),
+                variables: row.get(7),
+                created_at: row.get(8),
+                updated_at: row.get(9),
+                request_mode: row.get(10),
+                servers: row.get(11),
+            })
+            .collect())
+    }
+
+    pub async fn openapi_environment_by_id(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        service_id: &str,
+        id: &str,
+    ) -> Result<Option<OpenApiEnvironmentRecord>, PersistenceError> {
+        let row = self.client().await?.query_opt("SELECT id,tenant_id,workspace_id,service_id,name,slug,base_url,variables,created_at,updated_at,request_mode,servers FROM openapi_environments WHERE tenant_id=$1 AND workspace_id=$2 AND service_id=$3 AND id=$4", &[&tenant_id, &workspace_id, &service_id, &id]).await.map_err(pg_error)?;
+        Ok(row.map(|row| OpenApiEnvironmentRecord {
+            id: row.get(0),
+            tenant_id: row.get(1),
+            workspace_id: row.get(2),
+            service_id: row.get(3),
+            name: row.get(4),
+            slug: row.get(5),
+            base_url: row.get(6),
+            variables: row.get(7),
+            created_at: row.get(8),
+            updated_at: row.get(9),
+            request_mode: row.get(10),
+            servers: row.get(11),
+        }))
+    }
+
+    pub async fn openapi_environment_id_exists(&self, id: &str) -> Result<bool, PersistenceError> {
+        let row = self
+            .client()
+            .await?
+            .query_one("SELECT EXISTS(SELECT 1 FROM openapi_environments WHERE id=$1)", &[&id])
+            .await
+            .map_err(pg_error)?;
+        Ok(row.get(0))
+    }
+
+    pub async fn delete_openapi_environment(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        service_id: &str,
+        id: &str,
+    ) -> Result<bool, PersistenceError> {
+        Ok(self
+            .client()
+            .await?
+            .execute(
+                "DELETE FROM openapi_environments WHERE tenant_id=$1 AND workspace_id=$2 AND service_id=$3 AND id=$4",
+                &[&tenant_id, &workspace_id, &service_id, &id],
+            )
+            .await
+            .map_err(pg_error)?
+            == 1)
+    }
+
+    pub async fn openapi_publications(
+        &self,
+        context: &WorkspaceContext,
+        specification: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<OpenApiPublication>, PersistenceError> {
+        Ok(self.client().await?.query("SELECT p.id,p.version,p.title,p.description,p.theme,p.show_download,p.allow_try_it,p.created_at FROM openapi_publications p JOIN specification_revisions r ON r.specification_id=p.specification_id AND r.version=p.version WHERE r.tenant_id=$1 AND r.workspace_id=$2 AND r.specification_id=$3 ORDER BY p.version DESC LIMIT $4 OFFSET $5",
+            &[&context.tenant_id, &context.workspace_id, &specification, &limit, &offset]).await.map_err(pg_error)?
+            .into_iter().map(|row| OpenApiPublication { id: row.get(0), version: row.get(1), title: row.get(2), description: row.get(3), theme: row.get(4), show_download: row.get(5), allow_try_it: row.get(6), created_at: row.get(7) }).collect())
+    }
+
+    pub async fn create_openapi_publication(
+        &self,
+        context: &WorkspaceContext,
+        specification: &str,
+        publication: &OpenApiPublication,
+        content: &str,
+        audit: &AuditEvent,
+    ) -> Result<bool, PersistenceError> {
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(pg_error)?;
+        lock_workspace(&transaction, context).await?;
+        let changed = transaction.execute("INSERT INTO openapi_publications(id,specification_id,version,title,content,created_at,description,theme,show_download,allow_try_it) SELECT $5,r.specification_id,r.version,$6,$7,$8,$9,$10,$11,$12 FROM specification_revisions r WHERE r.tenant_id=$1 AND r.workspace_id=$2 AND r.specification_id=$3 AND r.version=$4 ON CONFLICT(specification_id,version) DO NOTHING",
+            &[&context.tenant_id, &context.workspace_id, &specification, &publication.version, &publication.id, &publication.title, &content, &publication.created_at, &publication.description, &publication.theme, &publication.show_download, &publication.allow_try_it]).await.map_err(pg_error)? == 1;
+        if changed {
+            insert_audit(&transaction, audit).await?;
+        }
+        transaction.commit().await.map_err(pg_error)?;
+        Ok(changed)
+    }
+
+    pub async fn revoke_openapi_publication(
+        &self,
+        context: &WorkspaceContext,
+        specification: &str,
+        id: &str,
+        audit: &AuditEvent,
+    ) -> Result<bool, PersistenceError> {
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(pg_error)?;
+        lock_workspace(&transaction, context).await?;
+        let changed = transaction.execute("DELETE FROM openapi_publications WHERE id=$4 AND EXISTS (SELECT 1 FROM specification_revisions r WHERE r.tenant_id=$1 AND r.workspace_id=$2 AND r.specification_id=$3 AND r.specification_id=openapi_publications.specification_id AND r.version=openapi_publications.version)",
+            &[&context.tenant_id, &context.workspace_id, &specification, &id]).await.map_err(pg_error)? == 1;
+        if changed {
+            insert_audit(&transaction, audit).await?;
+        }
+        transaction.commit().await.map_err(pg_error)?;
+        Ok(changed)
+    }
+
+    pub async fn public_openapi_document(
+        &self,
+        id: &str,
+    ) -> Result<Option<(OpenApiPublication, String)>, PersistenceError> {
+        Ok(self
+            .client()
+            .await?
+            .query_opt("SELECT id,version,title,description,theme,show_download,allow_try_it,created_at,content FROM openapi_publications WHERE id=$1", &[&id])
+            .await
+            .map_err(pg_error)?
+            .map(|row| {
+                (
+                    OpenApiPublication {
+                        id: row.get(0),
+                        version: row.get(1),
+                        title: row.get(2),
+                        description: row.get(3),
+                        theme: row.get(4),
+                        show_download: row.get(5),
+                        allow_try_it: row.get(6),
+                        created_at: row.get(7),
+                    },
+                    row.get(8),
+                )
+            }))
     }
 
     pub async fn update_specification_code_binding_if_current_with_audit(
@@ -3114,6 +3439,7 @@ fn create_pg_dump(
     let result = (|| {
         let args = vec![
             OsString::from("--format=custom"),
+            OsString::from("--exclude-table-data=public.openapi_publications"),
             OsString::from("--no-owner"),
             OsString::from("--file"),
             temporary.as_os_str().to_owned(),

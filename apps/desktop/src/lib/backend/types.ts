@@ -2,6 +2,7 @@ import { i18n, translate, type MessageKey } from "@/i18n";
 import zhCN from "@/i18n/locales/zh-CN";
 
 export type RequestOptions = {
+  signal?: AbortSignal;
   method?: string;
   headers?: Record<string, string>;
   body?: unknown;

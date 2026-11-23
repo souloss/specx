@@ -1,4 +1,5 @@
 use super::*;
+use crate::resources::is_allowed_openapi_server_url;
 use axum::body::Body;
 use http_body_util::BodyExt;
 use std::sync::OnceLock;
@@ -106,6 +107,23 @@ fn public_origin_parser_rejects_non_origins_and_normalizes_default_ports() {
     assert!(parse_public_origin("ftp://example.com").is_none());
 }
 
+#[test]
+fn openapi_server_url_validation_allows_http_and_relative_urls_only() {
+    for value in ["", "/api", "/v1/{version}", "http://localhost:4000", "HTTPS://api.example.test/{version}"] {
+        assert!(is_allowed_openapi_server_url(value), "expected {value:?} to be allowed");
+    }
+    for value in [
+        "//attacker.example",
+        "javascript:alert(1)",
+        "data:text/plain,hello",
+        "ftp://example.test",
+        "https:///missing-host",
+        "api.example.test",
+    ] {
+        assert!(!is_allowed_openapi_server_url(value), "expected {value:?} to be rejected");
+    }
+}
+
 #[tokio::test]
 async fn catalog_requires_context_and_persists_created_facts() {
     let state = ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap());
@@ -128,6 +146,213 @@ async fn catalog_requires_context_and_persists_created_facts() {
     let catalog: CatalogResponse = serde_json::from_slice(&body).unwrap();
     assert_eq!(catalog.services[0].slug, "gateway");
     assert_eq!(catalog.groups.len(), 1);
+}
+
+#[tokio::test]
+async fn openapi_provider_environments_and_settings_round_trip_without_secret_values() {
+    let state = ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap());
+    let app = router(state);
+    assert_eq!(
+        app.clone()
+            .oneshot(headers(axum::http::Request::get("/catalog")).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let service = headers(axum::http::Request::post("/services"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"svc-openapi","name":"OpenAPI service","slug":"openapi-service"}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(service).await.unwrap().status(), StatusCode::OK);
+
+    let unsafe_environment = headers(axum::http::Request::post("/services/svc-openapi/openapi/environments"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"env-unsafe","name":"Unsafe","baseUrl":"javascript:alert(1)","variables":[]}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(unsafe_environment).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let unsafe_server = headers(axum::http::Request::post("/services/svc-openapi/openapi/environments"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"env-unsafe","name":"Unsafe","baseUrl":"","servers":[{"id":"bad","name":"Bad","baseUrl":"file:///tmp/example"}]}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(unsafe_server).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let unsafe_settings = headers(axum::http::Request::put("/services/svc-openapi/openapi/settings"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"defaultEnvironmentId":null,"defaultServerUrl":"data:text/plain,unsafe","showOperationId":true,"schemaDisplay":"summary"}"#,
+        ))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(unsafe_settings).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let specification = headers(axum::http::Request::post("/specifications"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::json!({
+            "id": "openapi-spec",
+            "serviceId": "svc-openapi",
+            "title": "Accounts API",
+            "kind": "openapi",
+            "content": "openapi: 3.0.3\ninfo:\n  title: Accounts API\n  version: '1'\npaths:\n  /accounts:\n    get:\n      tags: [Accounts]\n      responses:\n        '200':\n          description: ok\n"
+        }).to_string()))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(specification).await.unwrap().status(), StatusCode::OK);
+
+    let create = headers(axum::http::Request::post("/services/svc-openapi/openapi/environments"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"env-local","name":"Local","baseUrl":"http://localhost:4000","servers":[{"id":"billing","name":"Billing","baseUrl":"https://billing.example.test/v1","requestMode":"agent"}],"variables":[{"key":"TENANT","value":"demo","sensitive":false,"enabled":true},{"key":"TOKEN","value":null,"sensitive":true,"enabled":true}]}"#))
+        .unwrap();
+    let response = app.clone().oneshot(create).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let environment: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(environment["baseUrl"], "http://localhost:4000");
+    assert_eq!(environment["variables"][0]["value"], "demo");
+    assert_eq!(environment["variables"][1]["value"], serde_json::Value::Null);
+    assert_eq!(environment["variables"][1]["hasValue"], false);
+    assert_eq!(environment["servers"][0]["id"], "billing");
+
+    let update = headers(axum::http::Request::put("/services/svc-openapi/openapi/environments/env-local"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"name":"Local","slug":"local","baseUrl":"http://localhost:4000","variables":[{"key":"TENANT","value":"demo"},{"key":"TOKEN","sensitive":true}]}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(update).await.unwrap().status(), StatusCode::OK);
+
+    let settings = headers(axum::http::Request::put("/services/svc-openapi/openapi/settings"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"defaultEnvironmentId":"env-local","defaultServerUrl":"","showOperationId":false,"schemaDisplay":"summary"}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(settings).await.unwrap().status(), StatusCode::OK);
+    let provider = headers(axum::http::Request::get("/services/svc-openapi/openapi")).body(Body::empty()).unwrap();
+    let body = app.clone().oneshot(provider).await.unwrap().into_body().collect().await.unwrap().to_bytes();
+    let provider: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(provider["settings"]["defaultEnvironmentId"], "env-local");
+    assert_eq!(provider["environments"].as_array().unwrap().len(), 1);
+    assert_eq!(provider["environments"][0]["servers"], environment["servers"]);
+    assert_eq!(provider["specificationCount"], 1);
+    assert_eq!(provider["operationCount"], 1);
+    assert_eq!(provider["tagCount"], 1);
+
+    let resolve = headers(axum::http::Request::post("/services/svc-openapi/openapi/environments/env-local/resolve"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(resolve).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get(axum::http::header::CACHE_CONTROL).unwrap(), "no-store");
+    let runtime: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(runtime["baseUrl"], "http://localhost:4000");
+    assert_eq!(runtime["servers"], environment["servers"]);
+    assert_eq!(runtime["variables"][0]["key"], "TENANT");
+    assert_eq!(runtime["variables"][0]["value"], "demo");
+    assert_eq!(runtime["variables"].as_array().unwrap().len(), 1);
+
+    let delete = headers(axum::http::Request::delete("/services/svc-openapi/openapi/environments/env-local"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(app.oneshot(delete).await.unwrap().status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn openapi_mock_endpoint_serves_examples_without_workspace_headers() {
+    let state = ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap());
+    let app = router(state.clone());
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                headers(axum::http::Request::post("/services"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"id":"svc-mock","name":"Mock service","slug":"mock-service"}"#))
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let specification = headers(axum::http::Request::post("/specifications"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::json!({
+            "id": "mock-spec",
+            "serviceId": "svc-mock",
+            "title": "Mock API",
+            "kind": "openapi",
+            "content": "openapi: 3.0.3\ninfo:\n  title: Mock API\n  version: '1'\npaths:\n  /accounts/{id}:\n    get:\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema:\n                allOf:\n                  - $ref: '#/components/schemas/AccountFields'\n                  - type: object\n                    properties:\n                      active:\n                        type: boolean\ncomponents:\n  schemas:\n    AccountFields:\n      type: object\n      properties:\n        id:\n          type: integer\n"
+        }).to_string()))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(specification).await.unwrap().status(), StatusCode::OK);
+    let enable = headers(axum::http::Request::post("/services/svc-mock/openapi/mock")).body(Body::empty()).unwrap();
+    let response = app.clone().oneshot(enable).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let token = payload["token"].as_str().unwrap().to_owned();
+    let token_hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+    let stored_by_raw_token =
+        state.inner.lock().await.store.openapi_provider_settings_by_mock_public_id(&token).unwrap();
+    let stored_by_hash =
+        state.inner.lock().await.store.openapi_provider_settings_by_mock_public_id(&token_hash).unwrap();
+    assert!(stored_by_raw_token.is_none());
+    assert_eq!(stored_by_hash.as_ref().and_then(|settings| settings.mock_public_id.as_ref()), Some(&token_hash));
+    let provider = headers(axum::http::Request::get("/services/svc-mock/openapi")).body(Body::empty()).unwrap();
+    let provider: serde_json::Value = serde_json::from_slice(
+        &app.clone().oneshot(provider).await.unwrap().into_body().collect().await.unwrap().to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(provider["settings"]["mockEnabled"], true);
+    assert!(provider.get("token").is_none());
+    let mock = axum::http::Request::get(format!("/mock/openapi/{token}/accounts/42")).body(Body::empty()).unwrap();
+    let response = app.clone().oneshot(mock).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("access-control-allow-origin").unwrap(), "*");
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["id"], 0);
+    assert_eq!(body["active"], true);
+    let rotate = headers(axum::http::Request::post("/services/svc-mock/openapi/mock")).body(Body::empty()).unwrap();
+    let rotated: serde_json::Value = serde_json::from_slice(
+        &app.clone().oneshot(rotate).await.unwrap().into_body().collect().await.unwrap().to_bytes(),
+    )
+    .unwrap();
+    let rotated_token = rotated["token"].as_str().unwrap();
+    assert_ne!(rotated_token, token);
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                axum::http::Request::get(format!("/mock/openapi/{token}/accounts/42")).body(Body::empty()).unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let disable = headers(axum::http::Request::delete("/services/svc-mock/openapi/mock")).body(Body::empty()).unwrap();
+    assert_eq!(app.clone().oneshot(disable).await.unwrap().status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        app.oneshot(
+            axum::http::Request::get(format!("/mock/openapi/{rotated_token}/accounts/42")).body(Body::empty()).unwrap()
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn removed_saved_request_routes_return_not_found() {
+    let app = router(ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap()));
+    for method in ["GET", "PUT"] {
+        let response = app
+            .clone()
+            .oneshot(
+                headers(axum::http::Request::builder().method(method).uri("/services/unused/openapi/workbench"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }
 
 #[tokio::test]
@@ -1088,7 +1313,7 @@ async fn readiness_reports_migration_state_and_health_headers() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["status"], "ready");
-    assert_eq!(body["schemaVersion"], 17);
+    assert_eq!(body["schemaVersion"], LATEST_SCHEMA_VERSION);
 }
 
 #[tokio::test]
@@ -1270,6 +1495,14 @@ async fn openapi_endpoint_matches_the_checked_contract_fixture() {
             let expected_codes: Vec<_> =
                 expected_codes.as_array().unwrap().iter().map(|code| code.as_str().unwrap().to_owned()).collect();
             assert_eq!(actual_codes, expected_codes, "{method} {path} response codes");
+        }
+    }
+
+    for (path, methods) in fixture["responseDescriptions"].as_object().unwrap() {
+        for (method, responses) in methods.as_object().unwrap() {
+            for (status, expected) in responses.as_object().unwrap() {
+                assert_eq!(document["paths"][path][method]["responses"][status]["description"], *expected);
+            }
         }
     }
 
@@ -1968,4 +2201,165 @@ async fn api_errors_use_the_shared_catalog() {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body, serde_json::to_value(kind.body()).unwrap());
     }
+}
+
+#[tokio::test]
+async fn request_agent_checks_auth_scope_policy_strict_dto_and_returns_raw_metrics() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let target = format!("http://{}", listener.local_addr().unwrap());
+    let state = ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap())
+        .with_request_agent_origins(vec![target.clone()])
+        .unwrap();
+    let app = router(state);
+    let create = headers(axum::http::Request::post("/services"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"agent-service","name":"Agent","slug":"agent"}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(create).await.unwrap().status(), StatusCode::OK);
+    let route = "/services/agent-service/openapi/agent/requests/test-agent";
+    let input =
+        serde_json::json!({"method":"GET","url":target,"timeoutMs":1000,"disabledHeaders":["Accept","User-Agent"]});
+    let unauthorized = axum::http::Request::post(route)
+        .header("content-type", "application/json")
+        .body(Body::from(input.to_string()))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(unauthorized).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    let wrong = headers(axum::http::Request::post("/services/missing/openapi/agent/requests/test-agent"))
+        .header("content-type", "application/json")
+        .body(Body::from(input.to_string()))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(wrong).await.unwrap().status(), StatusCode::NOT_FOUND);
+    let strict = headers(axum::http::Request::post(route))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"method":"GET","url":"http://example.com","extra":1}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(strict).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let denied = headers(axum::http::Request::post(route))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"method":"GET","url":"http://127.0.0.1:1"}"#))
+        .unwrap();
+    let response = app.clone().oneshot(denied).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut bytes = [0; 4096];
+        assert!(stream.read(&mut bytes).unwrap() > 0);
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nConnection: close\r\n\r\nOK").unwrap();
+    });
+    let request = headers(axum::http::Request::post(route))
+        .header("content-type", "application/json")
+        .body(Body::from(input.to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let value: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(value["bodyBase64"], "T0s=");
+    assert_eq!(value["network"]["remoteIp"], "127.0.0.1");
+    assert!(value["network"]["tls"].is_null());
+    assert_eq!(value["requestMethod"], "GET");
+    assert_eq!(value["requestBodyBase64"], "");
+    assert!(value["requestHeaders"].as_array().unwrap().iter().all(|row| {
+        let name = row[0].as_str().unwrap();
+        !name.eq_ignore_ascii_case("accept") && !name.eq_ignore_ascii_case("user-agent")
+    }));
+    assert!(value["timing"]["totalMs"].as_f64().unwrap() >= 0.);
+    assert!(
+        value["requestHeaders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row[0].as_str().unwrap().eq_ignore_ascii_case("host"))
+    );
+    server.join().unwrap();
+    let cancel = headers(axum::http::Request::delete(route)).body(Body::empty()).unwrap();
+    assert_eq!(app.oneshot(cancel).await.unwrap().status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn request_agent_returns_specific_response_failure_envelopes() {
+    use std::io::{Read, Write};
+    for (reply, expected) in [
+        ("HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nshort", ErrorKind::AgentResponseReadFailed),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot-gzip",
+            ErrorKind::AgentResponseDecodingFailed,
+        ),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = format!("http://{}", listener.local_addr().unwrap());
+        let state = ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap())
+            .with_request_agent_origins(vec![target.clone()])
+            .unwrap();
+        let app = router(state);
+        let create = headers(axum::http::Request::post("/services"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"id":"agent-service","name":"Agent","slug":"agent"}"#))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(create).await.unwrap().status(), StatusCode::OK);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+            let mut bytes = [0; 4096];
+            assert!(stream.read(&mut bytes).unwrap() > 0);
+            stream.write_all(reply.as_bytes()).unwrap();
+        });
+        let request =
+            headers(axum::http::Request::post("/services/agent-service/openapi/agent/requests/failed-response"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"method":"GET","url":target,"timeoutMs":1000}).to_string()))
+                .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), expected.status());
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let value: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(value, serde_json::to_value(expected.body()).unwrap());
+        server.join().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn request_agent_cancellation_is_scoped_and_duplicate_ids_are_rejected() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let target = format!("http://{}", listener.local_addr().unwrap());
+    let state = ApiState::new(Core::default(), SqliteStore::open_in_memory().unwrap())
+        .with_request_agent_origins(vec![target.clone()])
+        .unwrap();
+    let app = router(state);
+    let create = headers(axum::http::Request::post("/services"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"agent-cancel","name":"Cancel","slug":"cancel"}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(create).await.unwrap().status(), StatusCode::OK);
+    let route = "/services/agent-cancel/openapi/agent/requests/cancel-test";
+    let request = headers(axum::http::Request::post(route))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::json!({"method":"GET","url":target,"timeoutMs":4000}).to_string()))
+        .unwrap();
+    let running = tokio::spawn(app.clone().oneshot(request));
+    let socket = tokio::task::spawn_blocking(move || listener.accept().unwrap().0).await.unwrap();
+    let duplicate = headers(axum::http::Request::post(route))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::json!({"method":"GET","url":target}).to_string()))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(duplicate).await.unwrap().status(), StatusCode::CONFLICT);
+    let wrong = axum::http::Request::delete(route)
+        .header("x-specx-tenant-id", "tenant-1")
+        .header("x-specx-workspace-id", "other")
+        .header("x-specx-actor-id", "actor-1")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(app.clone().oneshot(wrong).await.unwrap().status(), StatusCode::FORBIDDEN);
+    let cancel = headers(axum::http::Request::delete(route)).body(Body::empty()).unwrap();
+    assert_eq!(app.oneshot(cancel).await.unwrap().status(), StatusCode::NO_CONTENT);
+    let response = running.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let value: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(value["code"], "agent_cancelled");
+    drop(socket);
 }

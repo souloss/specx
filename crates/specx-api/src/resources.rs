@@ -1,12 +1,17 @@
 use super::*;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use axum::body::Bytes;
+use axum::http::Method;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use hmac::Mac;
 use specx_controller::{
     CommandGitProvider, ContentStore, GitCredential, GitRepositoryRefs, RepositoryController,
     RepositoryReconcileRequest,
 };
+
+mod publications;
+use crate::request_agent::*;
+use publications::*;
 
 pub fn router<S>(state: ApiState) -> Router<S>
 where
@@ -34,6 +39,27 @@ where
         .route("/services", get(list_services).post(create_service))
         .route("/services/{service_id}", put(update_service).patch(set_service_archived).delete(delete_service))
         .route(
+            "/services/{service_id}/openapi/agent/requests/{request_id}",
+            post(execute_agent_request)
+                .delete(cancel_agent_request)
+                .layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)),
+        )
+        .route("/services/{service_id}/openapi", get(get_openapi_provider))
+        .route("/services/{service_id}/openapi/settings", put(update_openapi_settings))
+        .route("/services/{service_id}/openapi/mock", post(enable_openapi_mock).delete(disable_openapi_mock))
+        .route(
+            "/services/{service_id}/openapi/environments",
+            get(list_openapi_environments).post(create_openapi_environment),
+        )
+        .route(
+            "/services/{service_id}/openapi/environments/{environment_id}",
+            put(update_openapi_environment).delete(delete_openapi_environment),
+        )
+        .route(
+            "/services/{service_id}/openapi/environments/{environment_id}/resolve",
+            post(resolve_openapi_environment),
+        )
+        .route(
             "/services/{service_id}/repository",
             get(get_service_repository).post(link_service_repository).delete(unlink_service_repository),
         )
@@ -42,6 +68,13 @@ where
         .route("/services/{service_id}/code-bindings", get(list_service_code_bindings).post(create_code_binding))
         .route("/code-bindings/{binding_id}", put(update_code_binding).delete(delete_code_binding))
         .route("/specifications", get(list_specifications).post(create_specification))
+        .route(
+            "/specifications/{specification_id}/publications",
+            get(list_openapi_publications).post(create_openapi_publication),
+        )
+        .route("/specifications/{specification_id}/publications/{publication_id}", delete(revoke_openapi_publication))
+        .route("/specifications/{specification_id}/publication-preview/{version}", get(preview_openapi_publication))
+        .route("/public/openapi/{publication_id}", get(get_public_openapi_document))
         .route("/specifications/{specification_id}/revisions", get(list_specification_revisions))
         .route("/specifications/{specification_id}/revisions/{version}", get(get_specification_revision))
         .route("/specifications/{specification_id}/revisions/{version}/restore", post(restore_specification_revision))
@@ -58,6 +91,8 @@ where
         .route("/repositories/{repository_id}/reconcile", post(enqueue_repository_reconcile))
         .route("/controller-tasks/{task_id}", get(get_controller_task))
         .route("/webhooks/repositories/{repository_id}", post(repository_webhook))
+        .route("/mock/openapi/{token}", axum::routing::any(serve_openapi_mock_root))
+        .route("/mock/openapi/{token}/{*path}", axum::routing::any(serve_openapi_mock))
         .route("/secrets", get(list_secrets).post(create_secret))
         .route("/secrets/{secret_id}", put(update_secret).delete(delete_secret))
         .route("/integrations", get(list_integrations).post(create_integration))
@@ -1021,6 +1056,159 @@ struct IntegrationPageResponse {
     items: Vec<IntegrationResponse>,
 }
 
+fn default_request_mode() -> String {
+    "inherit".into()
+}
+fn valid_request_mode(mode: &str) -> bool {
+    matches!(mode, "inherit" | "browser" | "agent")
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OpenApiEnvironmentVariableInput {
+    key: String,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    sensitive: bool,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OpenApiEnvironmentVariableResponse {
+    key: String,
+    value: Option<String>,
+    sensitive: bool,
+    enabled: bool,
+    has_value: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OpenApiEnvironmentServer {
+    id: Id,
+    name: String,
+    base_url: String,
+    #[serde(default = "default_request_mode")]
+    request_mode: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateOpenApiEnvironmentRequest {
+    id: Id,
+    name: String,
+    slug: Option<String>,
+    base_url: String,
+    #[serde(default = "default_request_mode")]
+    request_mode: String,
+    #[serde(default)]
+    servers: Vec<OpenApiEnvironmentServer>,
+    #[serde(default)]
+    variables: Vec<OpenApiEnvironmentVariableInput>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateOpenApiEnvironmentRequest {
+    name: String,
+    slug: String,
+    base_url: String,
+    #[serde(default = "default_request_mode")]
+    request_mode: String,
+    servers: Option<Vec<OpenApiEnvironmentServer>>,
+    #[serde(default)]
+    variables: Vec<OpenApiEnvironmentVariableInput>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OpenApiEnvironmentResponse {
+    id: Id,
+    service_id: Id,
+    name: String,
+    slug: String,
+    base_url: String,
+    #[serde(default = "default_request_mode")]
+    request_mode: String,
+    servers: Vec<OpenApiEnvironmentServer>,
+    variables: Vec<OpenApiEnvironmentVariableResponse>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OpenApiRuntimeVariableResponse {
+    key: String,
+    value: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OpenApiRuntimeEnvironmentResponse {
+    environment_id: Id,
+    base_url: String,
+    #[serde(default = "default_request_mode")]
+    request_mode: String,
+    servers: Vec<OpenApiEnvironmentServer>,
+    variables: Vec<OpenApiRuntimeVariableResponse>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateOpenApiSettingsRequest {
+    default_environment_id: Option<Id>,
+    default_server_url: String,
+    show_operation_id: bool,
+    schema_display: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OpenApiMockResponse {
+    enabled: bool,
+    token: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OpenApiSettingsResponse {
+    default_environment_id: Option<Id>,
+    default_server_url: String,
+    show_operation_id: bool,
+    schema_display: String,
+    mock_enabled: bool,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OpenApiProviderResponse {
+    service_id: Id,
+    settings: OpenApiSettingsResponse,
+    environments: Vec<OpenApiEnvironmentResponse>,
+    specification_count: usize,
+    operation_count: usize,
+    tag_count: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredOpenApiEnvironmentVariable {
+    key: String,
+    value: Option<String>,
+    secret_id: Option<Id>,
+    sensitive: bool,
+    enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
 #[utoipa::path(
     get,
     path = "/specifications/{specification_id}/sync-status",
@@ -1230,6 +1418,815 @@ async fn repository_webhook(
     let task_id = state.enqueue_repository_task(&context, &repository_id).await?;
     let task = state.controller_task(&task_id).await?.ok_or(ApiError::NotFound)?;
     Ok((StatusCode::ACCEPTED, Json(task.into())))
+}
+
+#[utoipa::path(
+    get,
+    path = "/services/{service_id}/openapi",
+    params(("service_id" = String, Path)),
+    responses((status = 200, body = OpenApiProviderResponse), (status = 404, body = ErrorResponse)),
+    tag = "openapi"
+)]
+async fn get_openapi_provider(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<Json<OpenApiProviderResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    let service =
+        core.list_services(&context).into_iter().find(|service| service.id == service_id).ok_or(ApiError::NotFound)?;
+    let settings = inner.store.openapi_provider_settings(&context.tenant_id, &context.workspace_id, &service_id)?;
+    let environments = inner.store.list_openapi_environments(&context.tenant_id, &context.workspace_id, &service_id)?;
+    let settings = settings.unwrap_or(OpenApiProviderSettingsRecord {
+        tenant_id: context.tenant_id.clone(),
+        workspace_id: context.workspace_id.clone(),
+        service_id: service_id.clone(),
+        default_environment_id: environments.first().map(|environment| environment.id.clone()),
+        default_server_url: String::new(),
+        show_operation_id: true,
+        schema_display: "summary".into(),
+        mock_enabled: false,
+        mock_public_id: None,
+        updated_at: service.updated_at.clone(),
+    });
+    let specifications = core
+        .list_specifications(&context)
+        .into_iter()
+        .filter(|specification| {
+            specification.service_id == service_id && specification.kind == SpecificationKind::OpenApi
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut operation_count = 0;
+    let mut tags = std::collections::BTreeSet::new();
+    for specification in &specifications {
+        if let Ok(document) = specx_formats::parse_openapi(&specification.content) {
+            operation_count += document.operations.len();
+            tags.extend(document.tags);
+            tags.extend(document.operations.into_iter().flat_map(|operation| operation.tags));
+        }
+    }
+    Ok(Json(OpenApiProviderResponse {
+        service_id,
+        settings: openapi_settings_response(settings),
+        environments: environments.into_iter().map(openapi_environment_response).collect(),
+        specification_count: specifications.len(),
+        operation_count,
+        tag_count: tags.len(),
+    }))
+}
+
+#[utoipa::path(
+    put,
+    path = "/services/{service_id}/openapi/settings",
+    params(("service_id" = String, Path)),
+    request_body = UpdateOpenApiSettingsRequest,
+    responses((status = 200, body = OpenApiSettingsResponse), (status = 404, body = ErrorResponse), (status = 422, body = ErrorResponse)),
+    tag = "openapi"
+)]
+async fn update_openapi_settings(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateOpenApiSettingsRequest>,
+) -> Result<Json<OpenApiSettingsResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    if input.default_server_url.len() > 2_000
+        || input.default_server_url.chars().any(char::is_control)
+        || !is_allowed_openapi_server_url(&input.default_server_url)
+        || !matches!(input.schema_display.as_str(), "summary" | "full")
+    {
+        return Err(ApiError::InvalidInput);
+    }
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    core.list_services(&context).into_iter().find(|service| service.id == service_id).ok_or(ApiError::NotFound)?;
+    if let Some(environment_id) = &input.default_environment_id {
+        inner
+            .store
+            .openapi_environment_by_id(&context.tenant_id, &context.workspace_id, &service_id, environment_id)?
+            .ok_or(ApiError::NotFound)?;
+    }
+    let current = inner.store.openapi_provider_settings(&context.tenant_id, &context.workspace_id, &service_id)?;
+    let settings = OpenApiProviderSettingsRecord {
+        tenant_id: context.tenant_id,
+        workspace_id: context.workspace_id,
+        service_id,
+        default_environment_id: input.default_environment_id,
+        default_server_url: input.default_server_url.trim().to_owned(),
+        show_operation_id: input.show_operation_id,
+        schema_display: input.schema_display,
+        mock_enabled: current.as_ref().is_some_and(|value| value.mock_enabled),
+        mock_public_id: current.and_then(|value| value.mock_public_id),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    inner.store.upsert_openapi_provider_settings(&settings)?;
+    Ok(Json(openapi_settings_response(settings)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/services/{service_id}/openapi/mock",
+    params(("service_id" = String, Path)),
+    responses((status = 200, body = OpenApiMockResponse), (status = 404, body = ErrorResponse)),
+    tag = "openapi"
+)]
+async fn enable_openapi_mock(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<Json<OpenApiMockResponse>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    core.list_services(&context).into_iter().find(|service| service.id == service_id).ok_or(ApiError::NotFound)?;
+    let current = inner.store.openapi_provider_settings(&context.tenant_id, &context.workspace_id, &service_id)?;
+    let token =
+        format!("m_{:x}", Sha256::digest(format!("{}:{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).as_bytes()));
+    let settings = OpenApiProviderSettingsRecord {
+        tenant_id: context.tenant_id,
+        workspace_id: context.workspace_id,
+        service_id,
+        default_environment_id: current.as_ref().and_then(|value| value.default_environment_id.clone()),
+        default_server_url: current.as_ref().map(|value| value.default_server_url.clone()).unwrap_or_default(),
+        show_operation_id: current.as_ref().is_none_or(|value| value.show_operation_id),
+        schema_display: current.as_ref().map(|value| value.schema_display.clone()).unwrap_or_else(|| "summary".into()),
+        mock_enabled: true,
+        mock_public_id: Some(mock_token_hash(&token)),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    inner.store.upsert_openapi_provider_settings(&settings)?;
+    Ok(Json(OpenApiMockResponse { enabled: true, token: Some(token) }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/services/{service_id}/openapi/mock",
+    params(("service_id" = String, Path)),
+    responses((status = 204, description = "Mock disabled"), (status = 404, body = ErrorResponse)),
+    tag = "openapi"
+)]
+async fn disable_openapi_mock(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    core.list_services(&context).into_iter().find(|service| service.id == service_id).ok_or(ApiError::NotFound)?;
+    let current = inner
+        .store
+        .openapi_provider_settings(&context.tenant_id, &context.workspace_id, &service_id)?
+        .ok_or(ApiError::NotFound)?;
+    let settings = OpenApiProviderSettingsRecord {
+        mock_enabled: false,
+        mock_public_id: None,
+        updated_at: Utc::now().to_rfc3339(),
+        ..current
+    };
+    inner.store.upsert_openapi_provider_settings(&settings)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    get,
+    path = "/mock/openapi/{token}/{path}",
+    params(("token" = String, Path), ("path" = String, Path)),
+    responses((status = 200, description = "Deterministic OpenAPI mock response"), (status = 404, body = ErrorResponse)),
+    tag = "openapi"
+)]
+async fn serve_openapi_mock(
+    State(state): State<ApiState>,
+    Path((token, path)): Path<(String, String)>,
+    method: Method,
+) -> Result<Response, ApiError> {
+    serve_openapi_mock_with_path(state, token, path, method).await
+}
+
+async fn serve_openapi_mock_root(
+    State(state): State<ApiState>,
+    Path(token): Path<String>,
+    method: Method,
+) -> Result<Response, ApiError> {
+    serve_openapi_mock_with_path(state, token, String::new(), method).await
+}
+
+async fn serve_openapi_mock_with_path(
+    state: ApiState,
+    token: String,
+    path: String,
+    method: Method,
+) -> Result<Response, ApiError> {
+    let mut result = Response::new(axum::body::Body::empty());
+    result.headers_mut().insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    result.headers_mut().insert("cache-control", HeaderValue::from_static("no-cache"));
+    if method == Method::OPTIONS {
+        *result.status_mut() = StatusCode::NO_CONTENT;
+        result.headers_mut().insert(
+            "access-control-allow-methods",
+            HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD, TRACE"),
+        );
+        result
+            .headers_mut()
+            .insert("access-control-allow-headers", HeaderValue::from_static("content-type, authorization"));
+        return Ok(result);
+    }
+    let settings = {
+        let inner = state.inner.lock().await;
+        inner.store.openapi_provider_settings_by_mock_public_id(&mock_token_hash(&token))?.ok_or(ApiError::NotFound)?
+    };
+    let context = WorkspaceContext {
+        tenant_id: settings.tenant_id.clone(),
+        workspace_id: settings.workspace_id.clone(),
+        actor_id: "specx-mock".into(),
+    };
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    let specification = core
+        .list_specifications(&context)
+        .into_iter()
+        .find(|specification| {
+            specification.service_id == settings.service_id && specification.kind == SpecificationKind::OpenApi
+        })
+        .cloned()
+        .ok_or(ApiError::NotFound)?;
+    let document = specx_formats::parse_openapi_value(&specification.content).map_err(|_| ApiError::InvalidInput)?;
+    let request_path = format!("/{}", path.trim_matches('/'));
+    let (operation, matched) =
+        find_mock_operation(&document, &request_path, method.as_str()).ok_or(ApiError::NotFound)?;
+    let (status, content_type, body) = mock_response(&document, operation);
+    let mut response = Json(body).into_response();
+    *response.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+    response.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_str(&content_type).unwrap_or(HeaderValue::from_static("application/json")),
+    );
+    response.headers_mut().insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    response.headers_mut().insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+        .headers_mut()
+        .insert("x-specx-mock-path", HeaderValue::from_str(matched).unwrap_or(HeaderValue::from_static("/")));
+    Ok(response)
+}
+
+fn find_mock_operation<'a>(
+    document: &'a serde_json::Value,
+    request_path: &str,
+    method: &str,
+) -> Option<(&'a serde_json::Map<String, serde_json::Value>, &'a str)> {
+    let paths = document.get("paths")?.as_object()?;
+    let method = method.to_ascii_lowercase();
+    paths.iter().find_map(|(pattern, item)| {
+        if !path_pattern_matches(pattern, request_path) {
+            return None;
+        }
+        let operation = item.as_object()?.get(&method)?.as_object()?;
+        Some((operation, pattern.as_str()))
+    })
+}
+
+fn path_pattern_matches(pattern: &str, actual: &str) -> bool {
+    let pattern_segments = pattern.trim_matches('/').split('/').collect::<Vec<_>>();
+    let actual_segments = actual.trim_matches('/').split('/').collect::<Vec<_>>();
+    pattern_segments.len() == actual_segments.len()
+        && pattern_segments
+            .iter()
+            .zip(actual_segments)
+            .all(|(expected, actual)| expected.starts_with('{') && expected.ends_with('}') || *expected == actual)
+}
+
+fn mock_response(
+    document: &serde_json::Value,
+    operation: &serde_json::Map<String, serde_json::Value>,
+) -> (u16, String, serde_json::Value) {
+    let responses = operation.get("responses").and_then(serde_json::Value::as_object);
+    let response = responses.and_then(|items| {
+        items.get("200").or_else(|| items.get("201")).or_else(|| items.get("default")).or_else(|| items.values().next())
+    });
+    let status = responses
+        .and_then(|items| {
+            items
+                .keys()
+                .find(|key| key.chars().all(|ch| ch.is_ascii_digit()) && key.len() == 3)
+                .and_then(|key| key.parse().ok())
+        })
+        .unwrap_or(200);
+    let content = response.and_then(|value| value.get("content")).and_then(serde_json::Value::as_object);
+    let (content_type, media) = if let Some(items) = content {
+        items
+            .get("application/json")
+            .map(|value| ("application/json".to_owned(), value))
+            .or_else(|| items.iter().next().map(|(key, value)| (key.clone(), value)))
+            .unwrap_or_else(|| ("application/json".into(), &serde_json::Value::Null))
+    } else {
+        ("application/json".into(), &serde_json::Value::Null)
+    };
+    let body = media
+        .get("example")
+        .cloned()
+        .or_else(|| {
+            media
+                .get("examples")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|items| items.values().next())
+                .and_then(|item| item.get("value"))
+                .cloned()
+        })
+        .or_else(|| media.get("schema").map(|schema| mock_schema_value(document, schema, 0)))
+        .unwrap_or_else(|| serde_json::json!({}));
+    (status, content_type, body)
+}
+
+fn mock_schema_value(document: &serde_json::Value, schema: &serde_json::Value, depth: usize) -> serde_json::Value {
+    if depth > 12 {
+        return serde_json::Value::Null;
+    }
+    if let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) {
+        return document
+            .pointer(reference.strip_prefix('#').unwrap_or(reference))
+            .map(|value| mock_schema_value(document, value, depth + 1))
+            .unwrap_or(serde_json::Value::Null);
+    }
+    for key in ["example", "default"] {
+        if let Some(value) = schema.get(key) {
+            return value.clone();
+        }
+    }
+    if let Some(values) = schema.get("enum").and_then(serde_json::Value::as_array)
+        && let Some(value) = values.first()
+    {
+        return value.clone();
+    }
+    if let Some(variants) = schema.get("oneOf").or_else(|| schema.get("anyOf")).and_then(serde_json::Value::as_array)
+        && let Some(variant) = variants.first()
+    {
+        return mock_schema_value(document, variant, depth + 1);
+    }
+    if let Some(parts) = schema.get("allOf").and_then(serde_json::Value::as_array) {
+        let mut merged = serde_json::Map::new();
+        for part in parts {
+            if let serde_json::Value::Object(fields) = mock_schema_value(document, part, depth + 1) {
+                merged.extend(fields);
+            }
+        }
+        return serde_json::Value::Object(merged);
+    }
+    match schema
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| if schema.get("properties").is_some() { "object" } else { "string" })
+    {
+        "object" => schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map(|properties| {
+                properties
+                    .iter()
+                    .map(|(key, value)| (key.clone(), mock_schema_value(document, value, depth + 1)))
+                    .collect()
+            })
+            .unwrap_or_else(|| serde_json::json!({})),
+        "array" => serde_json::Value::Array(vec![
+            schema
+                .get("items")
+                .map(|value| mock_schema_value(document, value, depth + 1))
+                .unwrap_or(serde_json::Value::Null),
+        ]),
+        "integer" | "number" => serde_json::json!(0),
+        "boolean" => serde_json::json!(true),
+        "null" => serde_json::Value::Null,
+        _ => serde_json::json!("string"),
+    }
+}
+
+fn mock_token_hash(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+#[utoipa::path(
+    get,
+    path = "/services/{service_id}/openapi/environments",
+    params(("service_id" = String, Path)),
+    responses((status = 200, body = [OpenApiEnvironmentResponse]), (status = 404, body = ErrorResponse)),
+    tag = "openapi"
+)]
+async fn list_openapi_environments(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<OpenApiEnvironmentResponse>>, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    core.list_services(&context).into_iter().find(|service| service.id == service_id).ok_or(ApiError::NotFound)?;
+    let environments = inner.store.list_openapi_environments(&context.tenant_id, &context.workspace_id, &service_id)?;
+    Ok(Json(environments.into_iter().map(openapi_environment_response).collect()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/services/{service_id}/openapi/environments/{environment_id}/resolve",
+    params(("service_id" = String, Path), ("environment_id" = String, Path)),
+    responses((status = 200, body = OpenApiRuntimeEnvironmentResponse), (status = 404, body = ErrorResponse), (status = 422, body = ErrorResponse)),
+    tag = "openapi",
+    description = "Resolve enabled environment values and configured server URLs for an explicitly started API request. Sensitive values are returned only in this no-store response."
+)]
+async fn resolve_openapi_environment(
+    State(state): State<ApiState>,
+    Path((service_id, environment_id)): Path<(Id, Id)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    core.list_services(&context).into_iter().find(|service| service.id == service_id).ok_or(ApiError::NotFound)?;
+    let environment = inner
+        .store
+        .openapi_environment_by_id(&context.tenant_id, &context.workspace_id, &service_id, &environment_id)?
+        .ok_or(ApiError::NotFound)?;
+    let stored = serde_json::from_str::<Vec<StoredOpenApiEnvironmentVariable>>(&environment.variables)
+        .map_err(|_| ApiError::InvalidInput)?;
+    let mut variables = Vec::with_capacity(stored.len());
+    for variable in stored.into_iter().filter(|variable| variable.enabled) {
+        let value = if let Some(secret_id) = variable.secret_id {
+            inner
+                .store
+                .secret_by_id(&context.tenant_id, &context.workspace_id, &secret_id)?
+                .map(|secret| decrypt_secret(&secret.encrypted_value))
+                .transpose()?
+        } else {
+            variable.value
+        };
+        if let Some(value) = value {
+            variables.push(OpenApiRuntimeVariableResponse { key: variable.key, value });
+        }
+    }
+    let mut response = Json(OpenApiRuntimeEnvironmentResponse {
+        environment_id,
+        base_url: environment.base_url,
+        request_mode: environment.request_mode,
+        servers: serde_json::from_str(&environment.servers).map_err(|_| ApiError::InvalidInput)?,
+        variables,
+    })
+    .into_response();
+    response.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+#[utoipa::path(
+    post,
+    path = "/services/{service_id}/openapi/environments",
+    params(("service_id" = String, Path)),
+    request_body = CreateOpenApiEnvironmentRequest,
+    responses((status = 200, body = OpenApiEnvironmentResponse), (status = 404, body = ErrorResponse), (status = 422, body = ErrorResponse)),
+    tag = "openapi"
+)]
+async fn create_openapi_environment(
+    State(state): State<ApiState>,
+    Path(service_id): Path<Id>,
+    headers: HeaderMap,
+    Json(input): Json<CreateOpenApiEnvironmentRequest>,
+) -> Result<Json<OpenApiEnvironmentResponse>, ApiError> {
+    if !valid_request_mode(&input.request_mode) {
+        return Err(ApiError::InvalidInput);
+    }
+    let context = request_context(&headers)?;
+    let slug = input.slug.as_deref().unwrap_or(&input.name);
+    validate_openapi_environment_name(&input.name, slug, &input.base_url, &input.variables)?;
+    let servers = encode_openapi_environment_servers(input.servers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    core.list_services(&context).into_iter().find(|service| service.id == service_id).ok_or(ApiError::NotFound)?;
+    if inner.store.openapi_environment_id_exists(&input.id)? {
+        return Err(ApiError::Conflict);
+    }
+    let slug = normalize_openapi_slug(slug);
+    if slug.is_empty()
+        || inner
+            .store
+            .list_openapi_environments(&context.tenant_id, &context.workspace_id, &service_id)?
+            .iter()
+            .any(|environment| environment.slug == slug)
+    {
+        return Err(if slug.is_empty() { ApiError::InvalidInput } else { ApiError::Conflict });
+    }
+    let now = Utc::now().to_rfc3339();
+    let environment_id = input.id.clone();
+    let environment = OpenApiEnvironmentRecord {
+        id: input.id,
+        tenant_id: context.tenant_id.clone(),
+        workspace_id: context.workspace_id.clone(),
+        service_id: service_id.clone(),
+        name: input.name.trim().to_owned(),
+        slug,
+        base_url: input.base_url.trim().to_owned(),
+        request_mode: input.request_mode,
+        servers,
+        variables: encode_openapi_variables(&mut inner, &context, &service_id, &environment_id, input.variables, None)?,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    inner.store.upsert_openapi_environment(&environment)?;
+    Ok(Json(openapi_environment_response(environment)))
+}
+
+#[utoipa::path(
+    put,
+    path = "/services/{service_id}/openapi/environments/{environment_id}",
+    params(("service_id" = String, Path), ("environment_id" = String, Path)),
+    request_body = UpdateOpenApiEnvironmentRequest,
+    responses((status = 200, body = OpenApiEnvironmentResponse), (status = 404, body = ErrorResponse), (status = 422, body = ErrorResponse)),
+    tag = "openapi"
+)]
+async fn update_openapi_environment(
+    State(state): State<ApiState>,
+    Path((service_id, environment_id)): Path<(Id, Id)>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateOpenApiEnvironmentRequest>,
+) -> Result<Json<OpenApiEnvironmentResponse>, ApiError> {
+    if !valid_request_mode(&input.request_mode) {
+        return Err(ApiError::InvalidInput);
+    }
+    let context = request_context(&headers)?;
+    validate_openapi_environment_name(&input.name, &input.slug, &input.base_url, &input.variables)?;
+    let servers = input.servers.map(encode_openapi_environment_servers).transpose()?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    core.list_services(&context).into_iter().find(|service| service.id == service_id).ok_or(ApiError::NotFound)?;
+    let existing = inner
+        .store
+        .openapi_environment_by_id(&context.tenant_id, &context.workspace_id, &service_id, &environment_id)?
+        .ok_or(ApiError::NotFound)?;
+    let slug = normalize_openapi_slug(&input.slug);
+    if slug.is_empty() {
+        return Err(ApiError::InvalidInput);
+    }
+    if inner
+        .store
+        .list_openapi_environments(&context.tenant_id, &context.workspace_id, &service_id)?
+        .iter()
+        .any(|environment| environment.id != environment_id && environment.slug == slug)
+    {
+        return Err(ApiError::Conflict);
+    }
+    let existing_variables =
+        serde_json::from_str::<Vec<StoredOpenApiEnvironmentVariable>>(&existing.variables).unwrap_or_default();
+    let updated = OpenApiEnvironmentRecord {
+        name: input.name.trim().to_owned(),
+        slug,
+        base_url: input.base_url.trim().to_owned(),
+        request_mode: input.request_mode,
+        servers: servers.unwrap_or(existing.servers),
+        variables: encode_openapi_variables(
+            &mut inner,
+            &context,
+            &service_id,
+            &environment_id,
+            input.variables,
+            Some(&existing_variables),
+        )?,
+        updated_at: Utc::now().to_rfc3339(),
+        ..existing
+    };
+    inner.store.upsert_openapi_environment(&updated)?;
+    let next_variables =
+        serde_json::from_str::<Vec<StoredOpenApiEnvironmentVariable>>(&updated.variables).unwrap_or_default();
+    for secret_id in existing_variables.iter().filter_map(|variable| variable.secret_id.as_ref()) {
+        if !next_variables.iter().any(|variable| variable.secret_id.as_ref() == Some(secret_id)) {
+            let _ = inner.store.delete_secret(&context.tenant_id, &context.workspace_id, secret_id)?;
+        }
+    }
+    Ok(Json(openapi_environment_response(updated)))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/services/{service_id}/openapi/environments/{environment_id}",
+    params(("service_id" = String, Path), ("environment_id" = String, Path)),
+    responses((status = 204), (status = 404, body = ErrorResponse)),
+    tag = "openapi"
+)]
+async fn delete_openapi_environment(
+    State(state): State<ApiState>,
+    Path((service_id, environment_id)): Path<(Id, Id)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let context = request_context(&headers)?;
+    let mut inner = state.inner.lock().await;
+    let core = load_core(&mut inner, &context)?;
+    core.list_services(&context).into_iter().find(|service| service.id == service_id).ok_or(ApiError::NotFound)?;
+    let environment = inner
+        .store
+        .openapi_environment_by_id(&context.tenant_id, &context.workspace_id, &service_id, &environment_id)?
+        .ok_or(ApiError::NotFound)?;
+    let variables =
+        serde_json::from_str::<Vec<StoredOpenApiEnvironmentVariable>>(&environment.variables).unwrap_or_default();
+    if !inner.store.delete_openapi_environment(
+        &context.tenant_id,
+        &context.workspace_id,
+        &service_id,
+        &environment_id,
+    )? {
+        return Err(ApiError::NotFound);
+    }
+    for secret_id in variables.iter().filter_map(|variable| variable.secret_id.as_ref()) {
+        let _ = inner.store.delete_secret(&context.tenant_id, &context.workspace_id, secret_id)?;
+    }
+    if let Some(mut settings) =
+        inner.store.openapi_provider_settings(&context.tenant_id, &context.workspace_id, &service_id)?
+        && settings.default_environment_id.as_deref() == Some(environment_id.as_str())
+    {
+        settings.default_environment_id = None;
+        settings.updated_at = Utc::now().to_rfc3339();
+        inner.store.upsert_openapi_provider_settings(&settings)?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn encode_openapi_environment_servers(mut servers: Vec<OpenApiEnvironmentServer>) -> Result<String, ApiError> {
+    if servers.len() > 50 {
+        return Err(ApiError::InvalidInput);
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut names = std::collections::HashSet::new();
+    for server in &mut servers {
+        server.name = server.name.trim().to_owned();
+        server.base_url = server.base_url.trim().to_owned();
+        if server.id.is_empty()
+            || server.id.len() > 100
+            || !server.id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            || !ids.insert(server.id.as_str())
+            || server.name.is_empty()
+            || server.name.len() > 80
+            || server.name.chars().any(char::is_control)
+            || !names.insert(server.name.as_str())
+            || server.base_url.is_empty()
+            || server.base_url.len() > 2_000
+            || server.base_url.chars().any(char::is_control)
+            || !is_allowed_openapi_server_url(&server.base_url)
+            || !valid_request_mode(&server.request_mode)
+        {
+            return Err(ApiError::InvalidInput);
+        }
+    }
+    serde_json::to_string(&servers).map_err(|_| ApiError::InvalidInput)
+}
+
+fn validate_openapi_environment_name(
+    name: &str,
+    slug: &str,
+    base_url: &str,
+    variables: &[OpenApiEnvironmentVariableInput],
+) -> Result<(), ApiError> {
+    if name.trim().is_empty()
+        || name.len() > 80
+        || slug.trim().is_empty()
+        || slug.len() > 80
+        || base_url.len() > 2_000
+        || name.chars().any(char::is_control)
+        || slug.chars().any(char::is_control)
+        || base_url.chars().any(char::is_control)
+        || !is_allowed_openapi_server_url(base_url)
+        || variables.len() > 100
+    {
+        return Err(ApiError::InvalidInput);
+    }
+    let mut keys = std::collections::HashSet::new();
+    for variable in variables {
+        if variable.key.trim().is_empty()
+            || variable.key.len() > 120
+            || variable.key.chars().any(char::is_control)
+            || !keys.insert(variable.key.trim().to_owned())
+        {
+            return Err(ApiError::InvalidInput);
+        }
+        if variable.value.as_deref().is_some_and(|value| value.len() > 64 * 1024 || value.chars().any(char::is_control))
+        {
+            return Err(ApiError::InvalidInput);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn is_allowed_openapi_server_url(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return true;
+    }
+    if value.starts_with('/') {
+        return !value.starts_with("//");
+    }
+    let Some((scheme, authority)) = value.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return false;
+    }
+    !authority.is_empty() && !authority.starts_with('/')
+}
+
+fn normalize_openapi_slug(value: &str) -> String {
+    let mut slug = String::new();
+    for character in value.trim().chars() {
+        if character.is_alphanumeric() || character == '-' || character == '_' {
+            slug.extend(character.to_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').chars().take(80).collect::<String>()
+}
+
+fn encode_openapi_variables(
+    inner: &mut ApiInner,
+    context: &WorkspaceContext,
+    service_id: &str,
+    environment_id: &str,
+    variables: Vec<OpenApiEnvironmentVariableInput>,
+    existing: Option<&[StoredOpenApiEnvironmentVariable]>,
+) -> Result<String, ApiError> {
+    let mut stored = Vec::with_capacity(variables.len());
+    for variable in variables {
+        let key = variable.key.trim().to_owned();
+        if variable.sensitive {
+            let secret_id = format!("openapi-env-{environment_id}-{key}");
+            let previous_secret_id = existing
+                .and_then(|items| items.iter().find(|item| item.key == key).and_then(|item| item.secret_id.clone()));
+            if let Some(value) = variable.value.clone().filter(|value| !value.is_empty()) {
+                let now = Utc::now().to_rfc3339();
+                inner.store.upsert_secret(&SecretRecord {
+                    id: secret_id.clone(),
+                    tenant_id: context.tenant_id.clone(),
+                    workspace_id: context.workspace_id.clone(),
+                    name: format!("openapi:{service_id}:{environment_id}:{key}"),
+                    encrypted_value: encrypt_secret(&value)?,
+                    key_version: 1,
+                    created_at: now.clone(),
+                    updated_at: now,
+                })?;
+            }
+            stored.push(StoredOpenApiEnvironmentVariable {
+                key,
+                value: None,
+                secret_id: if variable.value.as_deref().is_some_and(|value| !value.is_empty()) {
+                    Some(secret_id)
+                } else {
+                    previous_secret_id
+                },
+                sensitive: true,
+                enabled: variable.enabled,
+            });
+        } else {
+            stored.push(StoredOpenApiEnvironmentVariable {
+                key,
+                value: variable.value,
+                secret_id: None,
+                sensitive: false,
+                enabled: variable.enabled,
+            });
+        }
+    }
+    serde_json::to_string(&stored).map_err(|_| ApiError::InvalidInput)
+}
+
+fn openapi_settings_response(settings: OpenApiProviderSettingsRecord) -> OpenApiSettingsResponse {
+    OpenApiSettingsResponse {
+        default_environment_id: settings.default_environment_id,
+        default_server_url: settings.default_server_url,
+        show_operation_id: settings.show_operation_id,
+        schema_display: settings.schema_display,
+        mock_enabled: settings.mock_enabled,
+        updated_at: settings.updated_at,
+    }
+}
+
+fn openapi_environment_response(environment: OpenApiEnvironmentRecord) -> OpenApiEnvironmentResponse {
+    let variables = serde_json::from_str::<Vec<StoredOpenApiEnvironmentVariable>>(&environment.variables)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|variable| OpenApiEnvironmentVariableResponse {
+            key: variable.key,
+            value: if variable.sensitive { None } else { variable.value.clone() },
+            sensitive: variable.sensitive,
+            enabled: variable.enabled,
+            has_value: variable.secret_id.is_some() || variable.value.is_some_and(|value| !value.is_empty()),
+        })
+        .collect();
+    OpenApiEnvironmentResponse {
+        id: environment.id,
+        service_id: environment.service_id,
+        name: environment.name,
+        slug: environment.slug,
+        base_url: environment.base_url,
+        request_mode: environment.request_mode,
+        servers: serde_json::from_str(&environment.servers).unwrap_or_default(),
+        variables,
+        created_at: environment.created_at,
+        updated_at: environment.updated_at,
+    }
 }
 
 #[utoipa::path(get, path = "/secrets", responses((status = 200, body = SecretPageResponse)), tag = "integrations")]
@@ -4392,8 +5389,9 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
 #[openapi(
     info(title = "specX API", version = "1.0.0", description = "Service catalog and specification API."),
     servers((url = "/api/specx")),
-    paths(health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, get_specification_code_binding, set_specification_code_binding, delete_specification_code_binding, get_specification_sync_status, sync_specification, discover_repository_files, discover_repository_refs, enqueue_repository_reconcile, get_controller_task, repository_webhook, list_secrets, create_secret, update_secret, delete_secret, list_integrations, create_integration, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, list_code_sources, create_code_source, update_code_source, delete_code_source, get_service_repository, link_service_repository, unlink_service_repository, list_service_code_bindings, create_code_binding, update_code_binding, delete_code_binding, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
+        paths(execute_agent_request, cancel_agent_request, list_openapi_publications, create_openapi_publication, revoke_openapi_publication, preview_openapi_publication, get_public_openapi_document, health, ready, metrics, get_access, get_catalog, list_workspaces, create_workspace, update_workspace, delete_workspace, list_members, set_member_role, revoke_member, list_invitations, create_invitation, revoke_invitation, accept_invitation, list_groups, update_group, reorder_groups, delete_group, list_tags, update_tag, delete_tag, list_services, list_specifications, list_specification_revisions, get_specification_revision, restore_specification_revision, get_specification_code_binding, set_specification_code_binding, delete_specification_code_binding, get_specification_sync_status, sync_specification, discover_repository_files, discover_repository_refs, enqueue_repository_reconcile, get_controller_task, repository_webhook, get_openapi_provider, update_openapi_settings, enable_openapi_mock, disable_openapi_mock, serve_openapi_mock, list_openapi_environments, create_openapi_environment, update_openapi_environment, delete_openapi_environment, resolve_openapi_environment, list_secrets, create_secret, update_secret, delete_secret, list_integrations, create_integration, create_group, create_tag, create_service, update_service, set_service_archived, delete_service, list_code_sources, create_code_source, update_code_source, delete_code_source, get_service_repository, link_service_repository, unlink_service_repository, list_service_code_bindings, create_code_binding, update_code_binding, delete_code_binding, create_specification, update_specification, delete_specification, list_backups, create_backup, restore_backup),
     components(schemas(
+        AgentRequestDto, AgentResponseDto, AgentTimingDto, AgentNetworkDto, AgentTlsDto,
         HealthResponse,
         ReadyResponse,
         CatalogResponse,
@@ -4414,6 +5412,22 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
         CreateIntegrationRequest,
         IntegrationResponse,
         IntegrationPageResponse,
+        OpenApiEnvironmentVariableInput,
+        OpenApiEnvironmentVariableResponse,
+        OpenApiEnvironmentServer,
+        CreateOpenApiEnvironmentRequest,
+        UpdateOpenApiEnvironmentRequest,
+        OpenApiEnvironmentResponse,
+        OpenApiRuntimeVariableResponse,
+        OpenApiRuntimeEnvironmentResponse,
+        UpdateOpenApiSettingsRequest,
+        OpenApiSettingsResponse,
+        OpenApiProviderResponse,
+        OpenApiPublicationResponse,
+        OpenApiPublicationPage,
+        OpenApiPublicationPreview,
+        CreateOpenApiPublication,
+        PublicOpenApiDocument,
         SpecificationRevisionPageResponse,
         SpecificationRevisionResponse,
         ServicePageResponse,
@@ -4468,7 +5482,8 @@ fn response_with_etag<T: Serialize>(value: T, etag: String) -> Response {
         (name = "code", description = "Code sources and service code bindings"),
         (name = "workspaces", description = "Workspace metadata and membership access"),
         (name = "members", description = "Workspace member roles and access")
-        ,(name = "backups", description = "Server-owned specX SQLite snapshots")
+        ,(name = "backups", description = "Server-owned specX SQLite snapshots"),
+        (name = "openapi", description = "OpenAPI provider settings and environments")
     )
 )]
 pub struct ApiDoc;
