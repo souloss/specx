@@ -148,7 +148,7 @@
     },
     "CreateSpecificationRequest": {
       "required": ["content", "id", "serviceId", "title"],
-      "properties": ["content", "id", "serviceId", "source", "title"]
+      "properties": ["content", "id", "kind", "serviceId", "source", "title"]
     },
     "CreateSpecificationSourceRequest": {
       "required": ["path", "refKind", "refName"],
@@ -157,6 +157,10 @@
     "SpecificationResponse": {
       "required": ["content", "contentHash", "etag", "id", "kind", "serviceId", "tenantId", "title", "updatedAt", "version", "workspaceId"],
       "properties": ["content", "contentHash", "etag", "id", "kind", "serviceId", "tenantId", "title", "updatedAt", "version", "workspaceId"]
+    },
+    "SpecificationKindResponse": {
+      "required": [],
+      "properties": []
     },
     "SpecificationSyncResponse": {
       "required": ["changed", "contentHash", "manifestHash", "providerVersion", "resolvedCommit", "snapshotId", "specification", "syncedAt"],

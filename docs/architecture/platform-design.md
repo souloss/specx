@@ -286,6 +286,8 @@ POST   /resources/{kind}/{id}/reconcile
 - 增加 Provider 注册表、健康状态、超时/取消和结构化诊断。
 - 首先支持 Host 内置 Provider 和控制器任务，完成重试、幂等、审计和状态回写。
 
+OpenAPI 规范已接入类型生命周期、通用仓库文件发现与同步、服务内规范提供者目录、Tag/API 导航、单操作视图和 JSON/YAML 高亮格式化编辑。规范正文仍随目录载荷完整返回；按需读取、服务环境与 Try it 请求执行尚未实现，后续按独立 Story 设计。边界和验收见[OpenAPI 规范管理技术方案](openapi-specification-design.md)。
+
 ### Phase 3：平台内容存储与外部连接
 
 - 建立平台内部 `ContentStore`，让规范正文、附件、代码快照和分析产物使用统一的内容引用。

@@ -15,7 +15,7 @@ pub use content_store::{ContentStore, ContentStoreError, FileContentStore};
 pub use git_provider::{
     CommandGitProvider, GitCredential, GitFileRequest, GitFileSnapshot, GitProvider, GitProviderError,
     GitRepositoryProvider, GitRepositoryRefs, GitRepositoryRequest, GitRepositorySnapshot, RepositoryFile,
-    validate_markdown_path,
+    validate_markdown_path, validate_openapi_path,
 };
 pub use markdown::{MarkdownDocumentController, MarkdownDocumentRequest, MarkdownDocumentResult};
 pub use repository::{RepositoryController, RepositoryReconcileRequest, RepositorySnapshotResult};

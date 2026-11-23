@@ -27,6 +27,7 @@ export const useNavigationStore = defineStore("navigation", () => {
   const selectedId = ref("");
   const naming = ref<NamingDraft | null>(null);
   const busy = ref(false);
+  const expandedNodeIds = ref(new Set<string>());
   const revealRevision = ref(0);
   const storageKey = computed(() => `specx-sidebar-layout:${workspace.catalog?.workspace.id}`);
 
@@ -47,7 +48,8 @@ export const useNavigationStore = defineStore("navigation", () => {
         layout.value = catalogSidebarLayout(catalog);
       }
       if (previous?.workspace.id === catalog.workspace.id && !previous.services.some((item) => item.id === selectedId.value) && catalog.services.some((item) => item.id === selectedId.value)) workspace.selectService(selectedId.value);
-      if (!catalog.groups.some((item) => item.id === selectedId.value) && !catalog.services.some((item) => item.id === selectedId.value) && !creations.current.some((item) => item.id === selectedId.value)) selectedId.value = "";
+      if (!catalog.groups.some((item) => item.id === selectedId.value) && !catalog.services.some((item) => item.id === selectedId.value) && !catalog.specifications.some((item) => `specification:${item.id}` === selectedId.value) && !creations.current.some((item) => item.id === selectedId.value))
+        selectedId.value = "";
     },
     { immediate: true },
   );
@@ -88,18 +90,34 @@ export const useNavigationStore = defineStore("navigation", () => {
     }
     return nodes;
   });
-  const expandedIds = computed(() => new Set(layout.value.groups.filter((group) => !group.collapsed).map((group) => group.id)));
+  const expandedIds = computed(() => new Set([...layout.value.groups.filter((group) => !group.collapsed).map((group) => group.id), ...expandedNodeIds.value]));
   function toggle(id: string) {
-    layout.value = toggleGroupCollapsed(layout.value, id);
+    if (layout.value.groups.some((group) => group.id === id)) layout.value = toggleGroupCollapsed(layout.value, id);
+    else {
+      const next = new Set(expandedNodeIds.value);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      expandedNodeIds.value = next;
+    }
   }
   function collapseAll() {
     layout.value = collapseAllGroups(layout.value);
+    expandedNodeIds.value = new Set();
   }
   function expandAll() {
     layout.value = expandGroups(
       layout.value,
       layout.value.groups.map((group) => group.id),
     );
+    const next = new Set<string>();
+    const collect = (nodes: ResourceTreeNode[]) => {
+      for (const node of nodes) {
+        if (node.children?.length) next.add(node.id);
+        collect(node.children ?? []);
+      }
+    };
+    if (workspace.catalog) collect(layoutTree(layout.value, workspace.catalog));
+    expandedNodeIds.value = next;
   }
   function select(node: ResourceTreeNode) {
     selectedId.value = node.id;
@@ -107,6 +125,11 @@ export const useNavigationStore = defineStore("navigation", () => {
     if (node.type === "resource") {
       settings.showSettingsPage = false;
       workspace.selectService(node.id);
+    } else if (node.type === "leaf") {
+      if (node.specificationId) workspace.openSpecification(node.specificationId, node.operationKey, node.label);
+    } else if (node.type === "directory") {
+      if (node.specificationId) workspace.openSpecification(node.specificationId);
+      toggle(node.id);
     } else toggle(node.id);
   }
   function beginCreate(kind: NamingDraft["kind"], parentId: string | null = null) {

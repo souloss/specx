@@ -67,4 +67,43 @@ describe("resource tree interactions", () => {
     expect(wrapper.get('[data-tree-node="platform"]').attributes("aria-expanded")).toBe("false");
     expect(wrapper.find('[data-tree-node="svc-a"]').exists()).toBe(false);
   });
+  it("expands a service from its disclosure control without changing its selected view", async () => {
+    const navigation = useNavigationStore();
+    const service = catalogFixture().services.find((item) => item.id === "svc-a")!;
+    const catalog = useWorkspaceStore().catalog!;
+    catalog.specifications.push({
+      id: "spec-a",
+      serviceId: service.id,
+      title: "Accounts API",
+      kind: "openapi",
+      content: JSON.stringify({ openapi: "3.0.3", info: { title: "Accounts", version: "1" }, paths: { "/accounts": { get: { tags: ["Accounts"] } } } }),
+      version: 1,
+      contentHash: "sha256:test",
+      updatedAt: "2026-11-08",
+      etag: '"spec-v1"',
+    });
+    await nextTick();
+    const disclosure = wrapper.get('[data-tree-node="svc-a"] button[aria-expanded="false"]');
+    await disclosure.trigger("click");
+    await nextTick();
+    expect(wrapper.get('[data-tree-node="svc-a"]').attributes("aria-expanded")).toBe("true");
+    const provider = wrapper.get('[data-tree-node="specification-provider:svc-a:openapi"]');
+    expect(provider.text()).toContain("OpenAPI");
+    await provider.get('button[aria-expanded="false"]').trigger("click");
+    await nextTick();
+    expect(wrapper.get('[data-tree-node="specification:spec-a"]').text()).toContain("Accounts API");
+    expect(navigation.selectedId).not.toBe("specification:spec-a");
+  });
+  it("offers specification actions for document nodes instead of opening a service", async () => {
+    const serviceDisclosure = wrapper.get('[data-tree-node="svc-a"] button[aria-expanded="false"]');
+    await serviceDisclosure.trigger("click");
+    await nextTick();
+    const provider = wrapper.get('[data-tree-node="specification-provider:svc-a:markdown"]');
+    await provider.get('button[aria-expanded="false"]').trigger("click");
+    await nextTick();
+    await wrapper.get('[data-tree-node="specification:spec"]').trigger("contextmenu", { clientX: 60, clientY: 80 });
+    const menuButtons = Array.from(document.body.querySelectorAll("button"));
+    expect(menuButtons.some((button) => button.textContent?.includes("打开规范"))).toBe(true);
+    expect(menuButtons.some((button) => button.textContent?.includes("打开服务"))).toBe(false);
+  });
 });

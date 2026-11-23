@@ -38,6 +38,59 @@ describe("catalog navigation adaptation", () => {
     const found = filterResourceTree(nodes, "^billing$", catalog, "", /^billing$/i);
     expect(found[0].children![0].children).toHaveLength(1);
   });
+  it("projects OpenAPI JSON into a specification, tag, and operation tree", () => {
+    const catalog = catalogFixture();
+    catalog.specifications.push({
+      id: "openapi",
+      serviceId: "svc-b",
+      title: "Billing API",
+      kind: "openapi",
+      content: JSON.stringify({ openapi: "3.0.3", info: { title: "Billing", version: "1" }, paths: { "/invoices": { get: { tags: ["Invoices"], summary: "List invoices" } } } }),
+      version: 1,
+      contentHash: "sha256:openapi",
+      updatedAt: "2026-11-03",
+      etag: '"openapi-v1"',
+    });
+    const service = layoutTree(catalogSidebarLayout(catalog), catalog)[0]!.children![0]!.children!.find((node) => node.id === "svc-b")!;
+    const provider = service.children!.find((node) => node.providerKind === "openapi")!;
+    const specification = provider.children![0]!;
+    expect(provider.label).toContain("OpenAPI");
+    expect(specification.type).toBe("directory");
+    expect(specification.children![0]!.label).toBe("Invoices");
+    expect(specification.children![0]!.children![0]!.operationKey).toBe("GET:/invoices");
+  });
+  it("projects OpenAPI YAML into the same stable Tag and operation tree", () => {
+    const catalog = catalogFixture();
+    catalog.specifications.push({
+      id: "yaml-api",
+      serviceId: "svc-a",
+      title: "Accounts API",
+      kind: "openapi",
+      content: "openapi: 3.1.0\ninfo:\n  title: Accounts\n  version: '1'\npaths:\n  /accounts:\n    post:\n      tags: [Accounts]\n      summary: Create account\n",
+      version: 1,
+      contentHash: "sha256:yaml",
+      updatedAt: "2026-11-03",
+      etag: '"yaml-v1"',
+    });
+    const service = layoutTree(catalogSidebarLayout(catalog), catalog)[0]!.children![0]!.children!.find((node) => node.id === "svc-a")!;
+    const provider = service.children!.find((node) => node.providerKind === "openapi")!;
+    const specification = provider.children!.find((node) => node.specificationId === "yaml-api")!;
+    expect(specification.children![0]!.children![0]!.operationKey).toBe("POST:/accounts");
+  });
+  it("groups specifications from different providers under independent directories", () => {
+    const catalog = catalogFixture();
+    catalog.specifications.push({ ...catalog.specifications[0]!, id: "spec-2", title: "部署说明" });
+    const service = layoutTree(catalogSidebarLayout(catalog), catalog)[0]!.children![0]!.children!.find((node) => node.id === "svc-a")!;
+    expect(service.children).toHaveLength(1);
+    expect(service.children?.[0]).toMatchObject({ providerKind: "markdown", providerRoot: true });
+    expect(service.children?.[0]?.providerIcon).toBeTruthy();
+    expect(service.children?.[0]?.label).toBe("Markdown");
+    expect(service.children?.[0]?.children).toHaveLength(2);
+    expect(service.children?.[0]?.children?.map((node) => node.specificationId)).toEqual(expect.arrayContaining(["spec", "spec-2"]));
+    catalog.specifications.push({ ...catalog.specifications[0]!, id: "openapi-2", kind: "openapi", title: "Accounts API", content: JSON.stringify({ openapi: "3.0.3", info: { title: "Accounts", version: "1" }, paths: {} }) });
+    const withOpenApi = layoutTree(catalogSidebarLayout(catalog), catalog)[0]!.children![0]!.children!.find((node) => node.id === "svc-a")!;
+    expect(withOpenApi.children?.map((node) => node.providerKind).sort()).toEqual(["markdown", "openapi"]);
+  });
   it("rejects dragging a group into its own descendant without changing the source", () => {
     const layout = catalogSidebarLayout(catalogFixture());
     const snapshot = JSON.stringify(layout);

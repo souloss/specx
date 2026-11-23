@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { ArrowLeft, ArrowRight, Check, FileText, Grid2X2, List, Search } from "@lucide/vue";
+import { ArrowLeft, ArrowRight, Check, FileUp, Grid2X2, List, Search } from "@lucide/vue";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
+import OpenApiCodeEditor from "@/components/OpenApiCodeEditor.vue";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { specxApi } from "@/lib/backend/client";
 import { createId } from "@/lib/core";
 import { SPECIFICATION_TYPES, type SpecificationFieldDefinition, type SpecificationTypeDefinition } from "@/lib/specifications/registry";
+import { parseOpenApiContent } from "@/lib/openapi";
+import { readSpecificationFile } from "@/lib/specifications/fileImport";
 import type { SpecificationKind } from "@/types/domain";
 import type { RepositoryFileResponse, RepositoryRefsResponse, SpecificationRefKind } from "@/types/api";
 import { translate, type MessageKey } from "@/i18n";
@@ -19,15 +22,18 @@ const step = ref(1);
 const query = ref("");
 const selectedKind = ref<SpecificationKind>("markdown");
 const values = ref<Record<string, string>>({});
+const openapiFormat = ref<"json" | "yaml">("yaml");
 const error = ref("");
 const busy = ref(false);
 const serviceId = ref("");
 const viewMode = ref<"grid" | "list">("grid");
 const categoryFilter = ref("all");
-const sourceMode = ref<"specx" | "repository">("specx");
+const sourceMode = ref<"import" | "repository" | "specx">("import");
 const refKind = ref<SpecificationRefKind>("branch");
 const refName = ref("");
 const sourcePath = ref("");
+const importedFileName = ref("");
+const fileInput = ref<HTMLInputElement>();
 const repositoryLoading = ref(false);
 const repositoryRefsLoading = ref(false);
 const repositoryRefs = ref<RepositoryRefsResponse | null>(null);
@@ -52,12 +58,15 @@ const validSourcePath = computed(() => {
   if (value.split("/").some((part) => !part || part === ".")) return false;
   if ([...value].some((character) => "~^:?*[".includes(character))) return false;
   const lower = value.toLocaleLowerCase();
+  if (selectedKind.value === "openapi") return lower.endsWith(".json") || lower.endsWith(".yaml") || lower.endsWith(".yml");
   return lower.endsWith(".md") || lower.endsWith(".markdown");
 });
 const canContinue = computed(() => {
   if (currentStep.value.kind === "type-picker") return Boolean(selectedKind.value);
   const fieldsReady = currentStep.value.fields?.every((field) => !field.required || fieldValue(field).trim()) !== false;
-  if (currentStep.value.kind !== "fields" || sourceMode.value === "specx") return fieldsReady;
+  if (currentStep.value.kind !== "fields") return true;
+  if (sourceMode.value === "specx") return fieldsReady;
+  if (sourceMode.value === "import") return Boolean(importedFileName.value && values.value.title?.trim() && values.value.content?.trim()) && (selectedKind.value !== "openapi" || Boolean(parseOpenApiContent(values.value.content ?? "")));
   return Boolean(serviceRepository.value) && Boolean(repositoryRefs.value) && availableRefs.value.includes(refName.value) && validSourcePath.value;
 });
 
@@ -79,10 +88,12 @@ watch(open, (value) => {
   categoryFilter.value = "all";
   selectedKind.value = "markdown";
   values.value = initialValues(selectedType.value);
-  sourceMode.value = "specx";
+  openapiFormat.value = "yaml";
+  sourceMode.value = "import";
   refKind.value = "branch";
   refName.value = "";
   sourcePath.value = "";
+  importedFileName.value = "";
   repositoryRefs.value = null;
   repositoryRefsLoading.value = false;
   error.value = "";
@@ -124,14 +135,38 @@ watch(
 function selectType(kind: SpecificationKind) {
   selectedKind.value = kind;
   const type = SPECIFICATION_TYPES.find((item) => item.kind === kind);
-  if (type) values.value = { ...initialValues(type), ...values.value };
+  if (type) values.value = { ...initialValues(type), title: values.value.title ?? "" };
+  importedFileName.value = "";
+  if (fileInput.value) fileInput.value.value = "";
+  openapiFormat.value = "yaml";
 }
 function fieldValue(field: Pick<SpecificationFieldDefinition, "id">) {
   return values.value[field.id] ?? "";
 }
-function updateField(field: SpecificationFieldDefinition, event: Event) {
+function updateField(field: Pick<SpecificationFieldDefinition, "id">, event: Event) {
   const value = (event.target as HTMLInputElement | HTMLTextAreaElement).value;
   values.value = { ...values.value, [field.id]: value };
+}
+async function importFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  error.value = "";
+  try {
+    const imported = await readSpecificationFile(file, selectedKind.value);
+    values.value = { ...values.value, title: imported.title, content: imported.content };
+    if (imported.format) openapiFormat.value = imported.format;
+    importedFileName.value = imported.fileName;
+  } catch (cause) {
+    const code = cause instanceof Error ? cause.message : "read_failed";
+    const messageKey = code === "unsupported_type" ? "specification.importFileTypeInvalid" : code === "too_large" ? "specification.importFileTooLarge" : code === "invalid_openapi" ? "specification.importOpenApiInvalid" : "specification.importFileFailed";
+    error.value = t(messageKey);
+    importedFileName.value = "";
+    input.value = "";
+  }
+}
+function chooseImportFile() {
+  fileInput.value?.click();
 }
 function next() {
   if (!canContinue.value || step.value >= selectedType.value.steps.length) return;
@@ -153,6 +188,10 @@ async function save() {
         throw new Error(t("specification.sourcePathNotFound"));
       }
       request.source = { path: sourcePath.value.trim(), refKind: refKind.value, refName: refName.value.trim() };
+    }
+    if (sourceMode.value === "import") {
+      request.title = values.value.title?.trim() || importedFileName.value.replace(/\.(markdown|md|yaml|yml|json)$/i, "");
+      request.content = values.value.content ?? "";
     }
     await specxApi.createSpecification(workspace.catalog.workspace.id, request);
     await workspace.refresh();
@@ -209,7 +248,7 @@ async function save() {
             <div class="min-h-0 flex-1 overflow-y-auto p-3">
               <div class="gap-2" :class="viewMode === 'grid' ? 'grid sm:grid-cols-2' : 'flex flex-col'">
                 <button v-for="item in visibleTypes" :key="item.kind" type="button" class="flex items-start gap-3 rounded-md border p-3 text-left transition-colors hover:bg-accent" :class="selectedKind === item.kind ? 'border-primary bg-accent' : 'border-border'" @click="selectType(item.kind)">
-                  <FileText class="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+                  <component :is="item.icon" class="mt-0.5 h-5 w-5 shrink-0 text-primary" />
                   <span class="min-w-0"
                     ><strong class="block text-sm font-medium">{{ t(item.titleKey) }}</strong
                     ><span class="mt-1 block text-xs leading-relaxed text-muted-foreground">{{ t(item.descriptionKey) }}</span></span
@@ -228,7 +267,11 @@ async function save() {
           <fieldset class="space-y-3">
             <legend class="text-sm font-medium">{{ t("specification.sourceMode") }}</legend>
             <p class="text-xs text-muted-foreground">{{ t("specification.sourceModeDescription") }}</p>
-            <div class="grid gap-2 sm:grid-cols-2">
+            <div class="grid gap-2 sm:grid-cols-3">
+              <button type="button" class="rounded-md border p-3 text-left transition-colors hover:bg-accent" :class="sourceMode === 'import' ? 'border-primary bg-accent' : 'border-border'" :aria-pressed="sourceMode === 'import'" :disabled="busy" @click="sourceMode = 'import'">
+                <strong class="block text-sm">{{ t("specification.sourceModeImport") }}</strong>
+                <span class="mt-1 block text-xs leading-relaxed text-muted-foreground">{{ t("specification.sourceModeImportDescription") }}</span>
+              </button>
               <button type="button" class="rounded-md border p-3 text-left transition-colors hover:bg-accent" :class="sourceMode === 'specx' ? 'border-primary bg-accent' : 'border-border'" :aria-pressed="sourceMode === 'specx'" :disabled="busy" @click="sourceMode = 'specx'">
                 <strong class="block text-sm">{{ t("specification.sourceModeSpecx") }}</strong>
                 <span class="mt-1 block text-xs leading-relaxed text-muted-foreground">{{ t("specification.sourceModeSpecxDescription") }}</span>
@@ -239,6 +282,21 @@ async function save() {
               </button>
             </div>
           </fieldset>
+          <div v-if="sourceMode === 'import'" class="space-y-3 rounded-md border border-border bg-muted/10 p-4">
+            <input ref="fileInput" type="file" class="sr-only" :accept="selectedKind === 'markdown' ? '.md,.markdown,text/markdown' : '.json,.yaml,.yml,application/json,application/yaml,text/yaml'" :aria-label="t('specification.importFile')" @change="importFile" />
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div class="min-w-0">
+                <div class="text-sm font-medium">{{ importedFileName || t("specification.importFileEmpty") }}</div>
+                <div class="text-xs text-muted-foreground">{{ t("specification.importFileDescription", { extensions: selectedKind === "markdown" ? ".md, .markdown" : ".json, .yaml, .yml" }) }}</div>
+              </div>
+              <Button type="button" variant="outline" size="sm" :disabled="busy" @click="chooseImportFile"><FileUp class="h-3.5 w-3.5" />{{ importedFileName ? t("specification.replaceImportFile") : t("specification.chooseImportFile") }}</Button>
+            </div>
+            <label class="settings-field">
+              {{ t("specification.title") }}
+              <input :value="values.title" class="settings-input" required autocomplete="off" @input="updateField({ id: 'title' }, $event)" />
+            </label>
+            <p v-if="importedFileName && selectedKind === 'openapi' && !parseOpenApiContent(values.content ?? '')" class="text-xs text-destructive">{{ t("specification.importOpenApiInvalid") }}</p>
+          </div>
           <div v-if="sourceMode === 'repository'" class="space-y-4 rounded-md border border-primary/30 bg-primary/5 p-3">
             <p class="text-sm text-muted-foreground">{{ t("specification.sourceRepositoryDescription") }}</p>
             <p v-if="repositoryLoading" class="text-sm text-muted-foreground">{{ t("service.repositoryLoading") }}</p>
@@ -284,6 +342,7 @@ async function save() {
             <label v-for="field in currentStep.fields ?? []" :key="field.id" class="settings-field">
               {{ t(field.labelKey) }}
               <input v-if="field.control === 'text'" :value="fieldValue(field)" class="settings-input" :required="field.required" autofocus @input="updateField(field, $event)" />
+              <OpenApiCodeEditor v-else-if="selectedKind === 'openapi' && field.id === 'content'" :model-value="fieldValue(field)" :label="t(field.labelKey)" :format="openapiFormat" compact @update:model-value="values = { ...values, [field.id]: $event }" @update:format="openapiFormat = $event" />
               <textarea v-else :value="fieldValue(field)" class="settings-input min-h-56 resize-y font-mono" :rows="field.rows ?? 8" :required="field.required" @input="updateField(field, $event)" />
             </label>
           </template>
@@ -295,12 +354,18 @@ async function save() {
               <dt class="text-muted-foreground">{{ t("specification.type") }}</dt>
               <dd>{{ t(selectedType.titleKey) }}</dd>
               <dt class="text-muted-foreground">{{ t("specification.sourceMode") }}</dt>
-              <dd>{{ t(sourceMode === "repository" ? "specification.sourceModeRepository" : "specification.sourceModeSpecx") }}</dd>
+              <dd>{{ t(sourceMode === "repository" ? "specification.sourceModeRepository" : sourceMode === "import" ? "specification.sourceModeImport" : "specification.sourceModeSpecx") }}</dd>
               <template v-if="sourceMode === 'repository'">
                 <dt class="text-muted-foreground">{{ t("specification.sourcePath") }}</dt>
                 <dd class="truncate">{{ sourcePath }}</dd>
                 <dt class="text-muted-foreground">{{ t("specification.refName") }}</dt>
                 <dd class="truncate">{{ refName }}</dd>
+              </template>
+              <template v-if="sourceMode === 'import'">
+                <dt class="text-muted-foreground">{{ t("specification.title") }}</dt>
+                <dd class="truncate">{{ values.title }}</dd>
+                <dt class="text-muted-foreground">{{ t("specification.importFile") }}</dt>
+                <dd class="truncate">{{ importedFileName }}</dd>
               </template>
               <template v-if="sourceMode === 'specx'">
                 <template v-for="summaryField in currentStep.summaryFields ?? []" :key="summaryField.id">
@@ -310,7 +375,7 @@ async function save() {
               </template>
             </dl>
           </div>
-          <p class="text-xs text-muted-foreground">{{ t(sourceMode === "repository" ? "specification.confirmRepositoryDescription" : "specification.confirmDescription") }}</p>
+          <p class="text-xs text-muted-foreground">{{ t(sourceMode === "repository" ? "specification.confirmRepositoryDescription" : sourceMode === "import" ? "specification.confirmImportDescription" : "specification.confirmDescription") }}</p>
         </section>
         <p v-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
         <DialogFooter>

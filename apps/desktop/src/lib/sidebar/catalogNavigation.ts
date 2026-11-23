@@ -1,6 +1,9 @@
-import type { Catalog } from "@/types/domain";
+import type { Catalog, SpecificationKind } from "@/types/domain";
 import type { ResourceTreeNode, SidebarLayout, SidebarOrderEntry } from "@/types/navigation";
 import { UNGROUPED_GROUP_ID } from "@/lib/core";
+import { getOpenApiOperations } from "@/lib/openapi";
+import { specificationType } from "@/lib/specifications/registry";
+import { translate } from "@/i18n";
 
 /** The catalog owns hierarchy; browser storage owns only display order and expansion.
  * A stale local layout must never move a shared service back to an old group. */
@@ -39,8 +42,62 @@ export function catalogSidebarLayout(catalog: Catalog, saved?: SidebarLayout | n
 
 export function layoutTree(layout: SidebarLayout, catalog: Catalog): ResourceTreeNode[] {
   const names = new Map([...catalog.groups, ...catalog.services].map((item) => [item.id, item.name]));
+  const specificationChildren = (serviceId: string, parentId: string): ResourceTreeNode[] => {
+    const specifications = catalog.specifications.filter((specification) => specification.serviceId === serviceId);
+    const byProvider = new Map<SpecificationKind, typeof specifications>();
+    for (const specification of specifications) {
+      const group = byProvider.get(specification.kind) ?? [];
+      group.push(specification);
+      byProvider.set(specification.kind, group);
+    }
+
+    return [...byProvider.entries()]
+      .sort(([left], [right]) => translate(specificationType(left).directoryKey).localeCompare(translate(specificationType(right).directoryKey)))
+      .map(([kind, providerSpecifications]) => {
+        const provider = specificationType(kind);
+        const providerId = `specification-provider:${serviceId}:${kind}`;
+        return {
+          id: providerId,
+          label: translate(provider.directoryKey),
+          type: "directory" as const,
+          parentId,
+          serviceId,
+          providerKind: kind,
+          providerIcon: provider.icon,
+          providerRoot: true,
+          children: providerSpecifications
+            .sort((left, right) => left.title.localeCompare(right.title))
+            .map((specification) => {
+              const providerMetadata = { providerKind: kind, providerIcon: provider.icon } as const;
+              if (kind !== "openapi") return { id: `specification:${specification.id}`, label: specification.title, type: "leaf" as const, parentId: providerId, serviceId, specificationId: specification.id, ...providerMetadata };
+              const tags = new Map<string, ResourceTreeNode>();
+              for (const operation of getOpenApiOperations(specification.content)) {
+                for (const tag of operation.tags) {
+                  const tagId = `specification:${specification.id}:tag:${tag}`;
+                  const tagNode = tags.get(tag) ?? { id: tagId, label: tag, type: "directory" as const, parentId: `specification:${specification.id}`, serviceId, specificationId: specification.id, ...providerMetadata, children: [] };
+                  tagNode.children!.push({
+                    id: `specification:${specification.id}:operation:${operation.identityKey}:${tag}`,
+                    label: `${operation.method.toUpperCase()} ${operation.path}`,
+                    type: "leaf",
+                    parentId: tagId,
+                    serviceId,
+                    specificationId: specification.id,
+                    operationKey: operation.identityKey,
+                    ...providerMetadata,
+                  });
+                  tags.set(tag, tagNode);
+                }
+              }
+              return { id: `specification:${specification.id}`, label: specification.title, type: "directory" as const, parentId: providerId, serviceId, specificationId: specification.id, ...providerMetadata, children: [...tags.values()].sort((a, b) => a.label.localeCompare(b.label)) };
+            }),
+        };
+      });
+  };
   function visit(entries: SidebarOrderEntry[], parentId: string | null): ResourceTreeNode[] {
-    return entries.map((entry) => ({ id: entry.id, label: names.get(entry.id) ?? "", parentId, type: entry.type === "group" ? "resource-group" : "resource", children: entry.type === "group" ? visit(entry.children ?? [], entry.id) : undefined }));
+    return entries.map((entry) => {
+      if (entry.type === "group") return { id: entry.id, label: names.get(entry.id) ?? "", parentId, type: "resource-group" as const, children: visit(entry.children ?? [], entry.id) };
+      return { id: entry.id, label: names.get(entry.id) ?? "", parentId, type: "resource" as const, resourceId: entry.id, serviceId: entry.id, children: specificationChildren(entry.id, entry.id) };
+    });
   }
   return visit(layout.order, null);
 }
@@ -61,7 +118,10 @@ export function filterResourceTree(nodes: ResourceTreeNode[], query: string, cat
     return items.flatMap((node) => {
       const service = services.get(node.id);
       const textMatch = (!needle && !searchRegex) || ancestorMatches || [node.label, service?.slug, service?.description].some(matches);
-      if (node.type === "resource") return textMatch && (!tagId || service?.tagIds.includes(tagId)) ? [node] : [];
+      if (node.type === "resource") {
+        const children = visit(node.children ?? [], textMatch && !!needle);
+        return textMatch && (!tagId || service?.tagIds.includes(tagId)) ? [{ ...node, children }] : [];
+      }
       const children = visit(node.children ?? [], textMatch && !!needle);
       return children.length || (textMatch && !tagId) ? [{ ...node, children }] : [];
     });

@@ -841,12 +841,14 @@ impl From<Service> for ServiceResponse {
 #[serde(rename_all = "snake_case")]
 pub enum SpecificationKindResponse {
     Markdown,
+    Openapi,
 }
 
 impl From<SpecificationKind> for SpecificationKindResponse {
     fn from(kind: SpecificationKind) -> Self {
         match kind {
             SpecificationKind::Markdown => Self::Markdown,
+            SpecificationKind::OpenApi => Self::Openapi,
         }
     }
 }
@@ -1104,7 +1106,11 @@ async fn discover_repository_files(
         .into_iter()
         .filter(|file| {
             let path = file.path.to_ascii_lowercase();
-            path.ends_with(".md") || path.ends_with(".markdown")
+            path.ends_with(".md")
+                || path.ends_with(".markdown")
+                || path.ends_with(".json")
+                || path.ends_with(".yaml")
+                || path.ends_with(".yml")
         })
         .map(|file| RepositoryFileResponse {
             path: file.path,
@@ -3503,6 +3509,12 @@ async fn persist_repository_snapshot(
                 || file.path.to_ascii_lowercase().ends_with(".markdown")
             {
                 "text/markdown; charset=utf-8".into()
+            } else if file.path.to_ascii_lowercase().ends_with(".json") {
+                "application/json".into()
+            } else if file.path.to_ascii_lowercase().ends_with(".yaml")
+                || file.path.to_ascii_lowercase().ends_with(".yml")
+            {
+                "application/yaml".into()
             } else {
                 "application/octet-stream".into()
             },
@@ -3586,6 +3598,8 @@ async fn sync_specification(
         read_repository_snapshot_file(&state, &inner, &snapshot.id, &binding.path)?
     };
     let content_hash = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+    let kind = expected.kind;
+    validate_specification_content(kind, &content)?;
     let changed = expected.content_hash != content_hash;
     let (specification, snapshot_id) = if changed {
         let mut inner = state.inner.lock().await;
@@ -3933,6 +3947,8 @@ pub struct CreateSpecificationRequest {
     pub title: String,
     pub content: String,
     #[serde(default)]
+    pub kind: Option<SpecificationKindResponse>,
+    #[serde(default)]
     pub source: Option<CreateSpecificationSourceRequest>,
 }
 
@@ -3950,6 +3966,13 @@ pub struct CreateSpecificationSourceRequest {
 pub struct UpdateSpecificationRequest {
     pub title: String,
     pub content: String,
+}
+
+fn validate_specification_content(kind: SpecificationKind, content: &str) -> Result<(), ApiError> {
+    if kind == SpecificationKind::OpenApi {
+        specx_formats::parse_openapi(content).map_err(|_| ApiError::InvalidInput)?;
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -4002,12 +4025,20 @@ async fn create_specification(
             return Ok(response_with_etag(response, etag));
         }
     }
-    let CreateSpecificationRequest { id, service_id, title, content, source } = input;
+    let CreateSpecificationRequest { id, service_id, title, content, kind, source } = input;
+    let kind = match kind.unwrap_or(SpecificationKindResponse::Markdown) {
+        SpecificationKindResponse::Markdown => SpecificationKind::Markdown,
+        SpecificationKindResponse::Openapi => SpecificationKind::OpenApi,
+    };
     if let Some(source) = &source {
         if source.ref_kind == SpecificationRefKind::Commit {
             return Err(ApiError::InvalidInput);
         }
-        specx_controller::validate_markdown_path(&source.path).map_err(|_| ApiError::InvalidInput)?;
+        match kind {
+            SpecificationKind::Markdown => specx_controller::validate_markdown_path(&source.path),
+            SpecificationKind::OpenApi => specx_controller::validate_openapi_path(&source.path),
+        }
+        .map_err(|_| ApiError::InvalidInput)?;
     }
     let source_content = if state.repository_validation {
         if let Some(source) = &source {
@@ -4039,18 +4070,26 @@ async fn create_specification(
     } else {
         None
     };
+    let effective_content = source_content.unwrap_or(content);
+    validate_specification_content(kind, &effective_content)?;
     let mut inner = state.inner.lock().await;
     let mut core = load_core(&mut inner, &context)?;
     let title = if title.trim().is_empty() {
         source
             .as_ref()
             .and_then(|source| source.path.rsplit('/').next())
-            .map(|name| name.trim_end_matches(".markdown").trim_end_matches(".md").to_owned())
+            .map(|name| {
+                [".markdown", ".md", ".openapi", ".yaml", ".yml", ".json"]
+                    .iter()
+                    .find_map(|extension| name.strip_suffix(extension))
+                    .unwrap_or(name)
+                    .to_owned()
+            })
             .unwrap_or_else(|| "Untitled specification".into())
     } else {
         title
     };
-    let specification = core.create_markdown_specification(
+    let specification = core.create_specification(
         &context,
         Specification {
             id,
@@ -4058,8 +4097,8 @@ async fn create_specification(
             workspace_id: context.workspace_id.clone(),
             service_id,
             title,
-            kind: SpecificationKind::Markdown,
-            content: source_content.unwrap_or(content),
+            kind,
+            content: effective_content,
             version: 1,
             content_hash: String::new(),
             updated_at: Utc::now().to_rfc3339(),
@@ -4173,7 +4212,8 @@ async fn update_specification(
     if !expected_etags.iter().any(|if_match| if_match_satisfies(if_match, &current_etag)) {
         return Err(ApiError::PreconditionFailed);
     }
-    let updated = core.update_markdown_specification(&context, &specification_id, input.title, input.content)?;
+    validate_specification_content(existing.kind, &input.content)?;
+    let updated = core.update_specification(&context, &specification_id, input.title, input.content)?;
     let audit = audit_event(&context, &headers, "update", "specification", &specification_id);
     if !inner.store.update_specification_if_current_with_audit(&context, &existing, &updated, Some(&audit))? {
         return Err(ApiError::PreconditionFailed);

@@ -323,4 +323,5 @@ pub struct Specification {
 #[serde(rename_all = "snake_case")]
 pub enum SpecificationKind {
     Markdown,
+    OpenApi,
 }

@@ -116,6 +116,28 @@ describe("catalog loading", () => {
     expect(workspace.specificationDraft("spec")).toBeUndefined();
   });
 
+  it("preserves an OpenAPI operation view when saving its source document", async () => {
+    const workspace = useWorkspaceStore();
+    workspace.catalog = catalogFixture();
+    const specification = workspace.catalog.specifications[0]!;
+    specification.kind = "openapi";
+    specification.content = JSON.stringify({ openapi: "3.0.3", info: { title: "Accounts", version: "1" }, paths: {} });
+    workspace.openSpecification("spec", "GET:/accounts", "List accounts");
+    workspace.beginSpecificationEdit("spec");
+    workspace.updateSpecificationDraft("spec", { title: "Accounts API", content: JSON.stringify({ openapi: "3.0.3", info: { title: "Accounts", version: "1" }, paths: {} }, null, 2) });
+    vi.mocked(specxApi.updateSpecification).mockResolvedValue({
+      ...specification,
+      title: "Accounts API",
+      version: 2,
+      etag: '"spec-v2"',
+    });
+
+    await expect(workspace.saveSpecification("spec")).resolves.toBe(true);
+
+    expect(workspace.catalog?.specifications[0]).toMatchObject({ kind: "openapi", title: "Accounts API", version: 2 });
+    expect(workspace.tabs[0]).toMatchObject({ operationKey: "GET:/accounts", title: "List accounts" });
+  });
+
   it("retains the draft and records the remote representation on an ETag conflict", async () => {
     const workspace = useWorkspaceStore();
     workspace.catalog = catalogFixture();
